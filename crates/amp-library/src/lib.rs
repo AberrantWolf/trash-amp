@@ -51,6 +51,13 @@ impl Store {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ScanProgress {
+    pub discovered: usize,
+    pub completed: usize,
+    pub total: Option<usize>,
+}
+
 pub struct FilesystemProvider {
     pub root: PathBuf,
     pub preferences: Preferences,
@@ -65,7 +72,7 @@ impl FilesystemProvider {
     pub fn scan_with_progress(
         &self,
         cancelled: &dyn Fn() -> bool,
-        progress: &mut dyn FnMut(usize),
+        progress: &mut dyn FnMut(ScanProgress),
     ) -> Result<Library> {
         let root = self
             .root
@@ -89,12 +96,28 @@ impl FilesystemProvider {
                 bail!("Scan cancelled")
             }
             match entry {
-                Ok(e) if e.file_type().is_file() => paths.push(e.into_path()),
+                Ok(e) if e.file_type().is_file() => {
+                    paths.push(e.into_path());
+                    if paths.len() % 128 == 0 {
+                        progress(ScanProgress {
+                            discovered: paths.len(),
+                            completed: 0,
+                            total: None,
+                        });
+                    }
+                }
                 Err(e) => library.warnings.push(e.to_string()),
                 _ => {}
             }
         }
         paths.sort();
+        let total = paths.len();
+        let mut completed = 0;
+        progress(ScanProgress {
+            discovered: total,
+            completed,
+            total: Some(total),
+        });
         let mut claimed = HashSet::new();
         let cue_packages: HashSet<_> = paths
             .iter()
@@ -108,6 +131,7 @@ impl FilesystemProvider {
             if cancelled() {
                 bail!("Scan cancelled")
             }
+            completed += 1;
             match disc_album(path, &library.id, &self.preferences) {
                 Ok((album, files)) => {
                     claimed.extend(files);
@@ -115,25 +139,76 @@ impl FilesystemProvider {
                 }
                 Err(e) => library.warnings.push(format!("{}: {e:#}", path.display())),
             }
+            progress(ScanProgress {
+                discovered: total,
+                completed,
+                total: Some(total),
+            });
         }
         let mut groups: BTreeMap<(PathBuf, String, Option<String>), AlbumFragment> =
             BTreeMap::new();
-        for (i, path) in paths.iter().enumerate() {
+        let audio_paths: Vec<_> = paths
+            .iter()
+            .filter(|path| {
+                !claimed.contains(*path)
+                    && matches!(
+                        extension(path).as_str(),
+                        "flac" | "mp3" | "wav" | "aiff" | "aif" | "ogg" | "m4a" | "aac" | "opus"
+                    )
+            })
+            .collect();
+        completed = total - audio_paths.len();
+        // Four readers hide network latency without flooding a NAS with open files.
+        use std::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc,
+        };
+        let next = AtomicUsize::new(0);
+        let stop = AtomicBool::new(false);
+        let results = std::thread::scope(|scope| -> Result<Vec<_>> {
+            let (tx, rx) = mpsc::sync_channel(16);
+            for _ in 0..4.min(audio_paths.len()) {
+                let (next, stop, paths, tx, id) =
+                    (&next, &stop, &audio_paths, tx.clone(), &library.id);
+                scope.spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(path) = paths.get(i) else { break };
+                        if tx.send((i, tagged_track(path, id))).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(tx);
+            let mut results = Vec::new();
+            loop {
+                if cancelled() {
+                    stop.store(true, Ordering::Relaxed);
+                }
+                match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                    Ok(result) => {
+                        results.push(result);
+                        completed += 1;
+                        progress(ScanProgress {
+                            discovered: total,
+                            completed,
+                            total: Some(total),
+                        });
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
             if cancelled() {
                 bail!("Scan cancelled")
             }
-            if i % 32 == 0 {
-                progress(i);
-            }
-            if claimed.contains(path)
-                || !matches!(
-                    extension(path).as_str(),
-                    "flac" | "mp3" | "wav" | "aiff" | "aif" | "ogg" | "m4a" | "aac" | "opus"
-                )
-            {
-                continue;
-            }
-            match tagged_track(path, &library.id) {
+            results.sort_by_key(|r| r.0);
+            Ok(results)
+        })?;
+        for (i, result) in results {
+            let path = audio_paths[i];
+            match result {
                 Ok((title, album_artist, tagged, track)) => {
                     let parent = path.parent().unwrap().to_owned();
                     let key = (
@@ -189,6 +264,11 @@ impl FilesystemProvider {
         }
         library.albums.sort_by(|a, b| {
             (&a.artist, &a.title, &a.id.item).cmp(&(&b.artist, &b.title, &b.id.item))
+        });
+        progress(ScanProgress {
+            discovered: total,
+            completed: total,
+            total: Some(total),
         });
         Ok(library)
     }
@@ -255,7 +335,9 @@ fn id(library: &str, item: String) -> ItemId {
     }
 }
 fn tagged_track(path: &Path, library: &str) -> Result<(String, Option<String>, bool, Track)> {
-    let file = Probe::open(path)?.read()?;
+    let file = Probe::open(path)?
+        .options(lofty::config::ParseOptions::new().read_cover_art(false))
+        .read()?;
     let tag = file.primary_tag().or_else(|| file.first_tag());
     let folder = path
         .parent()
@@ -332,27 +414,9 @@ fn disc_album(
     };
     let sidecars = redumper::find_sidecars(path);
     let raw_present = sidecars.scram.is_some();
-    let raw = if raw_present {
-        Some(redumper::pcm::read_audio_layout(&sidecars))
-    } else {
-        None
-    };
-    let bin = CueAudioDisc::open(path);
-    let use_raw =
-        raw_present && (preferences.dump_preference == DumpPreference::Redumper || bin.is_err());
-    let layouts: Vec<(u8, f64, bool)> = if use_raw {
-        raw.unwrap()?
-            .iter()
-            .map(|t| {
-                (
-                    t.number,
-                    (t.end_frame - t.start_frame) as f64 / 44100.0,
-                    t.pre_emphasis,
-                )
-            })
-            .collect()
-    } else {
-        bin?.tracks
+    let bin_layout = || -> Result<Vec<(u8, f64, bool)>> {
+        Ok(CueAudioDisc::open(path)?
+            .tracks
             .iter()
             .filter(|t| t.kind == TrackKind::Audio)
             .map(|t| {
@@ -362,8 +426,33 @@ fn disc_album(
                     t.pre_emphasis,
                 )
             })
-            .collect()
+            .collect())
     };
+    let raw_layout = || -> Result<Vec<(u8, f64, bool)>> {
+        Ok(redumper::pcm::read_audio_layout(&sidecars)?
+            .iter()
+            .map(|t| {
+                (
+                    t.number,
+                    (t.end_frame - t.start_frame) as f64 / 44100.0,
+                    t.pre_emphasis,
+                )
+            })
+            .collect())
+    };
+    let (layouts, use_raw) =
+        if raw_present && preferences.dump_preference == DumpPreference::Redumper {
+            (raw_layout()?, true)
+        } else {
+            match bin_layout() {
+                Ok(l) => (l, false),
+                Err(e) if raw_present => (
+                    raw_layout().with_context(|| format!("CUE layout: {e:#}"))?,
+                    true,
+                ),
+                Err(e) => return Err(e),
+            }
+        };
     let has_emphasis = layouts.iter().any(|t| t.2);
     let cdtext = sidecars
         .cdtext
@@ -518,6 +607,67 @@ pub fn demo_library() -> Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn progress_counts_all_files_and_finishes_monotonically() {
+        let dir = tempfile::tempdir().unwrap();
+        for n in 1..=12 {
+            write_track(
+                dir.path(),
+                &format!("{n}.wav"),
+                Some("Album"),
+                "Artist",
+                n,
+                Some("Album Artist"),
+            );
+        }
+        std::fs::write(dir.path().join("notes.txt"), "notes").unwrap();
+        std::fs::write(dir.path().join("bad.flac"), "invalid").unwrap();
+        let mut events = Vec::new();
+        let library = FilesystemProvider {
+            root: dir.path().into(),
+            preferences: Preferences::default(),
+        }
+        .scan_with_progress(&|| false, &mut |p| events.push(p))
+        .unwrap();
+        assert_eq!(library.albums[0].artist, "Album Artist");
+        assert_eq!(library.albums[0].tracks.len(), 12);
+        assert_eq!(library.warnings.len(), 1);
+        let last = events.last().unwrap();
+        assert_eq!(last.total, Some(14));
+        assert_eq!(last.completed, 14);
+        assert!(events.windows(2).all(|w| w[0].completed <= w[1].completed));
+        assert!(
+            events
+                .iter()
+                .all(|p| p.completed <= p.total.unwrap_or(usize::MAX))
+        );
+    }
+    #[test]
+    fn cancellation_during_parallel_reads_drains_workers() {
+        use std::cell::Cell;
+        let dir = tempfile::tempdir().unwrap();
+        for n in 1..=20 {
+            write_track(
+                dir.path(),
+                &format!("{n}.wav"),
+                Some("Album"),
+                "Artist",
+                n,
+                None,
+            );
+        }
+        let stop = Cell::new(false);
+        let result = FilesystemProvider {
+            root: dir.path().into(),
+            preferences: Preferences::default(),
+        }
+        .scan_with_progress(&|| stop.get(), &mut |p| {
+            if p.completed > 0 {
+                stop.set(true);
+            }
+        });
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+    }
     #[test]
     fn preference_roundtrip_and_library_replacement() {
         let dir = tempfile::tempdir().unwrap();

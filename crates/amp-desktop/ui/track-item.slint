@@ -1,0 +1,31 @@
+import { Button } from "std-widgets.slint";
+export struct TrackRow { title: string, duration: string, number: string }
+export component TrackItem inherits Rectangle {
+    in property <TrackRow> track;
+    in property <float> text-scale: 1;
+    in property <bool> selected;
+    in property <bool> current;
+    callback select(); callback play(); callback enqueue();
+    height: 48px * root.text-scale;
+    accessible-role: list-item;
+    accessible-label: root.track.title + (root.current ? ", current track" : "");
+    accessible-action-default => { root.play(); }
+    background: root.selected ? #3a5062 : (row.has-hover || play-touch.has-hover ? #303c47 : transparent);
+    row := TouchArea { x: 42px; width: parent.width - 90px; clicked => { root.select(); } double-clicked => { root.play(); } }
+    HorizontalLayout {
+        spacing: 10px;
+        Rectangle {
+            width: 36px;
+            Text { visible: !row.has-hover && !play-touch.has-hover; text: root.current ? "▶" : root.track.number; color: root.current ? #7ca7c9 : #8099ad; vertical-alignment: center; horizontal-alignment: center; }
+            Image { visible: row.has-hover || play-touch.has-hover; source: @image-url("icons/play.svg"); width: 18px; height: 18px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+            play-touch := TouchArea {
+                accessible-role: button; accessible-label: "Play " + root.track.title;
+                accessible-action-default => { root.play(); }
+                clicked => { root.play(); }
+            }
+        }
+        Text { text: root.track.title; color: #e1e8ef; overflow: elide; vertical-alignment: center; }
+        Text { text: root.track.duration; color: #9eafbd; width: 44px; vertical-alignment: center; }
+        Button { text: "+"; accessible-label: "Add " + root.track.title + " to up next"; width: 36px; clicked => { root.enqueue(); } }
+    }
+}

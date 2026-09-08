@@ -130,7 +130,13 @@ fn query_for(album: &Album) -> Result<Option<Query>> {
             ))
         }
         MediaAccess::File { locator } => {
-            let file = Probe::open(locator)?.read()?;
+            let file = Probe::open(locator)?
+                .options(
+                    lofty::config::ParseOptions::new()
+                        .read_cover_art(false)
+                        .read_properties(false),
+                )
+                .read()?;
             if let Some(id) = file
                 .primary_tag()
                 .or_else(|| file.first_tag())
@@ -440,6 +446,26 @@ fn choose(album: &Album, query: &Query, response: &Value) -> MatchRecord {
             record.names = Some(first.clone());
         } else {
             record.status = "ambiguous".into();
+            // Translated track lists must not suppress an agreed album identity.
+            // Keep only unanimous fields; never choose a language/edition arbitrarily.
+            if candidates
+                .iter()
+                .all(|n| n.title == first.title && n.artist == first.artist)
+            {
+                let mut common = first.clone();
+                for (i, track) in common.tracks.iter_mut().enumerate() {
+                    if !candidates.iter().all(|n| n.tracks[i].title == track.title) {
+                        track.title.clear();
+                    }
+                    if !candidates
+                        .iter()
+                        .all(|n| n.tracks[i].artist == track.artist)
+                    {
+                        track.artist.clear();
+                    }
+                }
+                record.names = Some(common);
+            }
         }
     }
     record
@@ -479,10 +505,10 @@ fn apply(album: &mut Album, names: &Names) -> bool {
             .iter()
             .find(|n| n.disc == t.disc && n.number == t.number)
         {
-            if missing_track_title(t) {
+            if !n.title.is_empty() && missing_track_title(t) {
                 t.title = n.title.clone();
             }
-            if unknown(&t.artist) {
+            if !n.artist.is_empty() && unknown(&t.artist) {
                 t.artist = n.artist.clone();
             }
         }
@@ -560,35 +586,59 @@ fn enrich_with(
     cancelled: &dyn Fn() -> bool,
     update: &mut dyn FnMut(&Album),
 ) -> Result<()> {
-    // Cache pass first: offline metadata appears without waiting for unrelated network requests.
-    let mut work = Vec::new();
-    for (index, album) in library.albums.iter_mut().enumerate() {
-        if cancelled() {
-            return Ok(());
+    // Prioritize discs: a network library may have thousands of untagged files
+    // whose probes would otherwise delay every raw-disc lookup.
+    for discs in [true, false] {
+        let mut work = Vec::new();
+        for (index, album) in library.albums.iter_mut().enumerate() {
+            let is_disc = album.tracks.first().is_some_and(|t| {
+                matches!(
+                    t.access,
+                    MediaAccess::DiscTrack { .. } | MediaAccess::RedumperTrack { .. }
+                )
+            });
+            if is_disc != discs {
+                continue;
+            }
+            if cancelled() {
+                return Ok(());
+            }
+            let query = match query_for(album) {
+                Ok(Some(q)) => q,
+                Ok(None) => continue,
+                Err(e) => {
+                    set_lookup_status(album, &format!("source read failed: {e:#}"));
+                    update(album);
+                    continue;
+                }
+            };
+            resolve(album, store, transport, &query, false, cancelled, update)?;
+            work.push((index, query));
         }
-        let query = match query_for(album) {
-            Ok(Some(q)) => q,
-            _ => continue,
-        };
-        resolve(album, store, transport, &query, false, cancelled, update)?;
-        work.push((index, query));
-    }
-    for (index, query) in work {
-        if cancelled() || !network() {
-            break;
+        for (index, query) in work {
+            if cancelled() || !network() {
+                break;
+            }
+            let stopped = || cancelled() || !network();
+            let album = &mut library.albums[index];
+            if let Err(e) = resolve(album, store, transport, &query, true, &stopped, update) {
+                set_lookup_status(album, &format!("lookup failed: {e:#}"));
+                update(album);
+                return Err(e);
+            }
         }
-        let stopped = || cancelled() || !network();
-        resolve(
-            &mut library.albums[index],
-            store,
-            transport,
-            &query,
-            true,
-            &stopped,
-            update,
-        )?;
     }
     Ok(())
+}
+fn set_lookup_status(album: &mut Album, status: &str) -> bool {
+    let before = album.source_label.clone();
+    if let Some(i) = album.source_label.find(" • MusicBrainz") {
+        album.source_label.truncate(i);
+    }
+    album
+        .source_label
+        .push_str(&format!(" • MusicBrainz: {status}"));
+    before != album.source_label
 }
 fn resolve(
     album: &mut Album,
@@ -627,11 +677,17 @@ fn resolve(
     }
     let record = choose(album, query, &value);
     store.0.execute("INSERT INTO metadata_matches(album_id,value) VALUES (?1,?2) ON CONFLICT(album_id) DO UPDATE SET value=excluded.value",params![serde_json::to_string(&album.id)?,serde_json::to_string(&record)?])?;
+    if !stopped() && record.names.is_none() && set_lookup_status(album, &record.status) {
+        update(album);
+    }
     if !stopped()
         && let Some(names) = record.names
-        && apply(album, &names)
     {
-        update(album);
+        let changed = apply(album, &names);
+        let status_changed = set_lookup_status(album, &record.status);
+        if changed || status_changed {
+            update(album);
+        }
     }
     Ok(())
 }
@@ -731,6 +787,24 @@ mod tests {
         );
         assert_eq!(r.status, "ambiguous");
         assert!(r.names.is_none());
+    }
+    #[test]
+    fn translated_track_lists_preserve_agreed_album_identity() {
+        let mut translated = release("two", "Album");
+        translated["media"][0]["tracks"][0]["title"] = json!("Translated song");
+        let q = Query::Disc("test-id".into());
+        let record = choose(
+            &album(),
+            &q,
+            &json!({"releases": [release("one", "Album"), translated]}),
+        );
+        assert_eq!(record.status, "ambiguous");
+        let mut a = album();
+        apply(&mut a, &record.names.unwrap());
+        assert_eq!(a.title, "Album");
+        assert_eq!(a.artist, "The Artist");
+        assert_eq!(a.tracks[0].title, "Track 1");
+        assert_eq!(a.tracks[1].title, "Second song");
     }
     #[test]
     fn matching_rejects_wrong_medium_track_counts_and_duplicate_slots() {

@@ -23,9 +23,15 @@ The initial build downloads Slint/Skia dependencies and can take several minutes
 - Local SQLite library snapshot and preferences. Failed scans preserve the previous library. A new scan cancels the previous scan between file operations.
 - Streaming Symphonia decoding and seek, CUE/BIN and current redumper audio PCM through junk-libs, CPAL output, and Rubato resampling when needed.
 - Keyless MusicBrainz metadata retrieval, a persistent local response cache, and background name updates.
-- Transient album playback order and up-next controls.
+- Transient album playback order and up-next controls, with Tracks / Up next tabs.
+- A draggable desktop album divider; double-click to reset. Its width survives phone/desktop layout switches within the window.
+- Album title or Album artist sorting, persisted locally; album-artist tags take precedence over compilation fallbacks.
+- Desktop single-click selection, double-click/hover-button playback, and a current-track marker.
+- Space to play/pause and Left/Right to go previous/next when browsing. Focused controls retain their native keyboard behavior; Enter plays a selected track. Previous restarts after three seconds.
+- OS media keys and Now Playing metadata through Souvlaki (macOS integrated; Windows/Linux still need platform validation).
+- File discovery counts and scan progress, with four parallel tag readers and artwork skipped to reduce network traffic.
 
-This is a prototype, not a release candidate. The library scan currently refreshes a complete snapshot; incremental per-file caching, progressive filesystem results, artwork, text marquee, FFT visualization, and system media controls are not implemented yet.
+This is a prototype, not a release candidate. The library scan currently refreshes a complete snapshot; incremental per-file caching, progressive filesystem results, artwork, text marquee, and FFT visualization are not implemented yet.
 
 Supported decoding is determined by the pinned Symphonia version. WAV/FLAC/MP3/Vorbis and CDDA are the first validation targets. AAC/M4A gapless playback and Opus require additional work before they can be advertised as supported. Stereo and mono are supported; multichannel needs an explicit channel mapper. Do not interpret successful playback as verified bit-perfect output.
 
@@ -37,9 +43,9 @@ The initial raw reader supports single-session, two-channel, all-audio discs. Mi
 
 “Automatic metadata from MusicBrainz” is enabled by default. Public metadata reads require no account or API key. The app identifies complete all-audio CUE/redumper discs by MusicBrainz disc ID. File albums with missing names can use an embedded MusicBrainz release ID, or an exact album/artist search when it returns one release and its track counts, durations and existing titles agree. Fully named file albums are skipped. Unnumbered/unidentified loose files and mixed-mode disc identification are not guessed.
 
-The local library appears before online lookups finish. Requests run on a worker with a shared limit of one request per 1.1 seconds, a descriptive User-Agent, a 12-second timeout and bounded responses. The app sends disc/release IDs or album/artist names to MusicBrainz, never audio or full filesystem paths. Disable the checkbox to stop further requests; an in-flight request may finish but its result is discarded while disabled. Reopen the folder to start another lookup pass after enabling it.
+The local library appears before online lookups finish. Disc lookups take priority over ordinary file-album probes. Album status distinguishes unmatched discs, ambiguous editions, and source/network errors. Requests run on a worker with a shared limit of one request per 1.1 seconds, a descriptive User-Agent, a 12-second timeout and bounded responses. The app sends disc/release IDs or album/artist names to MusicBrainz, never audio or full filesystem paths. Disable the checkbox to stop further requests; an in-flight request may finish but its result is discarded while disabled. Reopen the folder to start another lookup pass after enabling it.
 
-Missing album titles, artist credits and track names are filled; existing non-placeholder names win. Matching editions must agree on the names before disc metadata is applied. Updated albums show MusicBrainz in their source label. CUE track TITLE/PERFORMER and CD-TEXT names are read locally first. Playback locations, track order and sample boundaries do not change.
+Missing album titles, artist credits and track names are filled; existing non-placeholder names win. Matching editions must agree on album identity; when translated editions disagree on track names, only unanimous fields are applied and the album is marked ambiguous. Updated albums show MusicBrainz in their source label. CUE track TITLE/PERFORMER and CD-TEXT names are read locally first. Playback locations, track order and sample boundaries do not change.
 
 Responses, negative results and match provenance stay in the local SQLite database. Positive responses are reused for 30 days, missing results for seven days, and stale cached results remain usable offline. A network failure stops that lookup pass while local playback remains available. No source files are written. The saved library and response cache survive restart. Cover art, genres/year fields, fingerprinting and a manual match/correction UI remain future work.
 
@@ -64,3 +70,9 @@ Use the package-scoped formatting command above during sibling development; `car
 ## License
 
 Application source: MIT. Slint is used under its Royalty-free Desktop, Mobile, and Web Applications License with the AboutSlint attribution in Settings. Other dependencies retain their respective licenses; distributed packages must include their notices. See https://slint.dev/terms-and-conditions.
+
+A read-only diagnostic for scanner counts, timing and metadata outcomes uses a temporary cache:
+
+```sh
+cargo run -p amp-library --example scan_probe -- /path/to/album
+```

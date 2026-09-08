@@ -1,6 +1,7 @@
-import { Button, ScrollView, ListView, Slider, CheckBox, AboutSlint } from "std-widgets.slint";
+import { Button, ScrollView, ListView, Slider, CheckBox, AboutSlint, ComboBox } from "std-widgets.slint";
 export struct AlbumRow { title: string, artist: string, detail: string }
-export struct TrackRow { title: string, duration: string, number: string }
+import { TrackItem, TrackRow } from "track-item.slint";
+export { TrackRow }
 import { TransportSeek } from "transport-seek.slint";
 export component PlayerWindow inherits Window {
     title: "Trash Amp";
@@ -24,6 +25,10 @@ export component PlayerWindow inherits Window {
     out property <bool> scrubbing: playhead.scrubbing;
     in property <float> level;
     in property <bool> scanning;
+    in property <float> scan-progress;
+    in-out property <int> sort-order;
+    callback sort-changed();
+    in-out property <int> selected-track: -1;
     in property <int> selected-album: -1;
     in property <int> active-track: -1;
     in-out property <bool> reduced-motion;
@@ -32,14 +37,30 @@ export component PlayerWindow inherits Window {
     in-out property <bool> settings;
     in-out property <bool> show-library: true;
     private property <bool> show-queue;
+    // Store the desktop choice independently of the temporary phone layout.
+    in-out property <float> library-width: 280;
+    // Snapshot the viewport to keep layout constraints independent of Window's layout hints.
+    private property <length> viewport-width: 980px;
+    changed width => { root.viewport-width = self.width; }
+    private property <length> desktop-library-width: min(max(220px * root.text-scale, root.library-width * root.text-scale * 1px), root.viewport-width * 0.45);
     in property <bool> wide: true;
     in property <bool> short: false;
     callback open-folder(); callback demo(); callback select-album(int);
     callback play-track(int); callback enqueue(int); callback toggle-play();
     callback previous(); callback next(); callback seek(float);
     callback preferences-changed(); callback clear-queue();
-    Rectangle {
+    forward-focus: keyboard;
+    keyboard := FocusScope {
       width: 100%; height: 100%;
+      key-pressed(event) => {
+        if (!root.settings && !event.modifiers.alt && !event.modifiers.control && !event.modifiers.meta) {
+            if (event.text == " ") { root.toggle-play(); return accept; }
+            if (event.text == Key.LeftArrow) { root.previous(); return accept; }
+            if (event.text == Key.RightArrow) { root.next(); return accept; }
+        }
+        if (event.text == Key.Return && root.selected-track >= 0 && !root.settings) { root.play-track(root.selected-track); return accept; }
+        return reject;
+      }
       VerticalLayout {
         padding: 16px; spacing: 12px;
         HorizontalLayout {
@@ -79,21 +100,25 @@ export component PlayerWindow inherits Window {
             }
         }
         if !root.short && !root.settings: HorizontalLayout {
-            spacing: 16px;
+            spacing: 0px;
             if root.wide || root.show-library: Rectangle {
-                preferred-width: 280px * root.text-scale;
-                max-width: root.wide ? 280px * root.text-scale : 10000px;
-                min-width: 0px; horizontal-stretch: root.wide ? 0 : 1;
+                accessible-role: groupbox;
+                accessible-label: "Album browser";
+                preferred-width: root.wide ? root.desktop-library-width : 280px;
+                max-width: root.wide ? root.desktop-library-width : 10000px;
+                min-width: root.wide ? root.desktop-library-width : 0px;
+                horizontal-stretch: root.wide ? 0 : 1;
                 background: #283039; border-radius: 6px;
                 VerticalLayout {
                     padding: 8px; spacing: 6px;
                     Text { text: "Albums"; color: #a8bdcc; height: 24px; font-weight: 600; }
+                    ComboBox { model: ["Album title", "Album artist"]; current-index <=> root.sort-order; selected(_) => { root.sort-changed(); } }
                     list := ListView {
                         min-height: 0px; preferred-height: 0px; vertical-stretch: 1;
                         for album[i] in root.albums: Rectangle {
                             accessible-role: button;
                             accessible-label: album.title + " by " + album.artist;
-                            accessible-action-default => { root.select-album(i); root.show-library = false; }
+                            accessible-action-default => { root.select-album(i); root.show-library = false; keyboard.focus(); }
                             height: 68px * root.text-scale;
                             background: i == root.selected-album ? #3a5062 : (tile.has-hover ? #333f49 : transparent);
                             border-radius: 4px;
@@ -102,37 +127,65 @@ export component PlayerWindow inherits Window {
                                 Text { text: album.title; color: #edf1f5; overflow: elide; font-weight: 600; }
                                 Text { text: album.artist; color: #adbbc6; overflow: elide; font-size: 12px * root.text-scale; }
                             }
-                            tile := TouchArea { clicked => { root.select-album(i); root.show-library = false; } }
+                            tile := TouchArea { clicked => { root.select-album(i); root.show-library = false; keyboard.focus(); } }
                         }
                     }
                 }
             }
+            if root.wide: FocusScope {
+                width: 16px;
+                accessible-role: slider;
+                accessible-label: "Resize album browser";
+                key-pressed(event) => {
+                    if (event.text == Key.LeftArrow) { root.library-width = max(220, root.library-width - 20); return accept; }
+                    if (event.text == Key.RightArrow) { root.library-width = min(root.viewport-width * 0.45 / (root.text-scale * 1px), root.library-width + 20); return accept; }
+                    return reject;
+                }
+                Rectangle { x: 7px; width: 2px; height: 100%; background: resize.has-hover || resize.pressed ? #7ca7c9 : #394650; }
+                resize := TouchArea {
+                    mouse-cursor: ew-resize;
+                    moved => {
+                        if (self.pressed) {
+                            root.library-width = min(max(220, (root.desktop-library-width + self.mouse-x - self.pressed-x) / (root.text-scale * 1px)), root.viewport-width * 0.45 / (root.text-scale * 1px));
+                        }
+                    }
+                    double-clicked => { root.library-width = 280; }
+                }
+            }
             if root.wide || !root.show-library: VerticalLayout {
+                min-width: 0px; horizontal-stretch: 1;
                 spacing: 10px;
                 if !root.wide: Button { text: "Back to albums"; clicked => { root.show-library = true; } }
                 Text { text: root.album-title; color: #f0f3f7; font-size: 27px * root.text-scale; font-weight: 600; wrap: word-wrap; }
                 Text { text: root.album-artist; color: #a9bac9; wrap: word-wrap; }
                 HorizontalLayout {
                     Button { text: "Play album"; enabled: root.tracks.length > 0; clicked => { root.play-track(0); } }
-                    Button { text: root.show-queue ? "Tracks" : "Up next (" + root.queued.length + ")";
-                        clicked => { root.show-queue = !root.show-queue; } }
+                }
+                HorizontalLayout {
+                    spacing: 0px;
+                    for label[i] in ["Tracks", "Up next (" + root.queued.length + ")"] : tab := FocusScope {
+                        height: 34px;
+                        accessible-role: AccessibleRole.tab;
+                        accessible-label: label + (root.show-queue == (i == 1) ? ", selected" : "");
+                        key-pressed(event) => {
+                            if (event.text == " " || event.text == Key.Return) { root.show-queue = i == 1; return accept; }
+                            if (event.text == Key.LeftArrow || event.text == Key.RightArrow) { root.show-queue = !root.show-queue; return accept; }
+                            return reject;
+                        }
+                        accessible-action-default => { root.show-queue = i == 1; }
+                        Text { text: label; color: root.show-queue == (i == 1) ? #edf3f8 : #93acbf; horizontal-alignment: center; vertical-alignment: center; }
+                        Rectangle { y: parent.height - 2px; height: 2px; width: 100%; background: root.show-queue == (i == 1) ? #7ca7c9 : #303c47; }
+                        TouchArea { clicked => { root.show-queue = i == 1; tab.focus(); } }
+                    }
                 }
                 if !root.show-queue: ListView {
                         min-height: 0px; preferred-height: 0px; vertical-stretch: 1;
-                    for track[i] in root.tracks: Rectangle {
-                        accessible-role: button;
-                        accessible-label: "Play " + track.title;
-                        accessible-action-default => { root.play-track(i); }
-                        height: 48px * root.text-scale;
-                        background: row.has-hover ? #303c47 : transparent;
-                        HorizontalLayout {
-                            spacing: 10px;
-                            Text { text: track.number; color: #8099ad; width: 24px; vertical-alignment: center; }
-                            Text { text: track.title; color: #e1e8ef; overflow: elide; vertical-alignment: center; }
-                            Text { text: track.duration; color: #9eafbd; width: 44px; vertical-alignment: center; }
-                            Button { text: "+"; width: 36px; clicked => { root.enqueue(i); } }
-                        }
-                        row := TouchArea { width: parent.width - 48px; clicked => { root.play-track(i); } }
+                    for track[i] in root.tracks: TrackItem {
+                        track: track; text-scale: root.text-scale;
+                        selected: i == root.selected-track; current: i == root.active-track;
+                        select => { root.selected-track = i; keyboard.focus(); }
+                        play => { root.play-track(i); keyboard.focus(); }
+                        enqueue => { root.enqueue(i); }
                     }
                 }
                 if root.show-queue: VerticalLayout {
@@ -175,6 +228,10 @@ export component PlayerWindow inherits Window {
                     Text { text: root.duration; color: #97adbe; width: 40px; vertical-alignment: center; }
                 }
             }
+        }
+        if root.scanning: Rectangle {
+            height: 3px; background: #303c47;
+            Rectangle { height: 100%; width: parent.width * root.scan-progress; background: #7ca7c9; }
         }
         Text { text: root.status; color: #a7b8c6; overflow: elide; height: 18px; font-size: 11px; }
     }

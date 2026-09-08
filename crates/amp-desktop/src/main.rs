@@ -25,7 +25,7 @@ struct State {
 }
 enum ScanEvent {
     Done(u64, anyhow::Result<Library>),
-    Progress(u64, usize),
+    Progress(u64, amp_library::ScanProgress),
     Metadata(u64, Album),
     MetadataDone(u64, anyhow::Result<()>),
 }
@@ -70,6 +70,24 @@ fn refresh_album_rows(ui: &PlayerWindow, state: &State) {
             .collect::<Vec<_>>(),
     )));
 }
+fn sort_albums(ui: &PlayerWindow, state: &mut State) {
+    let selected = state
+        .selected
+        .and_then(|i| state.library.albums.get(i))
+        .map(|a| a.id.clone());
+    state.library.albums.sort_by_cached_key(|a| {
+        let title = a.title.to_lowercase();
+        let artist = a.artist.to_lowercase();
+        if state.preferences.sort_by_artist {
+            (artist, title, a.id.item.clone())
+        } else {
+            (title, artist, a.id.item.clone())
+        }
+    });
+    state.selected = selected.and_then(|id| state.library.albums.iter().position(|a| a.id == id));
+    refresh_album_rows(ui, state);
+    ui.set_selected_album(state.selected.map(|i| i as i32).unwrap_or(-1));
+}
 fn albums(ui: &PlayerWindow, state: &State) {
     refresh_album_rows(ui, state);
     ui.set_selected_album(-1);
@@ -82,6 +100,8 @@ fn select(ui: &PlayerWindow, state: &mut State, index: usize) {
         return;
     };
     state.selected = Some(index);
+    ui.set_active_track(-1);
+    ui.set_selected_track(-1);
     ui.set_show_library(false);
     ui.set_selected_album(index as i32);
     ui.set_album_title(album.title.clone().into());
@@ -126,6 +146,74 @@ fn start(ui: &PlayerWindow, state: &mut State, index: usize) {
         .play(state.playlist.clone(), index);
     ui.set_status("Playing album".into());
 }
+fn media_controls(
+    ui: &PlayerWindow,
+    tx: mpsc::Sender<souvlaki::MediaControlEvent>,
+) -> Result<souvlaki::MediaControls, String> {
+    #[cfg(target_os = "windows")]
+    let hwnd = {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let handle = ui.window().window_handle();
+        match handle.window_handle().map_err(|e| e.to_string())?.as_raw() {
+            RawWindowHandle::Win32(h) => Some(h.hwnd.get() as *mut std::ffi::c_void),
+            _ => return Err("No Windows media-control window".into()),
+        }
+    };
+    #[cfg(not(target_os = "windows"))]
+    let hwnd = {
+        let _ = ui;
+        None
+    };
+    let mut controls = souvlaki::MediaControls::new(souvlaki::PlatformConfig {
+        dbus_name: "trash_amp",
+        display_name: "Trash Amp",
+        hwnd,
+    })
+    .map_err(|e| format!("{e:?}"))?;
+    controls
+        .attach(move |event| {
+            let _ = tx.send(event);
+        })
+        .map_err(|e| format!("{e:?}"))?;
+    Ok(controls)
+}
+
+fn media_event(ui: &PlayerWindow, state: &mut State, event: souvlaki::MediaControlEvent) {
+    use souvlaki::MediaControlEvent as E;
+    match event {
+        E::Play | E::Toggle if state.player.is_none() || state.playlist.is_empty() => {
+            start(ui, state, 0)
+        }
+        E::Play | E::Pause | E::Toggle | E::Stop => {
+            if let Some(p) = &state.player {
+                let playing = p.snapshot().playing;
+                if matches!(event, E::Toggle) || (matches!(event, E::Play) != playing) {
+                    p.toggle();
+                }
+                if matches!(event, E::Stop) {
+                    p.seek(0.0);
+                }
+            }
+        }
+        E::Next => {
+            if let Some(p) = &state.player {
+                p.next();
+            }
+        }
+        E::Previous => {
+            if let Some(p) = &state.player {
+                p.previous();
+            }
+        }
+        E::SetPosition(position) => {
+            if let Some(p) = &state.player {
+                p.seek(position.0.as_secs_f64());
+            }
+        }
+        _ => {}
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().collect();
     if args.iter().any(|a| a == "--help") {
@@ -151,6 +239,7 @@ fn main() -> anyhow::Result<()> {
         store.library()?.unwrap_or_default()
     };
     let ui = PlayerWindow::new()?;
+    ui.set_sort_order(i32::from(preferences.sort_by_artist));
     ui.set_reduced_motion(preferences.reduced_motion);
     ui.set_prefer_raw(preferences.dump_preference == DumpPreference::Redumper);
     ui.set_automatic_metadata(preferences.automatic_metadata);
@@ -165,6 +254,7 @@ fn main() -> anyhow::Result<()> {
         store,
         preferences,
     }));
+    sort_albums(&ui, &mut state.borrow_mut());
     albums(&ui, &state.borrow());
     let (tx, rx) = mpsc::channel();
     let generation = Arc::new(AtomicU64::new(0));
@@ -188,14 +278,24 @@ fn main() -> anyhow::Result<()> {
             let cache_path = cache_path.clone();
             if let Some(ui) = weak.upgrade() {
                 ui.set_scanning(true);
+                ui.set_scan_progress(0.0);
                 ui.set_status("Scanning music folder…".into());
             }
             std::thread::spawn(move || {
                 let provider = FilesystemProvider { root, preferences };
+                let mut last_report = std::time::Instant::now() - Duration::from_secs(1);
+                let mut last_total = None;
                 let result = provider.scan_with_progress(
                     &|| cancel.load(Ordering::Relaxed) != version,
                     &mut |n| {
-                        let _ = tx.send(ScanEvent::Progress(version, n));
+                        if n.total != last_total
+                            || n.total == Some(n.completed)
+                            || last_report.elapsed() >= Duration::from_millis(100)
+                        {
+                            let _ = tx.send(ScanEvent::Progress(version, n));
+                            last_total = n.total;
+                            last_report = std::time::Instant::now();
+                        }
                     },
                 );
                 match result {
@@ -232,6 +332,7 @@ fn main() -> anyhow::Result<()> {
             s.selected = None;
             if let Some(ui) = weak.upgrade() {
                 ui.set_scanning(false);
+                sort_albums(&ui, &mut s);
                 albums(&ui, &s);
                 ui.set_status(
                     "2,000 generated albums. This fixture contains no playable audio.".into(),
@@ -375,6 +476,25 @@ fn main() -> anyhow::Result<()> {
             }
         });
     }
+    {
+        let state = state.clone();
+        let weak = ui.as_weak();
+        ui.on_sort_changed(move || {
+            if let Some(ui) = weak.upgrade() {
+                let mut s = state.borrow_mut();
+                s.preferences.sort_by_artist = ui.get_sort_order() == 1;
+                sort_albums(&ui, &mut s);
+                if let Err(e) = s.store.save_preferences(&s.preferences) {
+                    ui.set_status(e.to_string().into());
+                }
+            }
+        });
+    }
+    let (media_tx, media_rx) = mpsc::channel();
+    let mut controls = None;
+    let mut media_initialized = false;
+    let mut last_media = None;
+    let mut scan_files = None;
     let timer = slint::Timer::default();
     {
         let state = state.clone();
@@ -389,19 +509,32 @@ fn main() -> anyhow::Result<()> {
                 let size = ui.window().size().to_logical(ui.window().scale_factor());
                 ui.set_wide(size.width > 720.0 * ui.get_text_scale());
                 ui.set_short(size.height < 420.0 * ui.get_text_scale());
+                if !media_initialized {
+                    media_initialized = true;
+                    match media_controls(&ui, media_tx.clone()) {
+                        Ok(c) => controls = Some(c),
+                        Err(e) => { eprintln!("Media keys unavailable: {e}"); ui.set_status(format!("Media keys unavailable: {e}").into()); }
+                    }
+                }
                 let mut s = state.borrow_mut();
+                while let Ok(event) = media_rx.try_recv() { media_event(&ui, &mut s, event); }
                 while let Ok(event) = rx.try_recv() {
                     match event {
                         ScanEvent::Progress(v, n) if v == generation.load(Ordering::Relaxed) => {
-                            ui.set_status(format!("Scanning… {n} files inspected").into())
+                            scan_files = n.total;
+                            ui.set_scan_progress(n.total.filter(|t| *t > 0).map(|t| n.completed as f32 / t as f32).unwrap_or(0.0));
+                            ui.set_status(match n.total {
+                                Some(total) => format!("Scanning… {} / {total} files", n.completed),
+                                None => format!("Finding files… {} found", n.discovered),
+                            }.into());
                         }
                         ScanEvent::Done(v, result) if v == generation.load(Ordering::Relaxed) => {
                             ui.set_scanning(false);
                             match result {
                                 Ok(library) => {
                                     let status = format!(
-                                        "{} albums • {} scan warnings",
-                                        library.albums.len(),
+                                        "{} files • {} albums • {} scan warnings • checking metadata…",
+                                        scan_files.unwrap_or(0), library.albums.len(),
                                         library.warnings.len()
                                     );
                                     for warning in &library.warnings {
@@ -410,6 +543,7 @@ fn main() -> anyhow::Result<()> {
                                     let saved = s.store.save_library(&library);
                                     s.library = library;
                                     s.selected = None;
+                                    sort_albums(&ui, &mut s);
                                     albums(&ui, &s);
                                     ui.set_status(
                                         match saved {
@@ -438,6 +572,8 @@ fn main() -> anyhow::Result<()> {
                                         t.artist = updated.artist.clone();
                                     }
                                 }
+                                let selected_updated = s.selected == Some(index);
+                                let order_changed = s.library.albums[index].title != album.title || s.library.albums[index].artist != album.artist;
                                 s.library.albums[index] = album;
                                 if let Some(model) = ui
                                     .get_albums()
@@ -454,7 +590,8 @@ fn main() -> anyhow::Result<()> {
                                         },
                                     );
                                 }
-                                if s.selected == Some(index) {
+                                if order_changed { sort_albums(&ui, &mut s); }
+                                if selected_updated && let Some(index) = s.selected {
                                     let show_library = ui.get_show_library();
                                     select(&ui, &mut s, index);
                                     ui.set_show_library(show_library);
@@ -473,6 +610,12 @@ fn main() -> anyhow::Result<()> {
                                     format!("Online metadata paused: {e}; local library available")
                                         .into(),
                                 );
+                            } else {
+                                let unmatched = s.library.albums.iter().filter(|a| a.source_label.contains("MusicBrainz: no-match")).count();
+                                let ambiguous = s.library.albums.iter().filter(|a| a.source_label.contains("MusicBrainz: ambiguous")).count();
+                                let files = scan_files.map(|n| format!("{n} files • ")).unwrap_or_default();
+                                let mode = if metadata_enabled.load(Ordering::Relaxed) { "metadata checked" } else { "cached metadata checked; online disabled" };
+                                ui.set_status(format!("{files}{} albums • {mode} • {unmatched} unmatched • {ambiguous} ambiguous", s.library.albums.len()).into());
                             }
                         }
                         _ => {}
@@ -490,8 +633,23 @@ fn main() -> anyhow::Result<()> {
                     if ui.get_queued().iter().collect::<Vec<_>>() != upcoming {
                         ui.set_queued(ModelRc::new(VecModel::from(upcoming)));
                     }
+                    ui.set_active_track(s.selected.and_then(|i| s.library.albums.get(i))
+                        .and_then(|a| s.playlist.get(snapshot.track).and_then(|t| a.tracks.iter().position(|r| r.id == t.id)))
+                        .map(|i| i as i32).unwrap_or(-1));
                     ui.set_playing(snapshot.playing);
                     ui.set_level(snapshot.level);
+                    if let (Some(c), Some(t)) = (&mut controls, s.playlist.get(snapshot.track)) {
+                        let identity = (t.id.clone(), t.title.clone(), t.artist.clone(), snapshot.playing, snapshot.seconds as u64);
+                        if last_media.as_ref() != Some(&identity) {
+                            let _ = c.set_metadata(souvlaki::MediaMetadata {
+                                title: Some(&t.title), artist: Some(&t.artist),
+                                duration: Some(Duration::from_secs_f64(t.duration_seconds.max(0.0))), ..Default::default()
+                            });
+                            let progress = Some(souvlaki::MediaPosition(Duration::from_secs_f64(snapshot.seconds.max(0.0))));
+                            let _ = c.set_playback(if snapshot.playing { souvlaki::MediaPlayback::Playing { progress } } else { souvlaki::MediaPlayback::Paused { progress } });
+                            last_media = Some(identity);
+                        }
+                    }
                     if let Some(track) = s.playlist.get(snapshot.track) {
                         ui.set_now_title(track.title.clone().into());
                         ui.set_now_artist(track.artist.clone().into());
@@ -588,6 +746,184 @@ mod tests {
             out property <bool> scrubbing: seek.scrubbing;
             seek := TransportSeek { width: 100%; height: 100%; }
         }
+    }
+    slint::slint! {
+        import { TrackItem } from "ui/track-item.slint";
+        export component TrackHarness inherits Window {
+            callback play(); callback select(); callback enqueue();
+            TrackItem { width: 100%; height: 48px; track: {title: "A track", number: "01", duration: "3:00"};
+                play => { root.play(); } select => { root.select(); } enqueue => { root.enqueue(); }
+            }
+        }
+    }
+    #[test]
+    fn album_pane_restores_desktop_width_and_remembers_drag_across_phone_mode() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::platform::PointerEventButton;
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.set_album_title(
+            "A long album title that should wrap instead of squeezing the album browser".into(),
+        );
+        ui.window().set_size(slint::LogicalSize::new(980.0, 680.0));
+        ui.show().unwrap();
+        let pane_width = || {
+            ElementHandle::find_by_accessible_label(&ui, "Album browser")
+                .next()
+                .unwrap()
+                .size()
+                .width
+        };
+        assert!((pane_width() - 280.0).abs() < 1.0);
+        let roundtrip = |expected: f32| {
+            for show_library in [true, false] {
+                ui.set_show_library(show_library);
+                ui.set_wide(false);
+                ui.window().set_size(slint::LogicalSize::new(390.0, 760.0));
+                slint::platform::update_timers_and_animations();
+                if show_library {
+                    assert!((pane_width() - 358.0).abs() < 1.0);
+                }
+                ui.window().set_size(slint::LogicalSize::new(980.0, 680.0));
+                ui.set_wide(true);
+                slint::platform::update_timers_and_animations();
+                assert!(
+                    (pane_width() - expected).abs() < 1.0,
+                    "actual {} expected {expected}",
+                    pane_width()
+                );
+            }
+        };
+        roundtrip(280.0);
+        let divider = ElementHandle::find_by_accessible_label(&ui, "Resize album browser")
+            .next()
+            .unwrap();
+        let position = divider.absolute_position();
+        divider.mock_drag(
+            slint::LogicalPosition::new(
+                position.x + 88.0,
+                position.y + divider.size().height / 2.0,
+            ),
+            PointerEventButton::Left,
+        );
+        assert!(
+            (pane_width() - 360.0).abs() < 2.0,
+            "drag width {}",
+            pane_width()
+        );
+        roundtrip(360.0);
+        // A smaller desktop temporarily clamps the pane without erasing its saved width.
+        ui.set_library_width(420.0);
+        ui.window().set_size(slint::LogicalSize::new(740.0, 680.0));
+        slint::platform::update_timers_and_animations();
+        assert!(
+            (pane_width() - 333.0).abs() < 1.0,
+            "clamped width {}",
+            pane_width()
+        );
+        ui.window().set_size(slint::LogicalSize::new(980.0, 680.0));
+        slint::platform::update_timers_and_animations();
+        assert!((pane_width() - 420.0).abs() < 1.0);
+    }
+    #[test]
+    fn desktop_row_selects_double_click_plays_and_hover_button_plays() {
+        use slint::platform::{PointerEventButton, WindowEvent};
+        use std::cell::Cell;
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = TrackHarness::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(500.0, 48.0));
+        let played = Rc::new(Cell::new(0));
+        let selected = Rc::new(Cell::new(0));
+        let p = played.clone();
+        ui.on_play(move || p.set(p.get() + 1));
+        let s = selected.clone();
+        ui.on_select(move || s.set(s.get() + 1));
+        ui.show().unwrap();
+        let click = |x| {
+            let position = slint::LogicalPosition::new(x, 24.0);
+            ui.window()
+                .dispatch_event(WindowEvent::PointerMoved { position });
+            ui.window().dispatch_event(WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Left,
+            });
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(30));
+            ui.window().dispatch_event(WindowEvent::PointerReleased {
+                position,
+                button: PointerEventButton::Left,
+            });
+        };
+        click(150.0);
+        assert_eq!(selected.get(), 1);
+        assert_eq!(played.get(), 0);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(50));
+        click(150.0);
+        assert_eq!(played.get(), 1);
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(1));
+        click(18.0);
+        assert_eq!(played.get(), 2);
+    }
+    #[test]
+    fn keyboard_transport_and_sort_preserve_album_selection() {
+        use slint::platform::WindowEvent;
+        use std::cell::Cell;
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.show().unwrap();
+        let toggled = Rc::new(Cell::new(0));
+        let next = Rc::new(Cell::new(0));
+        let previous = Rc::new(Cell::new(0));
+        let t = toggled.clone();
+        ui.on_toggle_play(move || t.set(t.get() + 1));
+        let n = next.clone();
+        ui.on_next(move || n.set(n.get() + 1));
+        let p = previous.clone();
+        ui.on_previous(move || p.set(p.get() + 1));
+        for text in [
+            SharedString::from(" "),
+            slint::platform::Key::RightArrow.into(),
+            slint::platform::Key::LeftArrow.into(),
+        ] {
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text });
+        }
+        assert_eq!((toggled.get(), next.get(), previous.get()), (1, 1, 1));
+        let dir =
+            std::env::temp_dir().join(format!("trash-amp-sort-test-{}.db", std::process::id()));
+        let mut state = State {
+            library: amp_library::demo_library(),
+            selected: Some(0),
+            playlist: vec![],
+            queued: vec![],
+            queue_start: 0,
+            player: None,
+            store: Store::open(&dir).unwrap(),
+            preferences: Preferences::default(),
+        };
+        let id = state.library.albums[0].id.clone();
+        sort_albums(&ui, &mut state);
+        assert_eq!(state.library.albums[state.selected.unwrap()].id, id);
+        assert!(
+            state
+                .library
+                .albums
+                .windows(2)
+                .all(|w| w[0].title.to_lowercase() <= w[1].title.to_lowercase())
+        );
+        state.preferences.sort_by_artist = true;
+        sort_albums(&ui, &mut state);
+        assert_eq!(state.library.albums[state.selected.unwrap()].id, id);
+        assert!(
+            state
+                .library
+                .albums
+                .windows(2)
+                .all(|w| w[0].artist.to_lowercase() <= w[1].artist.to_lowercase())
+        );
+        drop(state);
+        let _ = std::fs::remove_file(dir);
     }
     #[test]
     fn playhead_follows_clock_after_user_scrubs_and_restarts() {

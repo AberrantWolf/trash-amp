@@ -119,7 +119,12 @@ impl Player {
         let _ = self.commands.send(Command::Next);
     }
     pub fn previous(&self) {
-        let _ = self.commands.send(Command::Previous);
+        // Standard transport behavior: restart after the first few seconds.
+        if self.snapshot().seconds > 3.0 {
+            self.seek(0.0);
+        } else {
+            let _ = self.commands.send(Command::Previous);
+        }
     }
     pub fn append(&self, tracks: Vec<Track>) {
         let _ = self.commands.send(Command::Append(tracks));

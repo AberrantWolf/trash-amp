@@ -53,6 +53,8 @@ pub enum DumpPreference {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Preferences {
+    #[serde(default)]
+    pub sort_by_artist: bool,
     pub dump_preference: DumpPreference,
     pub automatic_metadata: bool,
     pub reduced_motion: bool,
@@ -61,6 +63,7 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
+            sort_by_artist: false,
             dump_preference: DumpPreference::Redumper,
             automatic_metadata: true,
             reduced_motion: false,
