@@ -19,21 +19,36 @@ The initial build downloads Slint/Skia dependencies and can take several minutes
 
 - Size-adaptive album/track browsing, compact transport, a playback level meter, and reduced-motion preference.
 - Filesystem libraries, including mounted network shares and single-album folders.
-- Read-only tag inspection, separate album copies, CUE/BIN track discovery, CD-TEXT album fields.
+- Read-only tag inspection, compilation merging across artist folders, separate conflicting album copies, CUE/BIN track discovery, CD-TEXT album fields.
 - Local SQLite library snapshot and preferences. Failed scans preserve the previous library. A new scan cancels the previous scan between file operations.
-- Streaming Symphonia decoding and seek, CUE/BIN PCM through junk-libs, CPAL output, and Rubato resampling when needed.
+- Streaming Symphonia decoding and seek, CUE/BIN and current redumper audio PCM through junk-libs, CPAL output, and Rubato resampling when needed.
+- Keyless MusicBrainz metadata retrieval, a persistent local response cache, and background name updates.
 - Transient album playback order and up-next controls.
 
-This is a prototype, not a release candidate. The library scan currently refreshes a complete snapshot; incremental per-file caching, progressive results, artwork, online metadata, text marquee, FFT visualization, and system media controls are not implemented yet. The automatic-metadata preference is saved for the future provider integration; it currently sends no requests.
+This is a prototype, not a release candidate. The library scan currently refreshes a complete snapshot; incremental per-file caching, progressive filesystem results, artwork, text marquee, FFT visualization, and system media controls are not implemented yet.
 
 Supported decoding is determined by the pinned Symphonia version. WAV/FLAC/MP3/Vorbis and CDDA are the first validation targets. AAC/M4A gapless playback and Opus require additional work before they can be advertised as supported. Stereo and mono are supported; multichannel needs an explicit channel mapper. Do not interpret successful playback as verified bit-perfect output.
 
-Redumper `.scram/.state/.subcode` packages are discovered and structurally validated, but raw playback is **not implemented**. The default preference selects valid raw packages and reports that missing decoder rather than silently playing a different representation. To test equivalent BIN/CUE files, disable “Prefer redumper raw dumps” and reopen the folder.
+Current redumper `.scram/.state/.subcode/.toc` audio packages now play directly, including without BIN/CUE files. Raw remains the default; turn off “Prefer redumper raw dumps” and reopen the folder to choose BIN/CUE. With raw selected, invalid packages are reported rather than silently replaced with BIN playback. Missing BIN files can use a supported raw package even when BIN is preferred. Reopen existing cached libraries to replace the old pending-decoder entries.
+
+The initial raw reader supports single-session, two-channel, all-audio discs. Mixed-mode/multisession raw images remain explicitly unsupported. Raw samples retain the recording timeline; drive offset is not applied twice. Skipped/C2-error samples stop playback with an error. CUE playback includes stored and synthetic gaps and excludes data pregaps. Hidden first-track audio is exposed by junk-libs but has no player UI yet. PRE flags are reported in album source text; de-emphasis is not yet applied. Full real-dump comparison is still pending the fixture path.
+
+## Automatic metadata
+
+“Automatic metadata from MusicBrainz” is enabled by default. Public metadata reads require no account or API key. The app identifies complete all-audio CUE/redumper discs by MusicBrainz disc ID. File albums with missing names can use an embedded MusicBrainz release ID, or an exact album/artist search when it returns one release and its track counts, durations and existing titles agree. Fully named file albums are skipped. Unnumbered/unidentified loose files and mixed-mode disc identification are not guessed.
+
+The local library appears before online lookups finish. Requests run on a worker with a shared limit of one request per 1.1 seconds, a descriptive User-Agent, a 12-second timeout and bounded responses. The app sends disc/release IDs or album/artist names to MusicBrainz, never audio or full filesystem paths. Disable the checkbox to stop further requests; an in-flight request may finish but its result is discarded while disabled. Reopen the folder to start another lookup pass after enabling it.
+
+Missing album titles, artist credits and track names are filled; existing non-placeholder names win. Matching editions must agree on the names before disc metadata is applied. Updated albums show MusicBrainz in their source label. CUE track TITLE/PERFORMER and CD-TEXT names are read locally first. Playback locations, track order and sample boundaries do not change.
+
+Responses, negative results and match provenance stay in the local SQLite database. Positive responses are reused for 30 days, missing results for seven days, and stale cached results remain usable offline. A network failure stops that lookup pass while local playback remains available. No source files are written. The saved library and response cache survive restart. Cover art, genres/year fields, fingerprinting and a manual match/correction UI remain future work.
+
+API rules: [MusicBrainz API](https://musicbrainz.org/doc/MusicBrainz_API). Disc identity: [MusicBrainz disc ID calculation](https://musicbrainz.org/doc/Disc_ID_Calculation).
 
 ## Verify
 
 ```sh
-cargo fmt --all --check
+cargo fmt -p amp-core -p amp-library -p amp-audio -p trash-amp --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -42,11 +57,9 @@ See [architecture](docs/architecture.md), [release gates](docs/release-gates.md)
 
 ## junk-libs development
 
-The normal dependency is pinned to a Git revision. To use your sibling checkout without changing the portable manifest:
+This implementation temporarily depends directly on `../junk-libs/junk-libs-disc` so both repositories can be developed and tested together. Clone junk-libs as a sibling of trash-amp. This checkpoint requires junk-libs commit `1e424737db7bb3ba329aea709de6fe3ca8fe9eea` (or a compatible descendant). Before distribution, publish those changes and replace the local path with a pinned Git revision. Do not revert to the old revision: it lacks the new APIs.
 
-```sh
-cargo run --config 'patch."https://github.com/AberrantWolf/junk-libs".junk-libs-disc.path="../junk-libs/junk-libs-disc"' --config 'patch."https://github.com/AberrantWolf/junk-libs".junk-libs-core.path="../junk-libs/junk-libs-core"' -p trash-amp
-```
+Use the package-scoped formatting command above during sibling development; `cargo fmt --all` also traverses the sibling workspace's path dependencies. The disc API contract and upstream format evidence are in `../junk-libs/junk-libs-disc/PLAYBACK.md`.
 
 ## License
 

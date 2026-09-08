@@ -1,7 +1,9 @@
 //! Filesystem is one library provider; SQLite is always stored on the local device.
+pub mod metadata;
+
 use amp_core::*;
 use anyhow::{Context, Result, bail};
-use junk_libs_disc::{cue, layout::TrackKind, redumper};
+use junk_libs_disc::{cue, cue_audio::CueAudioDisc, layout::TrackKind, redumper};
 use lofty::{
     file::{AudioFile, TaggedFileExt},
     prelude::{Accessor, ItemKey},
@@ -18,7 +20,8 @@ pub struct Store(Connection);
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let db = Connection::open(path)?;
-        db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
+        db.busy_timeout(std::time::Duration::from_secs(3))?;
+        db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metadata_http(key TEXT PRIMARY KEY, value TEXT NOT NULL, expires INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS metadata_matches(album_id TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
         Ok(Self(db))
     }
     pub fn preferences(&self) -> Result<Preferences> {
@@ -93,7 +96,15 @@ impl FilesystemProvider {
         }
         paths.sort();
         let mut claimed = HashSet::new();
-        for path in paths.iter().filter(|p| extension(p) == "cue") {
+        let cue_packages: HashSet<_> = paths
+            .iter()
+            .filter(|p| extension(p) == "cue")
+            .map(|p| p.with_extension("scram"))
+            .collect();
+        for path in paths.iter().filter(|p| {
+            extension(p) == "cue"
+                || (extension(p) == "scram" && !cue_packages.contains(&p.with_extension("scram")))
+        }) {
             if cancelled() {
                 bail!("Scan cancelled")
             }
@@ -105,7 +116,8 @@ impl FilesystemProvider {
                 Err(e) => library.warnings.push(format!("{}: {e:#}", path.display())),
             }
         }
-        let mut groups: BTreeMap<(PathBuf, String, String), Album> = BTreeMap::new();
+        let mut groups: BTreeMap<(PathBuf, String, Option<String>), AlbumFragment> =
+            BTreeMap::new();
         for (i, path) in paths.iter().enumerate() {
             if cancelled() {
                 bail!("Scan cancelled")
@@ -122,29 +134,58 @@ impl FilesystemProvider {
                 continue;
             }
             match tagged_track(path, &library.id) {
-                Ok((title, artist, track)) => {
+                Ok((title, album_artist, tagged, track)) => {
                     let parent = path.parent().unwrap().to_owned();
-                    let key = (parent.clone(), title.clone(), artist.clone());
-                    let album = groups.entry(key).or_insert_with(|| Album {
-                        id: id(
-                            &library.id,
-                            format!("{}\n{title}\n{artist}", parent.display()),
-                        ),
-                        title,
-                        artist,
-                        tracks: vec![],
-                        source_label: parent.display().to_string(),
+                    let key = (
+                        parent.clone(),
+                        normalized(&title),
+                        album_artist.as_deref().map(normalized),
+                    );
+                    let fragment = groups.entry(key).or_insert_with(|| AlbumFragment {
+                        tagged,
+                        album_artist: album_artist.clone(),
+                        album: Album {
+                            id: id(
+                                &library.id,
+                                format!(
+                                    "{}\n{title}\n{}",
+                                    parent.display(),
+                                    album_artist.as_deref().unwrap_or("")
+                                ),
+                            ),
+                            title,
+                            artist: String::new(),
+                            tracks: vec![],
+                            source_label: parent.display().to_string(),
+                        },
                     });
-                    album.tracks.push(track);
+                    fragment.album.tracks.push(track);
                 }
                 Err(e) => library.warnings.push(format!("{}: {e:#}", path.display())),
             }
         }
-        for mut album in groups.into_values() {
+        for mut fragment in merge_album_fragments(groups.into_values().collect()) {
+            let album = &mut fragment.album;
+            album.artist = fragment.album_artist.unwrap_or_else(|| {
+                let first = album
+                    .tracks
+                    .first()
+                    .map(|t| t.artist.as_str())
+                    .unwrap_or("Unknown artist");
+                if album
+                    .tracks
+                    .iter()
+                    .all(|t| normalized(&t.artist) == normalized(first))
+                {
+                    first.to_owned()
+                } else {
+                    "Various artists".into()
+                }
+            });
             album.tracks.sort_by(|a, b| {
                 (a.disc, a.number, &a.id.item).cmp(&(b.disc, b.number, &b.id.item))
             });
-            library.albums.push(album);
+            library.albums.push(fragment.album);
         }
         library.albums.sort_by(|a, b| {
             (&a.artist, &a.title, &a.id.item).cmp(&(&b.artist, &b.title, &b.id.item))
@@ -152,6 +193,54 @@ impl FilesystemProvider {
         Ok(library)
     }
 }
+/// Folder/artist boundaries are evidence, not album identity. Merge complementary
+/// tagged fragments, but keep conflicting copies and explicit album artists apart.
+struct AlbumFragment {
+    album: Album,
+    album_artist: Option<String>,
+    tagged: bool,
+}
+fn normalized(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+fn merge_album_fragments(fragments: Vec<AlbumFragment>) -> Vec<AlbumFragment> {
+    let mut groups: BTreeMap<String, Vec<AlbumFragment>> = BTreeMap::new();
+    for fragment in fragments {
+        let candidates = groups.entry(normalized(&fragment.album.title)).or_default();
+        let compatible = |existing: &&mut AlbumFragment| {
+            existing.tagged
+                && fragment.tagged
+                && match (&existing.album_artist, &fragment.album_artist) {
+                    (Some(a), Some(b)) => normalized(a) == normalized(b),
+                    _ => true,
+                }
+                && !existing.album.tracks.iter().any(|a| {
+                    fragment.album.tracks.iter().any(|b| {
+                        if a.number > 0 && b.number > 0 {
+                            (a.disc, a.number) == (b.disc, b.number)
+                        } else {
+                            normalized(&a.title) == normalized(&b.title)
+                        }
+                    })
+                })
+        };
+        if let Some(existing) = candidates.iter_mut().find(compatible) {
+            existing.album.tracks.extend(fragment.album.tracks);
+            if existing.album_artist.is_none() {
+                existing.album_artist = fragment.album_artist;
+            }
+            existing.album.source_label = "Merged from multiple folders".into();
+        } else {
+            candidates.push(fragment);
+        }
+    }
+    groups.into_values().flatten().collect()
+}
+
 fn extension(path: &Path) -> String {
     path.extension()
         .and_then(|s| s.to_str())
@@ -165,7 +254,7 @@ fn id(library: &str, item: String) -> ItemId {
         item,
     }
 }
-fn tagged_track(path: &Path, library: &str) -> Result<(String, String, Track)> {
+fn tagged_track(path: &Path, library: &str) -> Result<(String, Option<String>, bool, Track)> {
     let file = Probe::open(path)?.read()?;
     let tag = file.primary_tag().or_else(|| file.first_tag());
     let folder = path
@@ -178,13 +267,13 @@ fn tagged_track(path: &Path, library: &str) -> Result<(String, String, Track)> {
         .and_then(|t| t.album())
         .map(|s| s.into_owned())
         .unwrap_or(folder);
-    let artist = tag
-        .and_then(|t| {
-            t.get_string(ItemKey::AlbumArtist)
-                .map(str::to_owned)
-                .or_else(|| t.artist().map(|s| s.into_owned()))
-        })
-        .unwrap_or_else(|| "Unknown artist".into());
+    let tagged = tag
+        .and_then(|t| t.album())
+        .is_some_and(|s| !s.trim().is_empty());
+    let album_artist = tag
+        .and_then(|t| t.get_string(ItemKey::AlbumArtist))
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_owned);
     let locator = path
         .to_str()
         .context("Track path must be valid UTF-8")?
@@ -203,31 +292,79 @@ fn tagged_track(path: &Path, library: &str) -> Result<(String, String, Track)> {
         artist: tag
             .and_then(|t| t.artist())
             .map(|s| s.into_owned())
-            .unwrap_or_else(|| artist.clone()),
+            .unwrap_or_else(|| {
+                album_artist
+                    .clone()
+                    .unwrap_or_else(|| "Unknown artist".into())
+            }),
         number: tag.and_then(|t| t.track()).unwrap_or(0),
         disc: tag.and_then(|t| t.disk()).unwrap_or(1),
         duration_seconds: file.properties().duration().as_secs_f64(),
         access: MediaAccess::File { locator },
     };
-    Ok((title, artist, track))
+    Ok((title, album_artist, tagged, track))
 }
 fn disc_album(
     path: &Path,
     library: &str,
     preferences: &Preferences,
 ) -> Result<(Album, Vec<PathBuf>)> {
-    let text = std::fs::read_to_string(path)?;
-    let sheet = cue::parse_cue(&text)?;
+    let cue_anchor = if extension(path) == "cue" {
+        path.to_owned()
+    } else {
+        path.with_extension("cue")
+    };
+    let path = cue_anchor.as_path();
+    let text = if path.exists() {
+        std::fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
     let parent = path.parent().unwrap();
-    let files = sheet
-        .files
-        .iter()
-        .map(|f| cue::resolve_local_file(parent, &f.filename))
-        .collect::<Result<Vec<_>, _>>()?;
-    let layouts = cue::read_cue_layout(path)?;
+    let files = if text.is_empty() {
+        vec![]
+    } else {
+        cue::parse_cue(&text)?
+            .files
+            .iter()
+            .map(|f| cue::resolve_local_file(parent, &f.filename))
+            .collect::<Result<Vec<_>, _>>()?
+    };
     let sidecars = redumper::find_sidecars(path);
     let raw_present = sidecars.scram.is_some();
-    let raw_valid = raw_present && redumper::validate_current_cd_raw(&sidecars).is_ok();
+    let raw = if raw_present {
+        Some(redumper::pcm::read_audio_layout(&sidecars))
+    } else {
+        None
+    };
+    let bin = CueAudioDisc::open(path);
+    let use_raw =
+        raw_present && (preferences.dump_preference == DumpPreference::Redumper || bin.is_err());
+    let layouts: Vec<(u8, f64, bool)> = if use_raw {
+        raw.unwrap()?
+            .iter()
+            .map(|t| {
+                (
+                    t.number,
+                    (t.end_frame - t.start_frame) as f64 / 44100.0,
+                    t.pre_emphasis,
+                )
+            })
+            .collect()
+    } else {
+        bin?.tracks
+            .iter()
+            .filter(|t| t.kind == TrackKind::Audio)
+            .map(|t| {
+                (
+                    t.number,
+                    (t.end_frame - t.start_frame) as f64 / 44100.0,
+                    t.pre_emphasis,
+                )
+            })
+            .collect()
+    };
+    let has_emphasis = layouts.iter().any(|t| t.2);
     let cdtext = sidecars
         .cdtext
         .as_ref()
@@ -259,43 +396,75 @@ fn disc_album(
         .to_str()
         .context("CUE path must be valid UTF-8")?
         .to_owned();
+    let mut cue_names: BTreeMap<u8, (Option<String>, Option<String>)> = BTreeMap::new();
+    let mut current = None;
+    for line in text.lines() {
+        let mut parts = line.trim().splitn(2, char::is_whitespace);
+        let keyword = parts.next().unwrap_or("").to_ascii_uppercase();
+        let rest = parts.next().unwrap_or("").trim();
+        if keyword == "TRACK" {
+            current = rest
+                .split_whitespace()
+                .next()
+                .and_then(|n| n.parse::<u8>().ok());
+        } else if let Some(number) = current {
+            let names = cue_names.entry(number).or_default();
+            let value = rest.trim_matches('"').trim();
+            if !value.is_empty() {
+                match keyword.as_str() {
+                    "TITLE" => names.0 = Some(value.to_owned()),
+                    "PERFORMER" => names.1 = Some(value.to_owned()),
+                    _ => {}
+                }
+            }
+        }
+    }
     let tracks = layouts
         .iter()
-        .filter(|l| l.kind == TrackKind::Audio)
         .map(|l| Track {
-            id: id(library, format!("{cue_path}#{}", l.number)),
-            title: format!("Track {}", l.number),
-            artist: artist.clone(),
-            number: l.number as u32,
+            id: id(library, format!("{cue_path}#{}", l.0)),
+            title: block
+                .and_then(|b| b.tracks.iter().find(|t| t.track_number == l.0))
+                .and_then(|t| t.title.clone())
+                .or_else(|| cue_names.get(&l.0).and_then(|n| n.0.clone()))
+                .unwrap_or_else(|| format!("Track {}", l.0)),
+            artist: block
+                .and_then(|b| b.tracks.iter().find(|t| t.track_number == l.0))
+                .and_then(|t| t.performer.clone())
+                .or_else(|| cue_names.get(&l.0).and_then(|n| n.1.clone()))
+                .unwrap_or_else(|| artist.clone()),
+            number: l.0 as u32,
             disc: 1,
-            duration_seconds: l.length_sectors as f64 / 75.0,
-            access: if raw_valid && preferences.dump_preference == DumpPreference::Redumper {
-                MediaAccess::Managed {
-                    provider: "redumper-pending".into(),
-                    item: cue_path.clone(),
+            duration_seconds: l.1,
+            access: if use_raw {
+                MediaAccess::RedumperTrack {
+                    anchor: cue_path.clone(),
+                    number: l.0,
                 }
             } else {
                 MediaAccess::DiscTrack {
                     cue: cue_path.clone(),
-                    number: l.number,
+                    number: l.0,
                 }
             },
         })
         .collect();
-    let label = if raw_valid && preferences.dump_preference == DumpPreference::Redumper {
-        "Redumper raw • decoder pending; select BIN/CUE in Settings and reopen"
-    } else if raw_present && !raw_valid {
-        "BIN/CUE • incomplete or invalid raw sidecars"
-    } else {
-        "BIN/CUE"
-    };
+    let label = format!(
+        "{}{}",
+        if use_raw { "Redumper raw" } else { "BIN/CUE" },
+        if has_emphasis {
+            " • pre-emphasis present; de-emphasis not yet applied"
+        } else {
+            ""
+        }
+    );
     Ok((
         Album {
             id: id(library, cue_path),
             title,
             artist,
             tracks,
-            source_label: label.into(),
+            source_label: label,
         },
         files,
     ))
@@ -397,5 +566,202 @@ mod tests {
             preferences: Preferences::default(),
         };
         assert!(p.scan(&|| true).is_err());
+    }
+    fn write_track(
+        root: &Path,
+        relative: &str,
+        album: Option<&str>,
+        artist: &str,
+        number: u32,
+        album_artist: Option<&str>,
+    ) {
+        use lofty::{
+            config::WriteOptions,
+            prelude::TagExt,
+            tag::{Tag, TagType},
+        };
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut wav = hound::WavWriter::create(
+            &path,
+            hound::WavSpec {
+                channels: 2,
+                sample_rate: 44100,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        wav.write_sample(0i16).unwrap();
+        wav.write_sample(0i16).unwrap();
+        wav.finalize().unwrap();
+        let mut tag = Tag::new(TagType::Id3v2);
+        if let Some(album) = album {
+            tag.set_album(album.into());
+        }
+        tag.set_artist(artist.into());
+        tag.set_title(format!("Song {number}"));
+        tag.set_track(number);
+        if let Some(artist) = album_artist {
+            tag.insert_text(ItemKey::AlbumArtist, artist.into());
+        }
+        tag.save_to_path(&path, WriteOptions::default()).unwrap();
+    }
+    fn scan_fixture(root: &Path) -> Library {
+        FilesystemProvider {
+            root: root.into(),
+            preferences: Preferences::default(),
+        }
+        .scan(&|| false)
+        .unwrap()
+    }
+    #[test]
+    fn compilation_tracks_merge_across_artist_first_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        write_track(
+            dir.path(),
+            "Artist A/Collection/one.wav",
+            Some("Collection"),
+            "Artist A",
+            1,
+            None,
+        );
+        write_track(
+            dir.path(),
+            "Artist B/Collection/two.wav",
+            Some("Collection"),
+            "Artist B",
+            2,
+            None,
+        );
+        let library = scan_fixture(dir.path());
+        assert!(library.warnings.is_empty(), "{:?}", library.warnings);
+        assert_eq!(library.albums.len(), 1);
+        assert_eq!(library.albums[0].artist, "Various artists");
+        assert_eq!(library.albums[0].tracks.len(), 2);
+        assert_eq!(library.albums[0].tracks[0].artist, "Artist A");
+    }
+    #[test]
+    fn compilation_in_one_folder_does_not_split_by_track_artist() {
+        let dir = tempfile::tempdir().unwrap();
+        write_track(
+            dir.path(),
+            "Collection/one.wav",
+            Some("Collection"),
+            "Artist A",
+            1,
+            None,
+        );
+        write_track(
+            dir.path(),
+            "Collection/two.wav",
+            Some("Collection"),
+            "Artist B",
+            2,
+            None,
+        );
+        assert_eq!(scan_fixture(dir.path()).albums.len(), 1);
+    }
+    #[test]
+    fn duplicated_track_sets_and_distinct_album_artists_stay_separate() {
+        let dir = tempfile::tempdir().unwrap();
+        write_track(
+            dir.path(),
+            "copy-a/one.wav",
+            Some("Collection"),
+            "Artist",
+            1,
+            None,
+        );
+        write_track(
+            dir.path(),
+            "copy-b/one.wav",
+            Some("Collection"),
+            "Artist",
+            1,
+            None,
+        );
+        assert_eq!(scan_fixture(dir.path()).albums.len(), 2);
+        let dir = tempfile::tempdir().unwrap();
+        write_track(
+            dir.path(),
+            "a/one.wav",
+            Some("Greatest Hits"),
+            "Artist A",
+            1,
+            Some("Artist A"),
+        );
+        write_track(
+            dir.path(),
+            "b/two.wav",
+            Some("Greatest Hits"),
+            "Artist B",
+            2,
+            Some("Artist B"),
+        );
+        assert_eq!(scan_fixture(dir.path()).albums.len(), 2);
+    }
+    #[test]
+    fn untagged_folder_names_are_not_enough_to_merge_albums() {
+        let dir = tempfile::tempdir().unwrap();
+        write_track(dir.path(), "a/Music/one.wav", None, "Artist A", 1, None);
+        write_track(dir.path(), "b/Music/two.wav", None, "Artist B", 2, None);
+        assert_eq!(scan_fixture(dir.path()).albums.len(), 2);
+    }
+    #[test]
+    fn raw_only_discovery_preference_and_invalid_raw_do_not_silently_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let anchor = dir.path().join("disc.cue");
+        let samples = (45150u64 + 1) * 588;
+        std::fs::File::create(anchor.with_extension("scram"))
+            .unwrap()
+            .set_len(samples * 4)
+            .unwrap();
+        std::fs::File::create(anchor.with_extension("state"))
+            .unwrap()
+            .set_len(samples)
+            .unwrap();
+        std::fs::File::create(anchor.with_extension("subcode"))
+            .unwrap()
+            .set_len((45150 + 1) * 96)
+            .unwrap();
+        let mut toc = vec![0, 18, 1, 1];
+        for (n, lba) in [(1, 0i32), (0xaa, 1)] {
+            toc.extend([0, 0x10, n, 0]);
+            toc.extend(lba.to_be_bytes());
+        }
+        std::fs::write(anchor.with_extension("toc"), toc).unwrap();
+        let mut provider = FilesystemProvider {
+            root: dir.path().into(),
+            preferences: Preferences::default(),
+        };
+        let library = provider.scan(&|| false).unwrap();
+        assert!(library.warnings.is_empty(), "{:?}", library.warnings);
+        assert_eq!(library.albums.len(), 1);
+        assert!(matches!(
+            library.albums[0].tracks[0].access,
+            MediaAccess::RedumperTrack { .. }
+        ));
+        assert_eq!(library.albums[0].tracks[0].duration_seconds, 1.0 / 75.0);
+        std::fs::write(
+            &anchor,
+            "FILE \"disc.bin\" BINARY\n TRACK 01 AUDIO\n INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+        std::fs::write(anchor.with_extension("bin"), vec![0; 2352]).unwrap();
+        let library = provider.scan(&|| false).unwrap();
+        assert_eq!(library.albums.len(), 1);
+        provider.preferences.dump_preference = DumpPreference::BinCue;
+        let library = provider.scan(&|| false).unwrap();
+        assert!(matches!(
+            library.albums[0].tracks[0].access,
+            MediaAccess::DiscTrack { .. }
+        ));
+        std::fs::remove_file(anchor.with_extension("state")).unwrap();
+        provider.preferences.dump_preference = DumpPreference::Redumper;
+        let library = provider.scan(&|| false).unwrap();
+        assert!(library.albums.is_empty());
+        assert_eq!(library.warnings.len(), 1);
+        assert!(library.warnings[0].contains("missing .state"));
     }
 }

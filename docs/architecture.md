@@ -15,7 +15,7 @@ The current implementation establishes these boundaries but does not yet impleme
 
 ## Identities and sources
 
-Every item includes library, provider and item IDs. Filesystem identifiers initially use canonical paths; renaming/moving files changes identity. Metadata release IDs must never collapse duplicate local copies.
+Every item includes library, provider and item IDs. Filesystem identifiers initially use canonical paths; renaming/moving files changes identity. Complementary tagged album fragments can merge across artist folders. Conflicting disc/track slots and distinct explicit album artists keep copies separate. Metadata release IDs alone must not collapse duplicate copies.
 
 Media access is independent from library enumeration. The current variants are local files, CUE track spans and managed items. Future access adapters must support opaque native handles, ranged HTTP access, sequential-only streams, and availability changes. Do not convert all sources to `PathBuf` or assume seek is supported.
 
@@ -33,7 +33,7 @@ CarPlay uses native templates and the audio entitlement. Android Auto uses the p
 
 Keep sample positions as integers and display time as a projection. The engine keeps output open between compatible tracks; input is prepared ahead through a finite ring. It compensates resampler delay and bounds output duration. Tests currently establish WAV sample/seek behavior and resampling length, not all-format or hardware gaplessness.
 
-CD playback must honor INDEX boundaries, pregaps, HTOA, data-track exclusion and offset semantics. Raw redumper sample alignment and state interpretation belong in reusable junk-libs parsing/reading code, with app policy in this project. Never apply a drive offset twice.
+CD playback uses junk-libs `CueAudioDisc` and `RawAudioReader`, whose public positions use integer stereo sample frames. The CUE playback timeline preserves indexes and inserts synthetic silence without changing the older hashing APIs. Current all-audio redumper images use the raw recording timeline and TOC boundaries; drive read offset is already applied. Raw readers accept `Read + Seek + Send` sources for future range-backed access. The filesystem adapter selects the representation and stores a distinct `MediaAccess::RedumperTrack`; the audio adapter selects strict rejection of unrecovered samples. PRE is retained as metadata, with de-emphasis still pending. The raw reader deliberately rejects automatic mixed-mode/multisession playback pending reliable Q/index reconstruction. Hidden CUE audio has a library range API but no UI yet.
 
 Bit-perfect output is a future goal, not the initial contract. Output uses the default device configuration and conversion when needed. Device loss is currently reported; automatic reopening, route changes, mobile interruptions and exclusive output are future adapters.
 
@@ -41,8 +41,12 @@ Bit-perfect output is a future goal, not the initial contract. Output uses the d
 
 Single active library is development-only. Opening a different library can replace the current cache. Failed scans must not replace it with an empty catalog. Cache stays on local storage; source media is read-only.
 
-Current grouping uses containing directory, album title and album artist, and sorts by disc/track. Future grouping should recognize multi-disc subfolders while preserving distinct editions and copies.
+Current grouping first gathers tracks by folder, tagged album title and explicit album artist (never by individual track artist). It then merges same-title tagged fragments across folders when their explicit album artists do not conflict and their disc/track slots do not overlap. Missing track numbers fall back to track-title conflicts. Mixed track artists display as Various artists unless an album artist is specified. Untagged folder names alone do not justify cross-folder merging. This deliberately permits title-based fallback for artist-first collections, with some ambiguity when unrelated albums lack identifying tags. Tracks sort by disc/track. Reopening a library rescans with this rule; cached snapshots retain their previous grouping until rescanned.
 
-Future metadata order: cached user corrections, trustworthy embedded/CD-TEXT fields, MusicBrainz TOC/release candidates, optional GnuDB fallback, filename fallback. Store provenance, confidence, timestamps, negative results and overrides separately. Artwork uses local art first, then Cover Art Archive. Automatic lookup defaults on but has a preference. Rate-limit providers and never block playback on metadata.
+Metadata currently fills placeholders after local tags, CUE TITLE/PERFORMER and CD-TEXT. `amp-library::metadata` owns MusicBrainz query construction, exact audio TOC IDs, release/medium matching, response caching and provenance. It uses a bounded blocking HTTP client exclusively on a background worker. Disc-ID candidates must agree on names; file name searches require a single exact release/artist hit plus complete track counts and duration/title agreement. Embedded release IDs select medium positions explicitly. Fully named file albums need no requests.
+
+The local scan publishes first. A cache pass runs before the network pass; an atomic preference disables network access, and scan generations discard stale callbacks when switching libraries. The UI changes individual rows and selected-track labels without changing playback order/access. HTTP responses live in `metadata_http` with positive/negative expiry; per-album matches live in `metadata_matches`, separate from the library snapshot. Stale cache results remain available offline. Snapshot persistence occurs at completion; the response cache also allows interrupted enrichment to resume on restart. Existing non-placeholder values are preserved, including values corrected in the cached snapshot. A dedicated user-override editor/model is still future work.
+
+Providers should remain independent of UI/platform library access. Future work includes GnuDB fallback, manual candidate selection, explicit overrides, additional descriptive fields and artwork (local art first, then Cover Art Archive). No audio uploads or source-file writes are involved.
 
 No playlists, equalizer, metadata writing, ripping, transcoding/export, music uploads or curator features in the initial scope.

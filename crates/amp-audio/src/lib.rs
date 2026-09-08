@@ -2,7 +2,13 @@
 use amp_core::{MediaAccess, Track};
 use anyhow::{Context, Result, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use junk_libs_disc::pcm::TrackPcmReader;
+use junk_libs_disc::{
+    cue_audio::{CueAudioDisc, CueAudioReader},
+    redumper::{
+        find_sidecars,
+        pcm::{InvalidSamplePolicy, RawAudioReader},
+    },
+};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
@@ -210,7 +216,8 @@ struct FileDecoder {
 }
 enum Source {
     File(FileDecoder),
-    Disc(TrackPcmReader),
+    Disc(CueAudioReader),
+    Raw(RawAudioReader),
 }
 struct AudioReader {
     source: Source,
@@ -224,18 +231,27 @@ impl AudioReader {
                 bail!("{provider}: playback adapter is not implemented")
             }
             MediaAccess::DiscTrack { cue, number } => {
-                let mut reader = TrackPcmReader::from_cue(std::path::Path::new(cue), *number)?;
-                let samples = (seconds * 44100.0) as u64;
-                reader.seek_to_sector((samples / 588).min(reader.total_sectors() as u64) as u32)?;
-                let mut result = Self {
+                let mut reader =
+                    CueAudioDisc::open(std::path::Path::new(cue))?.track_reader(*number)?;
+                reader.seek_frame(((seconds * 44100.0) as u64).min(reader.total_frames()))?;
+                Ok(Self {
                     source: Source::Disc(reader),
                     buffered: VecDeque::new(),
                     rate: 44100,
-                };
-                for _ in 0..samples % 588 {
-                    result.next()?;
-                }
-                Ok(result)
+                })
+            }
+            MediaAccess::RedumperTrack { anchor, number } => {
+                let mut reader = RawAudioReader::open(
+                    &find_sidecars(std::path::Path::new(anchor)),
+                    *number,
+                    InvalidSamplePolicy::Reject,
+                )?;
+                reader.seek_frame(((seconds * 44100.0) as u64).min(reader.total_frames()))?;
+                Ok(Self {
+                    source: Source::Raw(reader),
+                    buffered: VecDeque::new(),
+                    rate: 44100,
+                })
             }
             MediaAccess::File { locator } => {
                 let stream =
@@ -310,15 +326,30 @@ impl AudioReader {
                 return Ok(Some(frame));
             }
             match &mut self.source {
-                Source::Disc(reader) => match reader.next() {
-                    Some(sector) => self.buffered.extend(sector?.into_iter().map(|s| {
-                        [
-                            (s as u16 as i16) as f32 / 32768.0,
-                            ((s >> 16) as u16 as i16) as f32 / 32768.0,
-                        ]
-                    })),
-                    None => return Ok(None),
-                },
+                Source::Disc(reader) => {
+                    let mut frames = [[0; 2]; 588];
+                    let count = reader.read_frames(&mut frames)?;
+                    if count == 0 {
+                        return Ok(None);
+                    }
+                    self.buffered.extend(
+                        frames[..count]
+                            .iter()
+                            .map(|f| [f[0] as f32 / 32768.0, f[1] as f32 / 32768.0]),
+                    );
+                }
+                Source::Raw(reader) => {
+                    let mut frames = [[0; 2]; 588];
+                    let (count, _quality) = reader.read_frames(&mut frames)?;
+                    if count == 0 {
+                        return Ok(None);
+                    }
+                    self.buffered.extend(
+                        frames[..count]
+                            .iter()
+                            .map(|f| [f[0] as f32 / 32768.0, f[1] as f32 / 32768.0]),
+                    );
+                }
                 Source::File(reader) => {
                     let packet = match reader.format.next_packet() {
                         Ok(p) => p,
@@ -681,5 +712,64 @@ mod tests {
         assert!(reader.next().unwrap().is_none());
         let mut reader = Converted::new(&track, 100.0 / 44100.0, 44100).unwrap();
         assert_eq!(reader.next().unwrap().unwrap()[0], 688.0 / 32768.0);
+    }
+    #[test]
+    fn redumper_matches_bin_cue_and_repeated_sample_seeks() {
+        use std::io::{Seek, SeekFrom, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let anchor = dir.path().join("disc.cue");
+        let origin = 45150u64 * 588;
+        let mut scram = File::create(anchor.with_extension("scram")).unwrap();
+        scram.set_len((origin + 1176) * 4).unwrap();
+        scram.seek(SeekFrom::Start(origin * 4)).unwrap();
+        let mut bytes = Vec::new();
+        for i in 0..1176i16 {
+            bytes.extend(i.to_le_bytes());
+            bytes.extend((-i).to_le_bytes());
+        }
+        scram.write_all(&bytes).unwrap();
+        std::fs::write(anchor.with_extension("bin"), bytes).unwrap();
+        let mut state = File::create(anchor.with_extension("state")).unwrap();
+        state.set_len(origin + 1176).unwrap();
+        state.seek(SeekFrom::Start(origin)).unwrap();
+        state.write_all(&[4; 1176]).unwrap();
+        File::create(anchor.with_extension("subcode"))
+            .unwrap()
+            .set_len((45150 + 2) * 96)
+            .unwrap();
+        let mut toc = vec![0, 26, 1, 2];
+        for (n, lba) in [(1, 0i32), (2, 1), (0xaa, 2)] {
+            toc.extend([0, 0x10, n, 0]);
+            toc.extend(lba.to_be_bytes());
+        }
+        std::fs::write(anchor.with_extension("toc"), toc).unwrap();
+        std::fs::write(&anchor, "FILE \"disc.bin\" BINARY\n TRACK 01 AUDIO\n INDEX 01 00:00:00\n TRACK 02 AUDIO\n INDEX 01 00:00:01\n").unwrap();
+        let (_other, mut track) = fixture(44100, 588);
+        for number in [1, 2, 1, 2] {
+            for offset in [0, 1, 100, 587, 588] {
+                track.access = MediaAccess::RedumperTrack {
+                    anchor: anchor.to_string_lossy().into_owned(),
+                    number,
+                };
+                let mut raw = Converted::new(&track, offset as f64 / 44100.0, 44100).unwrap();
+                track.access = MediaAccess::DiscTrack {
+                    cue: anchor.to_string_lossy().into_owned(),
+                    number,
+                };
+                let mut bin = Converted::new(&track, offset as f64 / 44100.0, 44100).unwrap();
+                for _ in offset..588 {
+                    assert_eq!(raw.next().unwrap(), bin.next().unwrap());
+                }
+                assert!(raw.next().unwrap().is_none());
+                assert!(bin.next().unwrap().is_none());
+            }
+        }
+        state.seek(SeekFrom::Start(origin)).unwrap();
+        state.write_all(&[1]).unwrap();
+        track.access = MediaAccess::RedumperTrack {
+            anchor: anchor.to_string_lossy().into_owned(),
+            number: 1,
+        };
+        assert!(Converted::new(&track, 0.0, 44100).unwrap().next().is_err());
     }
 }

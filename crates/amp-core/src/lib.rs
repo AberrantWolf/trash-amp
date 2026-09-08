@@ -12,6 +12,7 @@ pub struct ItemId {
 pub enum MediaAccess {
     File { locator: String },
     DiscTrack { cue: String, number: u8 },
+    RedumperTrack { anchor: String, number: u8 },
     Managed { provider: String, item: String },
 }
 

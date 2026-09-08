@@ -1,6 +1,7 @@
-import { Button, LineEdit, ListView, Slider, CheckBox, AboutSlint } from "std-widgets.slint";
+import { Button, ScrollView, ListView, Slider, CheckBox, AboutSlint } from "std-widgets.slint";
 export struct AlbumRow { title: string, artist: string, detail: string }
 export struct TrackRow { title: string, duration: string, number: string }
+import { TransportSeek } from "transport-seek.slint";
 export component PlayerWindow inherits Window {
     title: "Trash Amp";
     preferred-width: 980px; preferred-height: 680px; min-width: 330px; min-height: 230px; max-width: 10000px; max-height: 10000px;
@@ -19,7 +20,8 @@ export component PlayerWindow inherits Window {
     in property <string> elapsed: "0:00";
     in property <string> duration: "0:00";
     in property <bool> playing;
-    in property <float> progress;
+    in-out property <float> progress;
+    out property <bool> scrubbing: playhead.scrubbing;
     in property <float> level;
     in property <bool> scanning;
     in property <int> selected-album: -1;
@@ -27,7 +29,7 @@ export component PlayerWindow inherits Window {
     in-out property <bool> reduced-motion;
     in-out property <bool> prefer-raw: true;
     in-out property <bool> automatic-metadata: true;
-    private property <bool> settings;
+    in-out property <bool> settings;
     in-out property <bool> show-library: true;
     private property <bool> show-queue;
     in property <bool> wide: true;
@@ -48,21 +50,32 @@ export component PlayerWindow inherits Window {
         }
         if root.settings: Rectangle {
             background: #303942; border-radius: 8px;
-            VerticalLayout {
-                padding: 12px; spacing: 8px;
-                CheckBox { text: "Prefer redumper raw dumps"; checked <=> root.prefer-raw;
-                    toggled => { root.preferences-changed(); } }
-                CheckBox { text: "Automatic metadata (service integration pending)"; checked <=> root.automatic-metadata;
-                    toggled => { root.preferences-changed(); } }
-                CheckBox { text: "Reduce motion"; checked <=> root.reduced-motion;
-                    toggled => { root.preferences-changed(); } }
-                Button { text: "Load 2,000-album layout demo"; clicked => { root.demo(); root.settings = false; } }
-                HorizontalLayout {
-                    Text { text: "Text size"; color: #dce5ed; }
-                    Slider { minimum: 1; maximum: 1.6; value: root.text-scale;
-                        changed(v) => { root.text-scale = v; root.preferences-changed(); } }
+            settings-scroll := ScrollView {
+                width: 100%; height: 100%;
+                viewport-width: self.visible-width;
+                viewport-height: max(self.visible-height, settings-content.min-height);
+                settings-content := VerticalLayout {
+                    width: settings-scroll.visible-width;
+                    height: settings-scroll.viewport-height;
+                    padding: 12px; spacing: 12px;
+                    CheckBox { text: "Prefer redumper raw dumps"; checked <=> root.prefer-raw;
+                        toggled => { root.preferences-changed(); } }
+                    CheckBox { text: "Automatic metadata from MusicBrainz"; checked <=> root.automatic-metadata;
+                        toggled => { root.preferences-changed(); } }
+                    CheckBox { text: "Reduce motion"; checked <=> root.reduced-motion;
+                        toggled => { root.preferences-changed(); } }
+                    Button { text: "Load 2,000-album layout demo"; clicked => { root.demo(); root.settings = false; } }
+                    HorizontalLayout {
+                        Text { text: "Text size"; color: #dce5ed; }
+                        Slider { minimum: 1; maximum: 1.6; value: root.text-scale;
+                            changed(v) => { root.text-scale = v; root.preferences-changed(); } }
+                    }
+                    Rectangle { min-height: 12px; vertical-stretch: 1; }
+                    HorizontalLayout {
+                        alignment: center;
+                        AboutSlint { width: 240px; height: 112px; }
+                    }
                 }
-                AboutSlint { }
             }
         }
         if !root.short && !root.settings: HorizontalLayout {
@@ -138,14 +151,14 @@ export component PlayerWindow inherits Window {
                 padding: 12px; spacing: 6px;
                 HorizontalLayout {
                     spacing: 10px;
-                    Button { text: "⏮"; width: 38px; clicked => { root.previous(); } }
+                    Button { icon: @image-url("icons/previous.svg"); accessible-label: "Previous track"; width: 40px; clicked => { root.previous(); } }
                     Rectangle {
                         width: 48px; height: 40px; border-radius: 12px;
                         background: #7ca7c9;
                         opacity: root.playing && !root.reduced-motion ? 0.82 + 0.18 * sin(animation-tick() / 1s * 100deg) : 1;
-                        Button { text: root.playing ? "Ⅱ" : "▶"; accessible-label: root.playing ? "Pause" : "Play"; clicked => { root.toggle-play(); } }
+                        Button { icon: root.playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg"); accessible-label: root.playing ? "Pause" : "Play"; clicked => { root.toggle-play(); } }
                     }
-                    Button { text: "⏭"; width: 38px; clicked => { root.next(); } }
+                    Button { icon: @image-url("icons/next.svg"); accessible-label: "Next track"; width: 40px; clicked => { root.next(); } }
                     VerticalLayout {
                         Text { text: root.now-title; color: #edf3f8; overflow: elide; font-weight: 600; }
                         Text { text: root.now-artist; color: #93acbf; overflow: elide; font-size: 12px * root.text-scale; }
@@ -158,8 +171,7 @@ export component PlayerWindow inherits Window {
                 HorizontalLayout {
                     spacing: 8px;
                     Text { text: root.elapsed; color: #97adbe; width: 40px; vertical-alignment: center; }
-                    Slider { value: root.progress * 100; minimum: 0; maximum: 100;
-                        released(v) => { root.seek(v / 100); } }
+                    playhead := TransportSeek { position <=> root.progress; seek(v) => { root.seek(v); } }
                     Text { text: root.duration; color: #97adbe; width: 40px; vertical-alignment: center; }
                 }
             }

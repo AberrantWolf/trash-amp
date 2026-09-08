@@ -15,7 +15,7 @@ amp-audio = { path = "crates/amp-audio" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-junk-libs-disc = { git = "https://github.com/AberrantWolf/junk-libs", rev = "57b6e8aa0f1535b3aa9792d71900ddc443ce7841" }
+junk-libs-disc = { path = "../junk-libs/junk-libs-disc" }
 
 [profile.dev.package."*"]
 opt-level = 2

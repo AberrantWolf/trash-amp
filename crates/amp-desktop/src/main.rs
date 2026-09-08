@@ -1,13 +1,13 @@
-use amp_core::{DumpPreference, Library, Preferences, Track};
+use amp_core::{Album, DumpPreference, Library, Preferences, Track};
 use amp_library::{FilesystemProvider, Store};
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::{
     cell::RefCell,
     path::PathBuf,
     rc::Rc,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     time::Duration,
@@ -26,12 +26,37 @@ struct State {
 enum ScanEvent {
     Done(u64, anyhow::Result<Library>),
     Progress(u64, usize),
+    Metadata(u64, Album),
+    MetadataDone(u64, anyhow::Result<()>),
+}
+fn spawn_metadata(
+    mut library: Library,
+    cache: PathBuf,
+    generation: Arc<AtomicU64>,
+    version: u64,
+    enabled: Arc<AtomicBool>,
+    tx: mpsc::Sender<ScanEvent>,
+) {
+    std::thread::spawn(move || {
+        let result = Store::open(&cache).and_then(|store| {
+            amp_library::metadata::enrich(
+                &mut library,
+                &store,
+                &|| enabled.load(Ordering::Relaxed),
+                &|| generation.load(Ordering::Relaxed) != version,
+                &mut |album| {
+                    let _ = tx.send(ScanEvent::Metadata(version, album.clone()));
+                },
+            )
+        });
+        let _ = tx.send(ScanEvent::MetadataDone(version, result));
+    });
 }
 fn time(seconds: f64) -> SharedString {
     let s = seconds.max(0.0) as u64;
     format!("{}:{:02}", s / 60, s % 60).into()
 }
-fn albums(ui: &PlayerWindow, state: &State) {
+fn refresh_album_rows(ui: &PlayerWindow, state: &State) {
     ui.set_albums(ModelRc::new(VecModel::from(
         state
             .library
@@ -44,6 +69,9 @@ fn albums(ui: &PlayerWindow, state: &State) {
             })
             .collect::<Vec<_>>(),
     )));
+}
+fn albums(ui: &PlayerWindow, state: &State) {
+    refresh_album_rows(ui, state);
     ui.set_selected_album(-1);
     ui.set_tracks(ModelRc::default());
     ui.set_album_title("Select an album".into());
@@ -140,15 +168,24 @@ fn main() -> anyhow::Result<()> {
     albums(&ui, &state.borrow());
     let (tx, rx) = mpsc::channel();
     let generation = Arc::new(AtomicU64::new(0));
+    let metadata_enabled = Arc::new(AtomicBool::new(
+        state.borrow().preferences.automatic_metadata,
+    ));
+    let cache_path = data.join("library.sqlite3");
     let scan: Rc<dyn Fn(PathBuf)> = {
         let state = state.clone();
         let weak = ui.as_weak();
         let generation = generation.clone();
+        let metadata_enabled = metadata_enabled.clone();
+        let cache_path = cache_path.clone();
+        let tx = tx.clone();
         Rc::new(move |root| {
             let version = generation.fetch_add(1, Ordering::Relaxed) + 1;
             let cancel = generation.clone();
             let tx = tx.clone();
             let preferences = state.borrow().preferences.clone();
+            let metadata_enabled = metadata_enabled.clone();
+            let cache_path = cache_path.clone();
             if let Some(ui) = weak.upgrade() {
                 ui.set_scanning(true);
                 ui.set_status("Scanning music folder…".into());
@@ -161,7 +198,15 @@ fn main() -> anyhow::Result<()> {
                         let _ = tx.send(ScanEvent::Progress(version, n));
                     },
                 );
-                let _ = tx.send(ScanEvent::Done(version, result));
+                match result {
+                    Ok(library) => {
+                        let _ = tx.send(ScanEvent::Done(version, Ok(library.clone())));
+                        spawn_metadata(library, cache_path, cancel, version, metadata_enabled, tx);
+                    }
+                    Err(error) => {
+                        let _ = tx.send(ScanEvent::Done(version, Err(error)));
+                    }
+                }
             });
         })
     };
@@ -307,12 +352,14 @@ fn main() -> anyhow::Result<()> {
     {
         let state = state.clone();
         let weak = ui.as_weak();
+        let metadata_enabled = metadata_enabled.clone();
         ui.on_preferences_changed(move || {
             if let Some(ui) = weak.upgrade() {
                 let mut s = state.borrow_mut();
                 s.preferences.text_scale = ui.get_text_scale();
                 s.preferences.reduced_motion = ui.get_reduced_motion();
                 s.preferences.automatic_metadata = ui.get_automatic_metadata();
+                metadata_enabled.store(s.preferences.automatic_metadata, Ordering::Relaxed);
                 s.preferences.dump_preference = if ui.get_prefer_raw() {
                     DumpPreference::Redumper
                 } else {
@@ -322,7 +369,7 @@ fn main() -> anyhow::Result<()> {
                     ui.set_status(format!("Could not save settings: {e}").into())
                 } else {
                     ui.set_status(
-                        "Settings saved. Reopen the folder to change dump selection.".into(),
+                        "Settings saved. Reopen for dump selection or new metadata lookups.".into(),
                     )
                 }
             }
@@ -333,6 +380,7 @@ fn main() -> anyhow::Result<()> {
         let state = state.clone();
         let weak = ui.as_weak();
         let generation = generation.clone();
+        let metadata_enabled = metadata_enabled.clone();
         timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(50),
@@ -374,6 +422,59 @@ fn main() -> anyhow::Result<()> {
                                 Err(e) => ui.set_status(format!("Library unchanged: {e:#}").into()),
                             }
                         }
+                        ScanEvent::Metadata(v, album)
+                            if v == generation.load(Ordering::Relaxed) =>
+                        {
+                            if let Some(index) =
+                                s.library.albums.iter().position(|a| a.id == album.id)
+                            {
+                                // Playback access/order remain unchanged; refresh display names only.
+                                let state = &mut *s;
+                                for t in state.playlist.iter_mut().chain(state.queued.iter_mut()) {
+                                    if let Some(updated) =
+                                        album.tracks.iter().find(|n| n.id == t.id)
+                                    {
+                                        t.title = updated.title.clone();
+                                        t.artist = updated.artist.clone();
+                                    }
+                                }
+                                s.library.albums[index] = album;
+                                if let Some(model) = ui
+                                    .get_albums()
+                                    .as_any()
+                                    .downcast_ref::<VecModel<AlbumRow>>()
+                                {
+                                    let a = &s.library.albums[index];
+                                    model.set_row_data(
+                                        index,
+                                        AlbumRow {
+                                            title: a.title.clone().into(),
+                                            artist: a.artist.clone().into(),
+                                            detail: a.source_label.clone().into(),
+                                        },
+                                    );
+                                }
+                                if s.selected == Some(index) {
+                                    let show_library = ui.get_show_library();
+                                    select(&ui, &mut s, index);
+                                    ui.set_show_library(show_library);
+                                }
+                            }
+                        }
+                        ScanEvent::MetadataDone(v, result)
+                            if v == generation.load(Ordering::Relaxed) =>
+                        {
+                            if let Err(e) = s.store.save_library(&s.library) {
+                                ui.set_status(format!("Metadata cache save failed: {e}").into());
+                            } else if let Err(e) = result
+                                && metadata_enabled.load(Ordering::Relaxed)
+                            {
+                                ui.set_status(
+                                    format!("Online metadata paused: {e}; local library available")
+                                        .into(),
+                                );
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -396,11 +497,13 @@ fn main() -> anyhow::Result<()> {
                         ui.set_now_artist(track.artist.clone().into());
                         ui.set_elapsed(time(snapshot.seconds));
                         ui.set_duration(time(track.duration_seconds));
-                        ui.set_progress(if track.duration_seconds > 0.0 {
-                            (snapshot.seconds / track.duration_seconds).clamp(0.0, 1.0) as f32
-                        } else {
-                            0.0
-                        });
+                        if !ui.get_scrubbing() {
+                            ui.set_progress(if track.duration_seconds > 0.0 {
+                                (snapshot.seconds / track.duration_seconds).clamp(0.0, 1.0) as f32
+                            } else {
+                                0.0
+                            });
+                        }
                     }
                     if let Some(error) = player.error() {
                         ui.set_status(error.into());
@@ -409,10 +512,23 @@ fn main() -> anyhow::Result<()> {
             },
         );
     }
+    if !args.iter().any(|a| a == "--library" || a == "--demo") {
+        spawn_metadata(
+            state.borrow().library.clone(),
+            cache_path,
+            generation.clone(),
+            generation.load(Ordering::Relaxed),
+            metadata_enabled,
+            tx,
+        );
+    }
     if let Some(index) = args.iter().position(|a| a == "--library")
         && let Some(path) = args.get(index + 1)
     {
         scan(PathBuf::from(path))
+    }
+    if args.iter().any(|a| a == "--settings") {
+        ui.set_settings(true);
     }
     // Reproducible visual QA uses the actual Slint renderer, not a separate mockup.
     if let Some(i) = args.iter().position(|a| a == "--size")
@@ -459,4 +575,54 @@ fn main() -> anyhow::Result<()> {
     ui.run()?;
     generation.fetch_add(1, Ordering::Relaxed);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    slint::slint! {
+        import { TransportSeek } from "ui/transport-seek.slint";
+        export component SeekHarness inherits Window {
+            in-out property <float> position <=> seek.position;
+            out property <float> displayed-position: seek.displayed-position;
+            out property <bool> scrubbing: seek.scrubbing;
+            seek := TransportSeek { width: 100%; height: 100%; }
+        }
+    }
+    #[test]
+    fn playhead_follows_clock_after_user_scrubs_and_restarts() {
+        use slint::platform::{PointerEventButton, WindowEvent};
+        i_slint_backend_testing::init_no_event_loop();
+        let seek = SeekHarness::new().unwrap();
+        seek.window().set_size(slint::LogicalSize::new(400.0, 40.0));
+        seek.show().unwrap();
+        seek.set_position(0.1);
+        for target in [0.5, 0.75] {
+            let position = slint::LogicalPosition::new(400.0 * target, 20.0);
+            seek.window()
+                .dispatch_event(WindowEvent::PointerMoved { position });
+            seek.window().dispatch_event(WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Left,
+            });
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(50));
+            seek.window().dispatch_event(WindowEvent::PointerReleased {
+                position,
+                button: PointerEventButton::Left,
+            });
+            assert!(
+                (seek.get_position() - target).abs() < 0.1,
+                "pointer must change the real slider: value={}, target={target}, size={:?}",
+                seek.get_position(),
+                seek.window().size()
+            );
+            assert!(!seek.get_scrubbing());
+            seek.set_position(0.0);
+            assert_eq!(seek.get_displayed_position(), 0.0);
+            seek.set_position(0.2);
+            assert_eq!(seek.get_displayed_position(), 0.2);
+            seek.set_position(0.3);
+            assert_eq!(seek.get_displayed_position(), 0.3);
+        }
+    }
 }

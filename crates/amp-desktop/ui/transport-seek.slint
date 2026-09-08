@@ -1,0 +1,15 @@
+import { Slider } from "std-widgets.slint";
+// Keep user input linked to the clock after a drag. A one-way Slider.value binding is lost on input.
+export component TransportSeek inherits Rectangle {
+    in-out property <float> position;
+    out property <float> displayed-position: slider.value;
+    out property <bool> scrubbing;
+    callback seek(float);
+    min-height: 24px; min-width: 40px; horizontal-stretch: 1;
+    slider := Slider {
+        width: 100%; height: 100%;
+        value <=> root.position; minimum: 0; maximum: 1; step: 0.01;
+        changed => { root.scrubbing = true; }
+        released(v) => { root.scrubbing = false; root.seek(v); }
+    }
+}
