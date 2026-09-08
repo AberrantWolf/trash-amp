@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/amp-core", "crates/amp-library", "crates/amp-audio", "crates/amp-desktop"]
+default-members = ["crates/amp-desktop"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+amp-core = { path = "crates/amp-core" }
+amp-library = { path = "crates/amp-library" }
+amp-audio = { path = "crates/amp-audio" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+junk-libs-disc = { git = "https://github.com/AberrantWolf/junk-libs", rev = "57b6e8aa0f1535b3aa9792d71900ddc443ce7841" }
+
+[profile.dev.package."*"]
+opt-level = 2

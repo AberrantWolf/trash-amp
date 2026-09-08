@@ -1,0 +1,170 @@
+import { Button, LineEdit, ListView, Slider, CheckBox, AboutSlint } from "std-widgets.slint";
+export struct AlbumRow { title: string, artist: string, detail: string }
+export struct TrackRow { title: string, duration: string, number: string }
+export component PlayerWindow inherits Window {
+    title: "Trash Amp";
+    preferred-width: 980px; preferred-height: 680px; min-width: 330px; min-height: 230px; max-width: 10000px; max-height: 10000px;
+    background: #20262d;
+    default-font-family: "Helvetica Neue";
+    default-font-size: 14px * root.text-scale;
+    in-out property <float> text-scale: 1;
+    in property <[AlbumRow]> albums;
+    in property <[TrackRow]> tracks;
+    in property <[string]> queued;
+    in property <string> album-title: "Your albums, close at hand.";
+    in property <string> album-artist: "Open a music folder to begin.";
+    in property <string> now-title: "Nothing playing";
+    in property <string> now-artist;
+    in property <string> status: "Choose a folder, including a mounted network drive.";
+    in property <string> elapsed: "0:00";
+    in property <string> duration: "0:00";
+    in property <bool> playing;
+    in property <float> progress;
+    in property <float> level;
+    in property <bool> scanning;
+    in property <int> selected-album: -1;
+    in property <int> active-track: -1;
+    in-out property <bool> reduced-motion;
+    in-out property <bool> prefer-raw: true;
+    in-out property <bool> automatic-metadata: true;
+    private property <bool> settings;
+    in-out property <bool> show-library: true;
+    private property <bool> show-queue;
+    in property <bool> wide: true;
+    in property <bool> short: false;
+    callback open-folder(); callback demo(); callback select-album(int);
+    callback play-track(int); callback enqueue(int); callback toggle-play();
+    callback previous(); callback next(); callback seek(float);
+    callback preferences-changed(); callback clear-queue();
+    Rectangle {
+      width: 100%; height: 100%;
+      VerticalLayout {
+        padding: 16px; spacing: 12px;
+        HorizontalLayout {
+            height: 34px;
+            Text { text: "trash amp"; color: #dce5ed; font-size: root.wide ? 20px : 16px; font-weight: 700; min-width: 90px; vertical-alignment: center; overflow: elide; }
+            Button { text: "Open folder"; max-width: 120px; clicked => { root.open-folder(); } }
+            Button { text: "Settings"; max-width: 90px; clicked => { root.settings = !root.settings; } }
+        }
+        if root.settings: Rectangle {
+            background: #303942; border-radius: 8px;
+            VerticalLayout {
+                padding: 12px; spacing: 8px;
+                CheckBox { text: "Prefer redumper raw dumps"; checked <=> root.prefer-raw;
+                    toggled => { root.preferences-changed(); } }
+                CheckBox { text: "Automatic metadata (service integration pending)"; checked <=> root.automatic-metadata;
+                    toggled => { root.preferences-changed(); } }
+                CheckBox { text: "Reduce motion"; checked <=> root.reduced-motion;
+                    toggled => { root.preferences-changed(); } }
+                Button { text: "Load 2,000-album layout demo"; clicked => { root.demo(); root.settings = false; } }
+                HorizontalLayout {
+                    Text { text: "Text size"; color: #dce5ed; }
+                    Slider { minimum: 1; maximum: 1.6; value: root.text-scale;
+                        changed(v) => { root.text-scale = v; root.preferences-changed(); } }
+                }
+                AboutSlint { }
+            }
+        }
+        if !root.short && !root.settings: HorizontalLayout {
+            spacing: 16px;
+            if root.wide || root.show-library: Rectangle {
+                preferred-width: 280px * root.text-scale;
+                max-width: root.wide ? 280px * root.text-scale : 10000px;
+                min-width: 0px; horizontal-stretch: root.wide ? 0 : 1;
+                background: #283039; border-radius: 6px;
+                VerticalLayout {
+                    padding: 8px; spacing: 6px;
+                    Text { text: "Albums"; color: #a8bdcc; height: 24px; font-weight: 600; }
+                    list := ListView {
+                        min-height: 0px; preferred-height: 0px; vertical-stretch: 1;
+                        for album[i] in root.albums: Rectangle {
+                            accessible-role: button;
+                            accessible-label: album.title + " by " + album.artist;
+                            accessible-action-default => { root.select-album(i); root.show-library = false; }
+                            height: 68px * root.text-scale;
+                            background: i == root.selected-album ? #3a5062 : (tile.has-hover ? #333f49 : transparent);
+                            border-radius: 4px;
+                            VerticalLayout {
+                                padding: 9px; spacing: 3px;
+                                Text { text: album.title; color: #edf1f5; overflow: elide; font-weight: 600; }
+                                Text { text: album.artist; color: #adbbc6; overflow: elide; font-size: 12px * root.text-scale; }
+                            }
+                            tile := TouchArea { clicked => { root.select-album(i); root.show-library = false; } }
+                        }
+                    }
+                }
+            }
+            if root.wide || !root.show-library: VerticalLayout {
+                spacing: 10px;
+                if !root.wide: Button { text: "Back to albums"; clicked => { root.show-library = true; } }
+                Text { text: root.album-title; color: #f0f3f7; font-size: 27px * root.text-scale; font-weight: 600; wrap: word-wrap; }
+                Text { text: root.album-artist; color: #a9bac9; wrap: word-wrap; }
+                HorizontalLayout {
+                    Button { text: "Play album"; enabled: root.tracks.length > 0; clicked => { root.play-track(0); } }
+                    Button { text: root.show-queue ? "Tracks" : "Up next (" + root.queued.length + ")";
+                        clicked => { root.show-queue = !root.show-queue; } }
+                }
+                if !root.show-queue: ListView {
+                        min-height: 0px; preferred-height: 0px; vertical-stretch: 1;
+                    for track[i] in root.tracks: Rectangle {
+                        accessible-role: button;
+                        accessible-label: "Play " + track.title;
+                        accessible-action-default => { root.play-track(i); }
+                        height: 48px * root.text-scale;
+                        background: row.has-hover ? #303c47 : transparent;
+                        HorizontalLayout {
+                            spacing: 10px;
+                            Text { text: track.number; color: #8099ad; width: 24px; vertical-alignment: center; }
+                            Text { text: track.title; color: #e1e8ef; overflow: elide; vertical-alignment: center; }
+                            Text { text: track.duration; color: #9eafbd; width: 44px; vertical-alignment: center; }
+                            Button { text: "+"; width: 36px; clicked => { root.enqueue(i); } }
+                        }
+                        row := TouchArea { width: parent.width - 48px; clicked => { root.play-track(i); } }
+                    }
+                }
+                if root.show-queue: VerticalLayout {
+                    Button { text: "Clear up next"; clicked => { root.clear-queue(); } }
+                    ListView {
+                        min-height: 0px; preferred-height: 0px; vertical-stretch: 1;
+                        for title in root.queued: Text { text: title; color: #dce5ed; height: 34px; overflow: elide; }
+                    }
+                }
+            }
+        }
+        Rectangle {
+            height: 108px * root.text-scale;
+            background: #151d24; border-radius: 9px;
+            VerticalLayout {
+                padding: 12px; spacing: 6px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Button { text: "⏮"; width: 38px; clicked => { root.previous(); } }
+                    Rectangle {
+                        width: 48px; height: 40px; border-radius: 12px;
+                        background: #7ca7c9;
+                        opacity: root.playing && !root.reduced-motion ? 0.82 + 0.18 * sin(animation-tick() / 1s * 100deg) : 1;
+                        Button { text: root.playing ? "Ⅱ" : "▶"; accessible-label: root.playing ? "Pause" : "Play"; clicked => { root.toggle-play(); } }
+                    }
+                    Button { text: "⏭"; width: 38px; clicked => { root.next(); } }
+                    VerticalLayout {
+                        Text { text: root.now-title; color: #edf3f8; overflow: elide; font-weight: 600; }
+                        Text { text: root.now-artist; color: #93acbf; overflow: elide; font-size: 12px * root.text-scale; }
+                    }
+                    if root.wide: Rectangle {
+                        width: 68px; background: #293845;
+                        Rectangle { y: parent.height * (1 - root.level); height: parent.height * root.level; width: parent.width; background: #7ca7c9; }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: root.elapsed; color: #97adbe; width: 40px; vertical-alignment: center; }
+                    Slider { value: root.progress * 100; minimum: 0; maximum: 100;
+                        released(v) => { root.seek(v / 100); } }
+                    Text { text: root.duration; color: #97adbe; width: 40px; vertical-alignment: center; }
+                }
+            }
+        }
+        Text { text: root.status; color: #a7b8c6; overflow: elide; height: 18px; font-size: 11px; }
+    }
+    }
+}

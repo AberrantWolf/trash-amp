@@ -1,0 +1,17 @@
+[package]
+name = "trash-amp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+[dependencies]
+amp-core.workspace = true
+amp-library.workspace = true
+amp-audio.workspace = true
+anyhow.workspace = true
+slint = { version = "=1.17.1", default-features = false, features = ["std", "backend-winit", "renderer-skia", "accessibility", "compat-1-2"] }
+rfd = "0.17"
+directories = "6"
+image = { version = "0.25", default-features = false, features = ["png"] }
+[build-dependencies]
+slint-build = "=1.17.1"
