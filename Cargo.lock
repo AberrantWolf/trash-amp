@@ -208,9 +208,10 @@ dependencies = [
  "anyhow",
  "cpal",
  "hound",
+ "junk-libs-audio",
  "junk-libs-disc",
+ "junk-libs-playback",
  "rtrb",
- "rubato",
  "symphonia",
  "tempfile",
 ]
@@ -2904,6 +2905,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "junk-libs-audio"
+version = "0.1.0"
+dependencies = [
+ "junk-libs-core",
+ "junk-libs-disc",
+ "rubato",
+ "symphonia",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "junk-libs-core"
 version = "0.1.0"
 dependencies = [
@@ -2925,6 +2937,13 @@ dependencies = [
  "md5",
  "serde",
  "sha1",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "junk-libs-playback"
+version = "0.1.0"
+dependencies = [
  "thiserror 2.0.20",
 ]
 

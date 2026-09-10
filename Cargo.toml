@@ -16,6 +16,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 junk-libs-disc = { path = "../junk-libs/junk-libs-disc" }
+junk-libs-audio = { path = "../junk-libs/junk-libs-audio", features = ["decode-wav", "disc-readers", "resample"] }
+junk-libs-playback = { path = "../junk-libs/junk-libs-playback" }
 
 [profile.dev.package."*"]
 opt-level = 2

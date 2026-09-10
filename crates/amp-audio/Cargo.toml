@@ -7,10 +7,11 @@ license.workspace = true
 amp-core.workspace = true
 anyhow.workspace = true
 junk-libs-disc.workspace = true
+junk-libs-audio.workspace = true
+junk-libs-playback.workspace = true
 cpal = "0.18.2"
 symphonia = { version = "0.5.5", features = ["all"] }
 rtrb = "0.3"
-rubato = "0.16.2"
 [dev-dependencies]
 hound = "3"
 tempfile = "3"

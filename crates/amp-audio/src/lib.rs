@@ -2,16 +2,18 @@
 use amp_core::{MediaAccess, Track};
 use anyhow::{Context, Result, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use junk_libs_audio::{
+    ByteSource, CuePcmDecoder, FramePosition, MediaHint, PcmChunk, PcmFormat, RedumperPcmDecoder,
+    SincResampler, WavDecoder,
+};
 use junk_libs_disc::{
-    cue_audio::{CueAudioDisc, CueAudioReader},
+    cue_audio::CueAudioDisc,
     redumper::{
         find_sidecars,
         pcm::{InvalidSamplePolicy, RawAudioReader},
     },
 };
-use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-};
+use junk_libs_playback::{Generation, QueueState, QueueTrack};
 use std::{
     collections::VecDeque,
     fs::File,
@@ -60,7 +62,7 @@ pub struct Snapshot {
 }
 enum Command {
     Replace(Vec<Track>, usize),
-    Seek(f64),
+    Seek(u64),
     Next,
     Previous,
     Append(Vec<Track>),
@@ -113,7 +115,12 @@ impl Player {
         self.shared.playing.fetch_xor(true, Ordering::Relaxed);
     }
     pub fn seek(&self, seconds: f64) {
-        let _ = self.commands.send(Command::Seek(seconds.max(0.0)));
+        let frame = if seconds.is_finite() {
+            (seconds.max(0.0) * f64::from(self.rate)).round() as u64
+        } else {
+            0
+        };
+        let _ = self.commands.send(Command::Seek(frame));
     }
     pub fn next(&self) {
         let _ = self.commands.send(Command::Next);
@@ -220,9 +227,10 @@ struct FileDecoder {
     track: u32,
 }
 enum Source {
-    File(FileDecoder),
-    Disc(CueAudioReader),
-    Raw(RawAudioReader),
+    Wav(WavDecoder),
+    Compressed(FileDecoder),
+    Disc(CuePcmDecoder),
+    Raw(RedumperPcmDecoder),
 }
 struct AudioReader {
     source: Source,
@@ -230,15 +238,17 @@ struct AudioReader {
     rate: u32,
 }
 impl AudioReader {
-    fn open(track: &Track, seconds: f64) -> Result<Self> {
+    fn open(track: &Track, output_frame: u64, output_rate: u32) -> Result<Self> {
         match &track.access {
             MediaAccess::Managed { provider, .. } => {
                 bail!("{provider}: playback adapter is not implemented")
             }
             MediaAccess::DiscTrack { cue, number } => {
-                let mut reader =
-                    CueAudioDisc::open(std::path::Path::new(cue))?.track_reader(*number)?;
-                reader.seek_frame(((seconds * 44100.0) as u64).min(reader.total_frames()))?;
+                let mut reader = CuePcmDecoder::new(
+                    CueAudioDisc::open(std::path::Path::new(cue))?.track_reader(*number)?,
+                );
+                let source_frame = scale_frame(output_frame, output_rate, 44_100);
+                reader.seek_exact(FramePosition(source_frame.min(reader.total_frames())))?;
                 Ok(Self {
                     source: Source::Disc(reader),
                     buffered: VecDeque::new(),
@@ -246,12 +256,13 @@ impl AudioReader {
                 })
             }
             MediaAccess::RedumperTrack { anchor, number } => {
-                let mut reader = RawAudioReader::open(
+                let mut reader = RedumperPcmDecoder::new(RawAudioReader::open(
                     &find_sidecars(std::path::Path::new(anchor)),
                     *number,
                     InvalidSamplePolicy::Reject,
-                )?;
-                reader.seek_frame(((seconds * 44100.0) as u64).min(reader.total_frames()))?;
+                )?);
+                let source_frame = scale_frame(output_frame, output_rate, 44_100);
+                reader.seek_exact(FramePosition(source_frame.min(reader.total_frames())))?;
                 Ok(Self {
                     source: Source::Raw(reader),
                     buffered: VecDeque::new(),
@@ -259,13 +270,38 @@ impl AudioReader {
                 })
             }
             MediaAccess::File { locator } => {
+                let path = std::path::Path::new(locator);
+                let extension = path.extension().and_then(|value| value.to_str());
+                if extension.is_some_and(|value| {
+                    value.eq_ignore_ascii_case("wav") || value.eq_ignore_ascii_case("wave")
+                }) {
+                    let file = File::open(path)?;
+                    let length = file.metadata().ok().map(|metadata| metadata.len());
+                    let mut decoder = WavDecoder::open(ByteSource::new(
+                        file,
+                        MediaHint::new(length, extension, Some("audio/wav")),
+                    ))?;
+                    if decoder.format().channels() > 2 {
+                        bail!("Multichannel playback requires an explicit channel mapper")
+                    }
+                    let source_frame =
+                        scale_frame(output_frame, output_rate, decoder.format().sample_rate());
+                    decoder.seek_exact(FramePosition(
+                        decoder
+                            .total_frames()
+                            .map_or(source_frame, |total| source_frame.min(total)),
+                    ))?;
+                    return Ok(Self {
+                        rate: decoder.format().sample_rate(),
+                        source: Source::Wav(decoder),
+                        buffered: VecDeque::new(),
+                    });
+                }
+
                 let stream =
                     MediaSourceStream::new(Box::new(File::open(locator)?), Default::default());
                 let mut hint = Hint::new();
-                if let Some(ext) = std::path::Path::new(locator)
-                    .extension()
-                    .and_then(|s| s.to_str())
-                {
+                if let Some(ext) = extension {
                     hint.with_extension(ext);
                 }
                 let mut format = symphonia::default::get_probe()
@@ -287,8 +323,9 @@ impl AudioReader {
                 let id = track.id;
                 let decoder = symphonia::default::get_codecs()
                     .make(&track.codec_params, &DecoderOptions::default())?;
+                let seconds = output_frame as f64 / f64::from(output_rate);
                 let mut skip = 0;
-                if seconds > 0.0 {
+                if output_frame > 0 {
                     let seeked = format.seek(
                         SeekMode::Accurate,
                         SeekTo::Time {
@@ -308,7 +345,7 @@ impl AudioReader {
                     }
                 }
                 let mut result = Self {
-                    source: Source::File(FileDecoder {
+                    source: Source::Compressed(FileDecoder {
                         format,
                         decoder,
                         track: id,
@@ -332,30 +369,24 @@ impl AudioReader {
             }
             match &mut self.source {
                 Source::Disc(reader) => {
-                    let mut frames = [[0; 2]; 588];
-                    let count = reader.read_frames(&mut frames)?;
-                    if count == 0 {
+                    let Some(chunk) = reader.read_frames(588)? else {
                         return Ok(None);
-                    }
-                    self.buffered.extend(
-                        frames[..count]
-                            .iter()
-                            .map(|f| [f[0] as f32 / 32768.0, f[1] as f32 / 32768.0]),
-                    );
+                    };
+                    push_stereo(&mut self.buffered, chunk)?;
                 }
                 Source::Raw(reader) => {
-                    let mut frames = [[0; 2]; 588];
-                    let (count, _quality) = reader.read_frames(&mut frames)?;
-                    if count == 0 {
+                    let Some(chunk) = reader.read_frames(588)? else {
                         return Ok(None);
-                    }
-                    self.buffered.extend(
-                        frames[..count]
-                            .iter()
-                            .map(|f| [f[0] as f32 / 32768.0, f[1] as f32 / 32768.0]),
-                    );
+                    };
+                    push_stereo(&mut self.buffered, chunk.pcm)?;
                 }
-                Source::File(reader) => {
+                Source::Wav(reader) => {
+                    let Some(chunk) = reader.read_frames(1_024)? else {
+                        return Ok(None);
+                    };
+                    push_stereo(&mut self.buffered, chunk)?;
+                }
+                Source::Compressed(reader) => {
                     let packet = match reader.format.next_packet() {
                         Ok(p) => p,
                         Err(symphonia::core::errors::Error::IoError(e))
@@ -391,47 +422,85 @@ impl AudioReader {
     }
 }
 
-/// Bounded chunk conversion with compensated resampler delay and exact output length.
+fn push_stereo(buffered: &mut VecDeque<[f32; 2]>, chunk: PcmChunk) -> Result<()> {
+    let channels = usize::from(chunk.format.channels());
+    if channels > 2 {
+        bail!("Multichannel playback requires an explicit channel mapper")
+    }
+    buffered.extend(
+        chunk
+            .samples
+            .chunks_exact(channels)
+            .map(|frame| [frame[0], frame.get(1).copied().unwrap_or(frame[0])]),
+    );
+    Ok(())
+}
+
+fn scale_frame(frame: u64, from_rate: u32, to_rate: u32) -> u64 {
+    (frame as f64 * f64::from(to_rate) / f64::from(from_rate)).round() as u64
+}
+
+fn queue_tracks(
+    tracks: &[Track],
+    rate: u32,
+    current: Option<(usize, u64)>,
+) -> Vec<QueueTrack<usize>> {
+    tracks
+        .iter()
+        .enumerate()
+        .map(|(index, track)| {
+            let declared = (track.duration_seconds.max(0.0) * f64::from(rate)).round() as u64;
+            let total_frames = current
+                .filter(|(current_index, _)| *current_index == index)
+                .map_or(declared, |(_, frame)| declared.max(frame));
+            QueueTrack::new(index, total_frames)
+        })
+        .collect()
+}
+
+fn restore_audible_queue(
+    tracks: &[Track],
+    shared: &Shared,
+    rate: u32,
+    generation: u64,
+) -> Result<QueueState<usize>> {
+    let index = shared.track.load(Ordering::Relaxed);
+    let position = shared.position.load(Ordering::Relaxed);
+    let current = (index < tracks.len()).then_some(index);
+    Ok(QueueState::restore(
+        queue_tracks(tracks, rate, current.map(|value| (value, position))),
+        current,
+        current.map_or(0, |_| position),
+        Generation(generation),
+    )?)
+}
+
+/// Product adapter over the shared bounded resampler; same-rate PCM bypasses it.
 struct Converted {
     reader: AudioReader,
-    resampler: Option<SincFixedIn<f32>>,
+    resampler: Option<SincResampler>,
     ready: VecDeque<[f32; 2]>,
-    input_count: u64,
-    output_count: u64,
-    skip: usize,
+    input_position: u64,
     eof: bool,
-    output_rate: u32,
 }
 impl Converted {
-    fn new(track: &Track, seconds: f64, rate: u32) -> Result<Self> {
-        let reader = AudioReader::open(track, seconds)?;
+    fn new(track: &Track, output_frame: u64, rate: u32) -> Result<Self> {
+        let reader = AudioReader::open(track, output_frame, rate)?;
         let resampler = if reader.rate == rate {
             None
         } else {
-            Some(SincFixedIn::new(
-                rate as f64 / reader.rate as f64,
-                1.0,
-                SincInterpolationParameters {
-                    sinc_len: 128,
-                    f_cutoff: 0.95,
-                    interpolation: SincInterpolationType::Linear,
-                    oversampling_factor: 128,
-                    window: WindowFunction::BlackmanHarris2,
-                },
-                1024,
-                2,
+            Some(SincResampler::new(
+                PcmFormat::new(reader.rate, 2)?,
+                rate,
+                1_024,
             )?)
         };
-        let skip = resampler.as_ref().map(|r| r.output_delay()).unwrap_or(0);
         Ok(Self {
             reader,
             resampler,
             ready: VecDeque::new(),
-            input_count: 0,
-            output_count: 0,
-            skip,
+            input_position: 0,
             eof: false,
-            output_rate: rate,
         })
     }
     fn next(&mut self) -> Result<Option<[f32; 2]>> {
@@ -439,25 +508,15 @@ impl Converted {
             return self.reader.next();
         }
         loop {
-            let target = (self.input_count as f64 * self.output_rate as f64
-                / self.reader.rate as f64)
-                .round() as u64;
-            if self.eof && self.output_count >= target {
-                return Ok(None);
-            }
             if let Some(f) = self.ready.pop_front() {
-                self.output_count += 1;
                 return Ok(Some(f));
             }
-            let mut input = vec![vec![0.0; 1024]; 2];
             if !self.eof {
-                let (left, right) = input.split_at_mut(1);
-                for (l, r) in left[0].iter_mut().zip(right[0].iter_mut()) {
+                let mut samples = Vec::with_capacity(2_048);
+                for _ in 0..1_024 {
                     match self.reader.next()? {
                         Some(f) => {
-                            *l = f[0];
-                            *r = f[1];
-                            self.input_count += 1;
+                            samples.extend(f);
                         }
                         None => {
                             self.eof = true;
@@ -465,14 +524,27 @@ impl Converted {
                         }
                     }
                 }
-            }
-            let out = self.resampler.as_mut().unwrap().process(&input, None)?;
-            for (&l, &r) in out[0].iter().zip(&out[1]) {
-                if self.skip > 0 {
-                    self.skip -= 1;
-                } else {
-                    self.ready.push_back([l, r]);
+                if !samples.is_empty() {
+                    let count = samples.len() / 2;
+                    self.resampler.as_mut().unwrap().push(PcmChunk::new(
+                        PcmFormat::new(self.reader.rate, 2)?,
+                        FramePosition(self.input_position),
+                        samples,
+                    )?)?;
+                    self.input_position += count as u64;
                 }
+                if self.eof {
+                    self.resampler.as_mut().unwrap().finish()?;
+                }
+            }
+            let Some(chunk) = self.resampler.as_mut().unwrap().read_frames(1_024)? else {
+                if self.eof {
+                    return Ok(None);
+                }
+                continue;
+            };
+            for frame in chunk.samples.chunks_exact(2) {
+                self.ready.push_back([frame[0], frame[1]]);
             }
         }
     }
@@ -493,28 +565,108 @@ fn worker(
     let mut exhausted = true;
     while !shared.shutdown.load(Ordering::Relaxed) {
         while let Ok(command) = rx.try_recv() {
-            let mut seconds = 0.0;
+            let mut requested_frame = 0;
             let mut reset = true;
             match command {
                 Command::Replace(t, start) => {
+                    if t.is_empty() {
+                        tracks.clear();
+                        index = 0;
+                        shared.playing.store(false, Ordering::Relaxed);
+                        exhausted = true;
+                        continue;
+                    }
+                    let mut policy = QueueState::new();
+                    let transition = match policy.replace(queue_tracks(&t, rate, None), start) {
+                        Ok(transition) => transition,
+                        Err(error) => {
+                            let _ = errors.send(error.to_string());
+                            continue;
+                        }
+                    };
                     tracks = t;
-                    index = start;
+                    index = transition
+                        .position
+                        .expect("replacement has a track")
+                        .track_key;
                     shared.playing.store(true, Ordering::Relaxed);
                 }
                 Command::Seek(s) => {
-                    index = shared.track.load(Ordering::Relaxed);
-                    seconds = s;
+                    let mut policy = match restore_audible_queue(&tracks, &shared, rate, generation)
+                    {
+                        Ok(policy) => policy,
+                        Err(error) => {
+                            let _ = errors.send(error.to_string());
+                            continue;
+                        }
+                    };
+                    let transition = match policy.seek(Generation(generation), s) {
+                        Ok(transition) => transition,
+                        Err(error) => {
+                            let _ = errors.send(error.to_string());
+                            continue;
+                        }
+                    };
+                    let position = transition.position.expect("seek retains current track");
+                    index = position.track_key;
+                    requested_frame = position.frame;
                 }
                 Command::Next => {
-                    index = shared.track.load(Ordering::Relaxed) + 1;
+                    let mut policy = match restore_audible_queue(&tracks, &shared, rate, generation)
+                    {
+                        Ok(policy) => policy,
+                        Err(error) => {
+                            let _ = errors.send(error.to_string());
+                            continue;
+                        }
+                    };
+                    index = policy
+                        .next_track()
+                        .ok()
+                        .and_then(|transition| transition.position)
+                        .map_or(tracks.len(), |position| position.track_key);
                 }
                 Command::Previous => {
-                    index = shared.track.load(Ordering::Relaxed).saturating_sub(1);
+                    let mut policy = match restore_audible_queue(&tracks, &shared, rate, generation)
+                    {
+                        Ok(policy) => policy,
+                        Err(error) => {
+                            let _ = errors.send(error.to_string());
+                            continue;
+                        }
+                    };
+                    let transition = match policy.previous_track() {
+                        Ok(transition) => transition,
+                        Err(error) => {
+                            let _ = errors.send(error.to_string());
+                            continue;
+                        }
+                    };
+                    index = transition.position.expect("previous has a track").track_key;
                 }
                 Command::Truncate(len) => {
+                    let mut policy = match restore_audible_queue(&tracks, &shared, rate, generation)
+                    {
+                        Ok(policy) => policy,
+                        Err(error) => {
+                            let _ = errors.send(error.to_string());
+                            continue;
+                        }
+                    };
+                    let transition = match policy.truncate(len) {
+                        Ok(transition) => transition,
+                        Err(error) => {
+                            let _ = errors.send(error.to_string());
+                            continue;
+                        }
+                    };
                     tracks.truncate(len);
-                    index = shared.track.load(Ordering::Relaxed);
-                    seconds = shared.position.load(Ordering::Relaxed) as f64 / rate as f64;
+                    if let Some(position) = transition.position {
+                        index = position.track_key;
+                        requested_frame = position.frame;
+                    } else {
+                        index = tracks.len();
+                    }
                 }
                 Command::Append(t) => {
                     tracks.extend(t);
@@ -528,13 +680,13 @@ fn worker(
                 generation += 1;
                 shared.generation.store(generation, Ordering::Release);
                 shared.track.store(index, Ordering::Relaxed);
-                position = (seconds * rate as f64) as u64;
+                position = requested_frame;
                 shared.position.store(position, Ordering::Relaxed);
                 pending = None;
                 reader = None;
                 exhausted = false;
                 if let Some(track) = tracks.get(index) {
-                    match Converted::new(track, seconds, rate) {
+                    match Converted::new(track, requested_frame, rate) {
                         Ok(r) => reader = Some(r),
                         Err(e) => {
                             let _ = errors.send(format!("{}: {e:#}", track.title));
@@ -547,7 +699,7 @@ fn worker(
         }
         if !exhausted && reader.is_none() && pending.is_none() {
             if let Some(track) = tracks.get(index) {
-                match Converted::new(track, 0.0, rate) {
+                match Converted::new(track, 0, rate) {
                     Ok(r) => reader = Some(r),
                     Err(e) => {
                         let _ = errors.send(format!("{}: {e:#}", track.title));
@@ -641,21 +793,21 @@ mod tests {
     #[test]
     fn pcm_is_exact_and_seek_starts_at_requested_sample() {
         let (_dir, t) = fixture(44100, 44100);
-        let mut r = Converted::new(&t, 0.0, 44100).unwrap();
+        let mut r = Converted::new(&t, 0, 44100).unwrap();
         for i in 0..44100 {
             let f = r.next().unwrap().unwrap();
             assert_eq!(f[0], (i % 1000) as f32 / 32768.0);
             assert_eq!(f[1], -f[0]);
         }
         assert!(r.next().unwrap().is_none());
-        let mut r = Converted::new(&t, 0.5, 44100).unwrap();
+        let mut r = Converted::new(&t, 22_050, 44100).unwrap();
         assert_eq!(r.next().unwrap().unwrap()[0], 50.0 / 32768.0);
     }
     #[test]
     fn resampling_has_exact_duration_even_for_partial_chunks() {
         for frames in [1, 100, 1024, 4410] {
             let (_dir, t) = fixture(44100, frames);
-            let mut r = Converted::new(&t, 0.0, 48000).unwrap();
+            let mut r = Converted::new(&t, 0, 48000).unwrap();
             let mut count = 0;
             while r.next().unwrap().is_some() {
                 count += 1;
@@ -710,12 +862,12 @@ mod tests {
             cue: cue.to_string_lossy().into_owned(),
             number: 2,
         };
-        let mut reader = Converted::new(&track, 0.0, 44100).unwrap();
+        let mut reader = Converted::new(&track, 0, 44100).unwrap();
         for i in 588..1176 {
             assert_eq!(reader.next().unwrap().unwrap()[0], i as f32 / 32768.0);
         }
         assert!(reader.next().unwrap().is_none());
-        let mut reader = Converted::new(&track, 100.0 / 44100.0, 44100).unwrap();
+        let mut reader = Converted::new(&track, 100, 44100).unwrap();
         assert_eq!(reader.next().unwrap().unwrap()[0], 688.0 / 32768.0);
     }
     #[test]
@@ -756,12 +908,12 @@ mod tests {
                     anchor: anchor.to_string_lossy().into_owned(),
                     number,
                 };
-                let mut raw = Converted::new(&track, offset as f64 / 44100.0, 44100).unwrap();
+                let mut raw = Converted::new(&track, offset, 44100).unwrap();
                 track.access = MediaAccess::DiscTrack {
                     cue: anchor.to_string_lossy().into_owned(),
                     number,
                 };
-                let mut bin = Converted::new(&track, offset as f64 / 44100.0, 44100).unwrap();
+                let mut bin = Converted::new(&track, offset, 44100).unwrap();
                 for _ in offset..588 {
                     assert_eq!(raw.next().unwrap(), bin.next().unwrap());
                 }
@@ -775,6 +927,6 @@ mod tests {
             anchor: anchor.to_string_lossy().into_owned(),
             number: 1,
         };
-        assert!(Converted::new(&track, 0.0, 44100).unwrap().next().is_err());
+        assert!(Converted::new(&track, 0, 44100).unwrap().next().is_err());
     }
 }
