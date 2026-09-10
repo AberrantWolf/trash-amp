@@ -2908,7 +2908,6 @@ dependencies = [
 name = "junk-libs-audio"
 version = "0.1.0"
 dependencies = [
- "junk-libs-core",
  "junk-libs-disc",
  "rubato",
  "symphonia",
