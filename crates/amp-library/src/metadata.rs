@@ -100,13 +100,23 @@ fn query_for(album: &Album) -> Result<Option<Query>> {
             {
                 return Ok(None);
             }
-            Some((
-                layout
-                    .iter()
-                    .map(|t| t.start_frame / 588 + 150)
-                    .collect::<Vec<_>>(),
-                layout.last().unwrap().end_frame / 588 + 150,
-            ))
+            let to_toc_sector = |frame: i64| {
+                frame
+                    .checked_div(588)
+                    .and_then(|sector| sector.checked_add(150))
+                    .and_then(|sector| u64::try_from(sector).ok())
+            };
+            let Some(offsets) = layout
+                .iter()
+                .map(|track| to_toc_sector(track.start_frame))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return Ok(None);
+            };
+            let Some(leadout) = to_toc_sector(layout.last().unwrap().end_frame) else {
+                return Ok(None);
+            };
+            Some((offsets, leadout))
         }
         MediaAccess::DiscTrack { cue, .. } => {
             let disc = CueAudioDisc::open(Path::new(cue))?;
