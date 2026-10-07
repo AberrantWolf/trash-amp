@@ -17,3 +17,8 @@ These are required follow-up work, not completed features.
 - [ ] Platform packaging, dependency notices and signing. Validate macOS first, then Linux and Windows before claiming support.
 
 Later: audiophile output modes, device selection/rate switching, effects, DLNA access, native mobile UI if needed. Playlists and equalizers are not part of the initial release scope.
+
+Collector implementation and local evidence are recorded in
+[Collector connection](collector-connection.md). Complete the remaining native
+adversarial acceptance matrix and output-capture fidelity checks before declaring
+that integration release-qualified. The existing local-library gates remain.

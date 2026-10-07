@@ -50,3 +50,20 @@ The local scan publishes first. A cache pass runs before the network pass; an at
 Providers should remain independent of UI/platform library access. Future work includes GnuDB fallback, manual candidate selection, explicit overrides, additional descriptive fields and artwork (local art first, then Cover Art Archive). No audio uploads or source-file writes are involved.
 
 No playlists, equalizer, metadata writing, ripping, transcoding/export, music uploads or curator features in the initial scope.
+
+## Catalog search and browsing
+
+`amp-core::browse` owns a provider-independent in-memory catalog index, normalized query matching, complete artist-credit identities, and artist-page associations. Accent-insensitive lookup does not collapse separately spelled artist identities. Artist browsing includes album credits only; search includes track credits too. Source paths and media access never participate in matching.
+
+The desktop browsing adapter keeps navigation history, query/section state, row-to-ID actions, and the initiating track playback context separate from album storage order. Search workers run after a 100 ms debounce, and query/catalog generations reject outdated replies. Metadata events are batched before rebuilding the index and refreshing the active view. Library replacement resets navigation; failed scans do not.
+
+The persisted `browse_artists` preference accepts the former `sort_by_artist` field when reading old settings. Search state is transient. Explicit queue tails remain separate from automatic album continuation when a search or appearance track starts playback.
+
+## Collector adapter
+
+See [Collector connection](collector-connection.md). `amp-core` contains neutral
+source coordinates and availability only. `amp-collector` owns HTTP, Keychain,
+SQLite snapshots, artwork, receipts and explicit download mechanisms. `amp-audio`
+accepts an injected seekable media resolver and cancellation handle, retaining
+the shared junk-libs decoder and CPAL pipeline. Desktop browsing generations
+are independent of playback and download lifetimes.

@@ -24,6 +24,8 @@ fn main() -> anyhow::Result<()> {
     let player = Player::new()?;
     player.play(
         vec![Track {
+            availability: Default::default(),
+            source: None,
             id: ItemId {
                 library: "probe".into(),
                 provider: "file".into(),

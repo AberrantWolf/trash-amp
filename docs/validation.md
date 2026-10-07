@@ -50,3 +50,42 @@ cargo run -p trash-amp -- --demo --select-first --size 390x740 --snapshot /tmp/t
 - Deterministic tests cover the published disc-ID vector, CUE initial synthetic pregaps, mixed-mode exclusion, edition consensus/ambiguity, wrong media/track counts, duplicate positions, strict search duration/title matching, preservation of existing names and playback access, positive/negative/stale caching, offline reuse, in-flight cancellation, failures and unchanged media-file contents.
 - Desktop enrichment runs after the local scan and on cached-library startup. New scan generations reject stale updates; individual rows and current queue labels update without replacing playback positions.
 - Builds use the user's normal Cargo home; no temporary Cargo-home override is used for this change.
+
+## Library search and artist browsing
+
+- 42 workspace tests pass; the existing live MusicBrainz smoke test remains ignored. Added coverage for accent/cross-field matching, whole artist credits and name boundaries, grouped appearances, old preference compatibility, ID-based result actions after sorting, Back and clear-search behavior, metadata refresh, stale worker replies, and explicit playback queue composition.
+- Slint regression tests exercise text editing versus playback keys, Cmd/Ctrl+F after returning to the phone library, delayed pointer navigation, detail-pane width, and full 100,000-track results. The large-result test checks that fewer than 100 row delegates exist both initially and after scrolling.
+- Optimized synthetic measurement on this development Mac: 10,000 albums / 100,000 tracks indexed in approximately 204 ms; a multi-word search took approximately 11 ms. These are a single local benchmark, not a cross-device latency guarantee.
+- Actual native Skia snapshots inspected at 980×760, 390×740, 800×700 with 1.5× text, and 640×280. Inspected grouped search, album-artist browsing, and a page with many one-track appearances. Corrected artist-label alignment, a Back-button constraint that narrowed the detail pane, and unnecessarily repeated album titles in appearance rows.
+- GUI QA uses generated tracks and a temporary SQLite directory. New playback behavior is checked through sequence composition without requiring an audio output device; this does not claim new physical-device or mobile-platform validation.
+
+Reproduce search and appearance renders (the demo has no playable audio):
+
+```sh
+TRASH_AMP_DATA_DIR=/tmp/trash-search-qa cargo run -p trash-amp -- --demo --search late --size 980x760 --snapshot /tmp/trash-search.png
+TRASH_AMP_DATA_DIR=/tmp/trash-search-qa cargo run -p trash-amp -- --demo --demo-appearances --browse-artists --artist "The Late Hours" --detail-scroll 530 --size 390x740 --snapshot /tmp/trash-artist.png
+cargo test -p amp-core --release ten_thousand -- --nocapture
+```
+
+The QA switches `--search`, `--browse-artists`, `--artist`, `--demo-appearances`, and `--detail-scroll` affect the current demo session; they do not save browser preferences.
+
+## Collector integration, 2026-10-07
+
+See [implementation and coverage](collector-connection.md). Workspace tests and
+Clippy with warnings denied passed. The actual macOS app restored its server
+selection and artwork after restart, retained album/list selection after refresh,
+and retained cached lists while disabling mutations after server shutdown.
+Native FLAC playback and explicit download completed. The audible synthetic ramp
+is not music fidelity evidence; output capture remains required. Collector
+workspace/architecture/Clippy/web gates and browser smoke passed, and phono-junk's
+GUI consumer compiled without source edits.
+
+## macOS icon and bundle, 2026-10-07
+
+The app embeds its generated 1024px PNG window icon and bundles a multi-resolution
+ICNS through `scripts/bundle-macos.sh`. The debug bundle was built and opened as
+“Trash Amp” using an isolated temporary profile; no audio was played. `plutil`
+validated its Info.plist and `codesign --verify --deep --strict` accepted the
+ad-hoc signature. Formatting, workspace tests and Clippy with warnings denied
+passed again after adding the icon. Distribution signing/notarization remain
+release gates.

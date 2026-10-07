@@ -1,5 +1,6 @@
 //! UI-free application values. Provider identifiers are opaque outside their adapter.
 use serde::{Deserialize, Serialize};
+pub mod browse;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemId {
@@ -16,8 +17,31 @@ pub enum MediaAccess {
     Managed { provider: String, item: String },
 }
 
+/// Availability is supplied by a provider, independently of descriptive labels.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Availability {
+    #[default]
+    Available,
+    Downloaded,
+    Preparing,
+    Unavailable,
+    Unsupported,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceCoordinates {
+    pub connection: String,
+    pub collection: String,
+    pub item: String,
+    pub capture: String,
+    pub representation: String,
+    pub track: u16,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
+    #[serde(default)]
+    pub availability: Availability,
+    #[serde(default)]
+    pub source: Option<SourceCoordinates>,
     pub id: ItemId,
     pub title: String,
     pub artist: String,
@@ -53,8 +77,8 @@ pub enum DumpPreference {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Preferences {
-    #[serde(default)]
-    pub sort_by_artist: bool,
+    #[serde(default, alias = "sort_by_artist")]
+    pub browse_artists: bool,
     pub dump_preference: DumpPreference,
     pub automatic_metadata: bool,
     pub reduced_motion: bool,
@@ -63,7 +87,7 @@ pub struct Preferences {
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            sort_by_artist: false,
+            browse_artists: false,
             dump_preference: DumpPreference::Redumper,
             automatic_metadata: true,
             reduced_motion: false,
@@ -102,5 +126,21 @@ impl UpNext {
     }
     pub fn clear(&mut self) {
         self.0.clear();
+    }
+}
+
+#[cfg(test)]
+mod preference_tests {
+    use super::*;
+    #[test]
+    fn legacy_sort_preference_becomes_artist_browsing() {
+        let mut old = serde_json::to_value(Preferences::default()).unwrap();
+        old.as_object_mut().unwrap().remove("browse_artists");
+        old["sort_by_artist"] = true.into();
+        let prefs: Preferences = serde_json::from_value(old).unwrap();
+        assert!(prefs.browse_artists);
+        let saved = serde_json::to_value(&prefs).unwrap();
+        assert_eq!(saved["browse_artists"], true);
+        assert!(saved.get("sort_by_artist").is_none());
     }
 }

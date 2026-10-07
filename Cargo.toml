@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/amp-core", "crates/amp-library", "crates/amp-audio", "crates/amp-desktop"]
+members = ["crates/amp-core", "crates/amp-library", "crates/amp-audio", "crates/amp-desktop", "crates/amp-collector"]
 default-members = ["crates/amp-desktop"]
 
 [workspace.package]
@@ -9,6 +9,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+amp-collector = { path = "crates/amp-collector" }
 amp-core = { path = "crates/amp-core" }
 amp-library = { path = "crates/amp-library" }
 amp-audio = { path = "crates/amp-audio" }

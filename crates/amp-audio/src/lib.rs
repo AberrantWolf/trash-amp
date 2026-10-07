@@ -3,9 +3,10 @@ use amp_core::{MediaAccess, Track};
 use anyhow::{Context, Result, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use junk_libs_audio::{
-    ByteSource, CuePcmDecoder, FramePosition, MediaHint, PcmChunk, PcmFormat, RedumperPcmDecoder,
+    AudioDecoder, CuePcmDecoder, FramePosition, PcmChunk, PcmFormat, RedumperPcmDecoder,
     SincResampler, WavDecoder,
 };
+pub use junk_libs_audio::{ByteSource, MediaHint};
 use junk_libs_disc::{
     cue_audio::CueAudioDisc,
     redumper::{
@@ -24,15 +25,6 @@ use std::{
     },
     thread,
     time::Duration,
-};
-use symphonia::core::{
-    audio::SampleBuffer,
-    codecs::{Decoder, DecoderOptions},
-    formats::{FormatOptions, FormatReader, SeekMode, SeekTo},
-    io::MediaSourceStream,
-    meta::MetadataOptions,
-    probe::Hint,
-    units::Time,
 };
 
 #[derive(Clone, Copy, Default)]
@@ -68,7 +60,13 @@ enum Command {
     Append(Vec<Track>),
     Truncate(usize),
 }
+/// Adapter invoked only on the decoder worker, never in the device callback.
+pub trait MediaResolver: Send + Sync {
+    fn resolve(&self, track: &Track) -> Result<ByteSource>;
+    fn cancel(&self);
+}
 pub struct Player {
+    resolver: Option<Arc<dyn MediaResolver>>,
     commands: mpsc::Sender<Command>,
     shared: Arc<Shared>,
     errors: mpsc::Receiver<String>,
@@ -77,6 +75,9 @@ pub struct Player {
 }
 impl Player {
     pub fn new() -> Result<Self> {
+        Self::with_resolver(None)
+    }
+    pub fn with_resolver(resolver: Option<Arc<dyn MediaResolver>>) -> Result<Self> {
         let device = cpal::default_host()
             .default_output_device()
             .context("No audio output device")?;
@@ -97,10 +98,12 @@ impl Player {
         let (commands, rx) = mpsc::channel();
         let (tx, errors) = mpsc::channel();
         let state = shared.clone();
+        let worker_resolver = resolver.clone();
         thread::Builder::new()
             .name("amp-decode".into())
-            .spawn(move || worker(rx, tx, producer, state, rate))?;
+            .spawn(move || worker(rx, tx, producer, state, rate, worker_resolver))?;
         Ok(Self {
+            resolver,
             commands,
             shared,
             errors,
@@ -109,12 +112,18 @@ impl Player {
         })
     }
     pub fn play(&self, tracks: Vec<Track>, start: usize) {
+        if let Some(resolver) = &self.resolver {
+            resolver.cancel();
+        }
         let _ = self.commands.send(Command::Replace(tracks, start));
     }
     pub fn toggle(&self) {
         self.shared.playing.fetch_xor(true, Ordering::Relaxed);
     }
     pub fn seek(&self, seconds: f64) {
+        if let Some(resolver) = &self.resolver {
+            resolver.cancel();
+        }
         let frame = if seconds.is_finite() {
             (seconds.max(0.0) * f64::from(self.rate)).round() as u64
         } else {
@@ -123,9 +132,15 @@ impl Player {
         let _ = self.commands.send(Command::Seek(frame));
     }
     pub fn next(&self) {
+        if let Some(resolver) = &self.resolver {
+            resolver.cancel();
+        }
         let _ = self.commands.send(Command::Next);
     }
     pub fn previous(&self) {
+        if let Some(resolver) = &self.resolver {
+            resolver.cancel();
+        }
         // Standard transport behavior: restart after the first few seconds.
         if self.snapshot().seconds > 3.0 {
             self.seek(0.0);
@@ -158,6 +173,9 @@ impl Player {
 }
 impl Drop for Player {
     fn drop(&mut self) {
+        if let Some(resolver) = &self.resolver {
+            resolver.cancel();
+        }
         self.shared.shutdown.store(true, Ordering::Relaxed);
     }
 }
@@ -221,14 +239,9 @@ fn output<T: cpal::SizedSample + cpal::FromSample<f32>>(
     )?)
 }
 
-struct FileDecoder {
-    format: Box<dyn FormatReader>,
-    decoder: Box<dyn Decoder>,
-    track: u32,
-}
 enum Source {
     Wav(WavDecoder),
-    Compressed(FileDecoder),
+    Compressed(AudioDecoder),
     Disc(CuePcmDecoder),
     Raw(RedumperPcmDecoder),
 }
@@ -238,10 +251,31 @@ struct AudioReader {
     rate: u32,
 }
 impl AudioReader {
-    fn open(track: &Track, output_frame: u64, output_rate: u32) -> Result<Self> {
+    fn open(
+        track: &Track,
+        output_frame: u64,
+        output_rate: u32,
+        resolver: Option<&dyn MediaResolver>,
+    ) -> Result<Self> {
         match &track.access {
             MediaAccess::Managed { provider, .. } => {
-                bail!("{provider}: playback adapter is not implemented")
+                let source = resolver
+                    .context(format!("{provider}: playback adapter unavailable"))?
+                    .resolve(track)?;
+                let mut decoder = AudioDecoder::open(source)?;
+                if decoder.format().channels() > 2 {
+                    bail!("Multichannel playback requires an explicit channel mapper")
+                }
+                let rate = decoder.format().sample_rate();
+                let frame = scale_frame(output_frame, output_rate, rate);
+                if frame > 0 {
+                    decoder.seek_exact(FramePosition(frame))?;
+                }
+                Ok(Self {
+                    source: Source::Compressed(decoder),
+                    buffered: VecDeque::new(),
+                    rate,
+                })
             }
             MediaAccess::DiscTrack { cue, number } => {
                 let mut reader = CuePcmDecoder::new(
@@ -298,66 +332,25 @@ impl AudioReader {
                     });
                 }
 
-                let stream =
-                    MediaSourceStream::new(Box::new(File::open(locator)?), Default::default());
-                let mut hint = Hint::new();
-                if let Some(ext) = extension {
-                    hint.with_extension(ext);
+                let file = File::open(locator)?;
+                let length = file.metadata()?.len();
+                let mut decoder = AudioDecoder::open(ByteSource::new(
+                    file,
+                    MediaHint::new(Some(length), extension, None),
+                ))?;
+                if decoder.format().channels() > 2 {
+                    bail!("Multichannel playback requires an explicit channel mapper")
                 }
-                let mut format = symphonia::default::get_probe()
-                    .format(
-                        &hint,
-                        stream,
-                        &FormatOptions {
-                            enable_gapless: true,
-                            ..Default::default()
-                        },
-                        &MetadataOptions::default(),
-                    )?
-                    .format;
-                let track = format.default_track().context("No audio track")?;
-                let rate = track
-                    .codec_params
-                    .sample_rate
-                    .context("Unknown sample rate")?;
-                let id = track.id;
-                let decoder = symphonia::default::get_codecs()
-                    .make(&track.codec_params, &DecoderOptions::default())?;
-                let seconds = output_frame as f64 / f64::from(output_rate);
-                let mut skip = 0;
-                if output_frame > 0 {
-                    let seeked = format.seek(
-                        SeekMode::Accurate,
-                        SeekTo::Time {
-                            time: Time::from(seconds),
-                            track_id: Some(id),
-                        },
-                    )?;
-                    if let Some(tb) = format
-                        .tracks()
-                        .iter()
-                        .find(|t| t.id == id)
-                        .and_then(|t| t.codec_params.time_base)
-                    {
-                        let time =
-                            tb.calc_time(seeked.required_ts.saturating_sub(seeked.actual_ts));
-                        skip = ((time.seconds as f64 + time.frac) * rate as f64).round() as u64;
-                    }
+                let rate = decoder.format().sample_rate();
+                let frame = scale_frame(output_frame, output_rate, rate);
+                if frame > 0 {
+                    decoder.seek_exact(FramePosition(frame))?;
                 }
-                let mut result = Self {
-                    source: Source::Compressed(FileDecoder {
-                        format,
-                        decoder,
-                        track: id,
-                    }),
+                let result = Self {
+                    source: Source::Compressed(decoder),
                     buffered: VecDeque::new(),
                     rate,
                 };
-                for _ in 0..skip {
-                    if result.next()?.is_none() {
-                        break;
-                    }
-                }
                 Ok(result)
             }
         }
@@ -387,35 +380,10 @@ impl AudioReader {
                     push_stereo(&mut self.buffered, chunk)?;
                 }
                 Source::Compressed(reader) => {
-                    let packet = match reader.format.next_packet() {
-                        Ok(p) => p,
-                        Err(symphonia::core::errors::Error::IoError(e))
-                            if e.kind() == std::io::ErrorKind::UnexpectedEof =>
-                        {
-                            return Ok(None);
-                        }
-                        Err(e) => return Err(e.into()),
+                    let Some(chunk) = reader.read_frames(1_024)? else {
+                        return Ok(None);
                     };
-                    if packet.track_id() != reader.track {
-                        continue;
-                    }
-                    let audio = reader.decoder.decode(&packet)?;
-                    if audio.spec().rate != self.rate {
-                        bail!("Midstream sample rate changes are not supported yet")
-                    }
-                    let channels = audio.spec().channels.count();
-                    if channels > 2 {
-                        bail!("Multichannel playback requires an explicit channel mapper")
-                    }
-                    let mut samples =
-                        SampleBuffer::<f32>::new(audio.capacity() as u64, *audio.spec());
-                    samples.copy_interleaved_ref(audio);
-                    self.buffered.extend(
-                        samples
-                            .samples()
-                            .chunks(channels)
-                            .map(|f| [f[0], f.get(1).copied().unwrap_or(f[0])]),
-                    );
+                    push_stereo(&mut self.buffered, chunk)?;
                 }
             }
         }
@@ -484,8 +452,13 @@ struct Converted {
     eof: bool,
 }
 impl Converted {
-    fn new(track: &Track, output_frame: u64, rate: u32) -> Result<Self> {
-        let reader = AudioReader::open(track, output_frame, rate)?;
+    fn new(
+        track: &Track,
+        output_frame: u64,
+        rate: u32,
+        resolver: Option<&dyn MediaResolver>,
+    ) -> Result<Self> {
+        let reader = AudioReader::open(track, output_frame, rate, resolver)?;
         let resampler = if reader.rate == rate {
             None
         } else {
@@ -511,40 +484,38 @@ impl Converted {
             if let Some(f) = self.ready.pop_front() {
                 return Ok(Some(f));
             }
-            if !self.eof {
-                let mut samples = Vec::with_capacity(2_048);
-                for _ in 0..1_024 {
-                    match self.reader.next()? {
-                        Some(f) => {
-                            samples.extend(f);
-                        }
-                        None => {
-                            self.eof = true;
-                            break;
-                        }
-                    }
-                }
-                if !samples.is_empty() {
-                    let count = samples.len() / 2;
-                    self.resampler.as_mut().unwrap().push(PcmChunk::new(
-                        PcmFormat::new(self.reader.rate, 2)?,
-                        FramePosition(self.input_position),
-                        samples,
-                    )?)?;
-                    self.input_position += count as u64;
-                }
-                if self.eof {
-                    self.resampler.as_mut().unwrap().finish()?;
-                }
-            }
-            let Some(chunk) = self.resampler.as_mut().unwrap().read_frames(1_024)? else {
-                if self.eof {
-                    return Ok(None);
+            // Drain output before admitting more input. Upsampling can leave
+            // more than one output chunk ready for each input chunk.
+            if let Some(chunk) = self.resampler.as_mut().unwrap().read_frames(1_024)? {
+                for frame in chunk.samples.chunks_exact(2) {
+                    self.ready.push_back([frame[0], frame[1]]);
                 }
                 continue;
-            };
-            for frame in chunk.samples.chunks_exact(2) {
-                self.ready.push_back([frame[0], frame[1]]);
+            }
+            if self.eof {
+                return Ok(None);
+            }
+            let mut samples = Vec::with_capacity(2_048);
+            for _ in 0..1_024 {
+                match self.reader.next()? {
+                    Some(frame) => samples.extend(frame),
+                    None => {
+                        self.eof = true;
+                        break;
+                    }
+                }
+            }
+            if !samples.is_empty() {
+                let count = samples.len() / 2;
+                self.resampler.as_mut().unwrap().push(PcmChunk::new(
+                    PcmFormat::new(self.reader.rate, 2)?,
+                    FramePosition(self.input_position),
+                    samples,
+                )?)?;
+                self.input_position += count as u64;
+            }
+            if self.eof {
+                self.resampler.as_mut().unwrap().finish()?;
             }
         }
     }
@@ -555,6 +526,7 @@ fn worker(
     mut producer: rtrb::Producer<Frame>,
     shared: Arc<Shared>,
     rate: u32,
+    resolver: Option<Arc<dyn MediaResolver>>,
 ) {
     let mut tracks: Vec<Track> = vec![];
     let mut index = 0;
@@ -686,7 +658,7 @@ fn worker(
                 reader = None;
                 exhausted = false;
                 if let Some(track) = tracks.get(index) {
-                    match Converted::new(track, requested_frame, rate) {
+                    match Converted::new(track, requested_frame, rate, resolver.as_deref()) {
                         Ok(r) => reader = Some(r),
                         Err(e) => {
                             let _ = errors.send(format!("{}: {e:#}", track.title));
@@ -699,7 +671,7 @@ fn worker(
         }
         if !exhausted && reader.is_none() && pending.is_none() {
             if let Some(track) = tracks.get(index) {
-                match Converted::new(track, 0, rate) {
+                match Converted::new(track, 0, rate, resolver.as_deref()) {
                     Ok(r) => reader = Some(r),
                     Err(e) => {
                         let _ = errors.send(format!("{}: {e:#}", track.title));
@@ -774,6 +746,8 @@ mod tests {
         }
         w.finalize().unwrap();
         let track = Track {
+            availability: Default::default(),
+            source: None,
             id: amp_core::ItemId {
                 library: "test".into(),
                 provider: "file".into(),
@@ -793,25 +767,25 @@ mod tests {
     #[test]
     fn pcm_is_exact_and_seek_starts_at_requested_sample() {
         let (_dir, t) = fixture(44100, 44100);
-        let mut r = Converted::new(&t, 0, 44100).unwrap();
+        let mut r = Converted::new(&t, 0, 44100, None).unwrap();
         for i in 0..44100 {
             let f = r.next().unwrap().unwrap();
             assert_eq!(f[0], (i % 1000) as f32 / 32768.0);
             assert_eq!(f[1], -f[0]);
         }
         assert!(r.next().unwrap().is_none());
-        let mut r = Converted::new(&t, 22_050, 44100).unwrap();
+        let mut r = Converted::new(&t, 22_050, 44100, None).unwrap();
         assert_eq!(r.next().unwrap().unwrap()[0], 50.0 / 32768.0);
     }
     #[test]
     fn resampling_has_exact_duration_even_for_partial_chunks() {
-        for frames in [1, 100, 1024, 4410] {
+        for frames in [1, 100, 1024, 4410, 176400] {
             let (_dir, t) = fixture(44100, frames);
-            let mut r = Converted::new(&t, 0, 48000).unwrap();
+            let mut r = Converted::new(&t, 0, 48000, None).unwrap();
             let mut count = 0;
             while r.next().unwrap().is_some() {
                 count += 1;
-                assert!(count < 10000);
+                assert!(count <= 192000);
             }
             assert_eq!(count, (frames as f64 * 48000.0 / 44100.0).round() as u32);
         }
@@ -824,7 +798,7 @@ mod tests {
         let (producer, mut consumer) = rtrb::RingBuffer::new(4096);
         let shared = Arc::new(Shared::default());
         let state = shared.clone();
-        let thread = thread::spawn(move || worker(rx, errors, producer, state, 44100));
+        let thread = thread::spawn(move || worker(rx, errors, producer, state, 44100, None));
         tx.send(Command::Replace(vec![t.clone(), t], 0)).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         let mut frames = Vec::new();
@@ -862,12 +836,12 @@ mod tests {
             cue: cue.to_string_lossy().into_owned(),
             number: 2,
         };
-        let mut reader = Converted::new(&track, 0, 44100).unwrap();
+        let mut reader = Converted::new(&track, 0, 44100, None).unwrap();
         for i in 588..1176 {
             assert_eq!(reader.next().unwrap().unwrap()[0], i as f32 / 32768.0);
         }
         assert!(reader.next().unwrap().is_none());
-        let mut reader = Converted::new(&track, 100, 44100).unwrap();
+        let mut reader = Converted::new(&track, 100, 44100, None).unwrap();
         assert_eq!(reader.next().unwrap().unwrap()[0], 688.0 / 32768.0);
     }
     #[test]
@@ -908,12 +882,12 @@ mod tests {
                     anchor: anchor.to_string_lossy().into_owned(),
                     number,
                 };
-                let mut raw = Converted::new(&track, offset, 44100).unwrap();
+                let mut raw = Converted::new(&track, offset, 44100, None).unwrap();
                 track.access = MediaAccess::DiscTrack {
                     cue: anchor.to_string_lossy().into_owned(),
                     number,
                 };
-                let mut bin = Converted::new(&track, offset, 44100).unwrap();
+                let mut bin = Converted::new(&track, offset, 44100, None).unwrap();
                 for _ in offset..588 {
                     assert_eq!(raw.next().unwrap(), bin.next().unwrap());
                 }
@@ -927,6 +901,11 @@ mod tests {
             anchor: anchor.to_string_lossy().into_owned(),
             number: 1,
         };
-        assert!(Converted::new(&track, 0, 44100).unwrap().next().is_err());
+        assert!(
+            Converted::new(&track, 0, 44100, None)
+                .unwrap()
+                .next()
+                .is_err()
+        );
     }
 }

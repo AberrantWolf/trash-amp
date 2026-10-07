@@ -1,6 +1,6 @@
 use amp_core::{Album, DumpPreference, Library, Preferences, Track};
 use amp_library::{FilesystemProvider, Store};
-use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 use std::{
     cell::RefCell,
     path::PathBuf,
@@ -13,7 +13,12 @@ use std::{
     time::Duration,
 };
 slint::include_modules!();
+mod browse;
+mod collector;
 struct State {
+    resolver: Option<Arc<dyn amp_audio::MediaResolver>>,
+    artwork: std::collections::BTreeMap<String, String>,
+    browser: browse::Browser,
     library: Library,
     selected: Option<usize>,
     playlist: Vec<Track>,
@@ -56,20 +61,6 @@ fn time(seconds: f64) -> SharedString {
     let s = seconds.max(0.0) as u64;
     format!("{}:{:02}", s / 60, s % 60).into()
 }
-fn refresh_album_rows(ui: &PlayerWindow, state: &State) {
-    ui.set_albums(ModelRc::new(VecModel::from(
-        state
-            .library
-            .albums
-            .iter()
-            .map(|a| AlbumRow {
-                title: a.title.clone().into(),
-                artist: a.artist.clone().into(),
-                detail: a.source_label.clone().into(),
-            })
-            .collect::<Vec<_>>(),
-    )));
-}
 fn sort_albums(ui: &PlayerWindow, state: &mut State) {
     let selected = state
         .selected
@@ -78,18 +69,12 @@ fn sort_albums(ui: &PlayerWindow, state: &mut State) {
     state.library.albums.sort_by_cached_key(|a| {
         let title = a.title.to_lowercase();
         let artist = a.artist.to_lowercase();
-        if state.preferences.sort_by_artist {
-            (artist, title, a.id.item.clone())
-        } else {
-            (title, artist, a.id.item.clone())
-        }
+        (title, artist, a.id.item.clone())
     });
     state.selected = selected.and_then(|id| state.library.albums.iter().position(|a| a.id == id));
-    refresh_album_rows(ui, state);
     ui.set_selected_album(state.selected.map(|i| i as i32).unwrap_or(-1));
 }
 fn albums(ui: &PlayerWindow, state: &State) {
-    refresh_album_rows(ui, state);
     ui.set_selected_album(-1);
     ui.set_tracks(ModelRc::default());
     ui.set_album_title("Select an album".into());
@@ -99,11 +84,53 @@ fn select(ui: &PlayerWindow, state: &mut State, index: usize) {
     let Some(album) = state.library.albums.get(index) else {
         return;
     };
+    let mut sources = std::collections::BTreeMap::new();
+    for t in &album.tracks {
+        if let amp_core::MediaAccess::Managed { provider, item } = &t.access
+            && provider == "collector"
+            && let Ok(r) = serde_json::from_str::<amp_collector::RemoteTrack>(item)
+        {
+            sources.insert(
+                r.source,
+                (t.disc, r.audio.map(|a| a.source_label).unwrap_or_default()),
+            );
+        }
+    }
+    let ambiguous = sources
+        .values()
+        .map(|(disc, _)| disc)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        < sources.len();
+    ui.set_album_ambiguous(ambiguous);
+    ui.set_album_source_index(0);
+    ui.set_album_sources(ModelRc::new(VecModel::from(
+        std::iter::once(SharedString::from(if ambiguous {
+            "Choose a source disc"
+        } else {
+            "All album discs"
+        }))
+        .chain(
+            sources
+                .values()
+                .map(|(disc, label)| SharedString::from(format!("Disc {disc} · {label}"))),
+        )
+        .collect::<Vec<_>>(),
+    )));
     state.selected = Some(index);
+    ui.set_artist_view(false);
+    ui.set_show_queue(false);
     ui.set_active_track(-1);
     ui.set_selected_track(-1);
     ui.set_show_library(false);
     ui.set_selected_album(index as i32);
+    ui.set_album_art(
+        state
+            .artwork
+            .get(&album.id.item)
+            .and_then(|p| slint::Image::load_from_path(std::path::Path::new(p)).ok())
+            .unwrap_or_default(),
+    );
     ui.set_album_title(album.title.clone().into());
     ui.set_album_artist(album.artist.clone().into());
     ui.set_tracks(ModelRc::new(VecModel::from(
@@ -111,7 +138,20 @@ fn select(ui: &PlayerWindow, state: &mut State, index: usize) {
             .tracks
             .iter()
             .map(|t| TrackRow {
-                title: t.title.clone().into(),
+                title: format!(
+                    "{}{}",
+                    t.title,
+                    match t.availability {
+                        amp_core::Availability::Downloaded => " · Downloaded",
+                        amp_core::Availability::Available if t.id.provider == "collector" =>
+                            " · Streamable",
+                        amp_core::Availability::Available => "",
+                        amp_core::Availability::Preparing => " · Preparing",
+                        amp_core::Availability::Unavailable => " · Unavailable",
+                        amp_core::Availability::Unsupported => " · Unsupported",
+                    }
+                )
+                .into(),
                 duration: time(t.duration_seconds),
                 number: format!("{:02}", t.number).into(),
             })
@@ -126,12 +166,16 @@ fn start(ui: &PlayerWindow, state: &mut State, index: usize) {
     if index >= album.tracks.len() {
         return;
     }
+    if index == 0 && ui.get_album_ambiguous() {
+        ui.set_status("Choose a source disc before playing this album".into());
+        return;
+    }
     state.playlist = album.tracks.clone();
     state.queue_start = state.playlist.len();
     state.playlist.append(&mut state.queued);
     ui.set_queued(ModelRc::default());
     if state.player.is_none() {
-        match amp_audio::Player::new() {
+        match amp_audio::Player::with_resolver(state.resolver.clone()) {
             Ok(p) => state.player = Some(p),
             Err(e) => {
                 ui.set_status(format!("Audio output: {e:#}").into());
@@ -218,7 +262,7 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().collect();
     if args.iter().any(|a| a == "--help") {
         println!(
-            "trash-amp [--demo] [--library PATH]\n--demo loads a generated 2,000-album layout fixture (no audio).\nTRASH_AMP_DATA_DIR overrides the local cache directory."
+            "trash-amp [--demo] [--library PATH] [--server HTTPS_URL] [--trust PEM_OR_PAIRING_JSON]\n--demo loads a generated 2,000-album layout fixture (no audio).\nTRASH_AMP_DATA_DIR overrides the local cache directory."
         );
         return Ok(());
     }
@@ -233,18 +277,27 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&data)?;
     let store = Store::open(&data.join("library.sqlite3"))?;
     let preferences = store.preferences()?;
-    let library = if args.iter().any(|a| a == "--demo") {
+    let mut library = if args.iter().any(|a| a == "--demo") {
         amp_library::demo_library()
     } else {
         store.library()?.unwrap_or_default()
     };
+    if args.iter().any(|a| a == "--demo-appearances") && library.id == "demo" {
+        library.albums.truncate(32);
+        for album in &mut library.albums {
+            album.tracks[0].artist = "The Late Hours".into();
+        }
+    }
     let ui = PlayerWindow::new()?;
-    ui.set_sort_order(i32::from(preferences.sort_by_artist));
+    ui.set_sort_order(i32::from(preferences.browse_artists));
     ui.set_reduced_motion(preferences.reduced_motion);
     ui.set_prefer_raw(preferences.dump_preference == DumpPreference::Redumper);
     ui.set_automatic_metadata(preferences.automatic_metadata);
     ui.set_text_scale(preferences.text_scale);
     let state = Rc::new(RefCell::new(State {
+        resolver: None,
+        artwork: Default::default(),
+        browser: browse::Browser::default(),
         library,
         selected: None,
         playlist: vec![],
@@ -256,12 +309,15 @@ fn main() -> anyhow::Result<()> {
     }));
     sort_albums(&ui, &mut state.borrow_mut());
     albums(&ui, &state.borrow());
+    browse::rebuild(&ui, &mut state.borrow_mut(), true);
+    browse::wire(&ui, &state);
     let (tx, rx) = mpsc::channel();
     let generation = Arc::new(AtomicU64::new(0));
     let metadata_enabled = Arc::new(AtomicBool::new(
         state.borrow().preferences.automatic_metadata,
     ));
     let cache_path = data.join("library.sqlite3");
+    let mut collector = collector::Controller::new(&ui, &state, &data, generation.clone())?;
     let scan: Rc<dyn Fn(PathBuf)> = {
         let state = state.clone();
         let weak = ui.as_weak();
@@ -312,11 +368,15 @@ fn main() -> anyhow::Result<()> {
     };
     {
         let scan = scan.clone();
+        let weak = ui.as_weak();
         ui.on_open_folder(move || {
             if let Some(path) = rfd::FileDialog::new()
                 .set_title("Open music library")
                 .pick_folder()
             {
+                if let Some(ui) = weak.upgrade() {
+                    ui.invoke_source_changed(0);
+                }
                 scan(path)
             }
         });
@@ -326,6 +386,9 @@ fn main() -> anyhow::Result<()> {
         let state = state.clone();
         let generation = generation.clone();
         ui.on_demo(move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.invoke_source_changed(0);
+            }
             generation.fetch_add(1, Ordering::Relaxed);
             let mut s = state.borrow_mut();
             s.library = amp_library::demo_library();
@@ -334,6 +397,7 @@ fn main() -> anyhow::Result<()> {
                 ui.set_scanning(false);
                 sort_albums(&ui, &mut s);
                 albums(&ui, &s);
+                browse::rebuild(&ui, &mut s, true);
                 ui.set_status(
                     "2,000 generated albums. This fixture contains no playable audio.".into(),
                 );
@@ -343,18 +407,11 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = ui.as_weak();
         let state = state.clone();
-        ui.on_select_album(move |i| {
-            if let Some(ui) = weak.upgrade() {
-                select(&ui, &mut state.borrow_mut(), i as usize)
-            }
-        });
-    }
-    {
-        let weak = ui.as_weak();
-        let state = state.clone();
         ui.on_play_track(move |i| {
             if let Some(ui) = weak.upgrade() {
-                start(&ui, &mut state.borrow_mut(), i as usize)
+                let mut s = state.borrow_mut();
+                browse::clear_track_context(&mut s);
+                start(&ui, &mut s, i as usize)
             }
         });
     }
@@ -409,24 +466,10 @@ fn main() -> anyhow::Result<()> {
                 .and_then(|a| s.library.albums.get(a))
                 .and_then(|a| a.tracks.get(i as usize))
                 .cloned();
-            if let Some(t) = t {
-                if s.playlist.is_empty() {
-                    s.queued.push(t);
-                } else {
-                    s.playlist.push(t.clone());
-                    if let Some(p) = &s.player {
-                        p.append(vec![t]);
-                    }
-                }
-                if let Some(ui) = weak.upgrade() {
-                    ui.set_queued(ModelRc::new(VecModel::from(
-                        s.queued
-                            .iter()
-                            .map(|t| SharedString::from(&t.title))
-                            .collect::<Vec<_>>(),
-                    )));
-                    ui.set_status("Added to up next".into());
-                }
+            if let Some(t) = t
+                && let Some(ui) = weak.upgrade()
+            {
+                browse::enqueue_track(&ui, &mut s, t);
             }
         });
     }
@@ -482,8 +525,8 @@ fn main() -> anyhow::Result<()> {
         ui.on_sort_changed(move || {
             if let Some(ui) = weak.upgrade() {
                 let mut s = state.borrow_mut();
-                s.preferences.sort_by_artist = ui.get_sort_order() == 1;
-                sort_albums(&ui, &mut s);
+                s.preferences.browse_artists = ui.get_sort_order() == 1;
+                browse::mode_changed(&ui, &mut s);
                 if let Err(e) = s.store.save_preferences(&s.preferences) {
                     ui.set_status(e.to_string().into());
                 }
@@ -516,8 +559,11 @@ fn main() -> anyhow::Result<()> {
                         Err(e) => { eprintln!("Media keys unavailable: {e}"); ui.set_status(format!("Media keys unavailable: {e}").into()); }
                     }
                 }
+                collector.poll();
                 let mut s = state.borrow_mut();
+                browse::poll(&ui, &mut s);
                 while let Ok(event) = media_rx.try_recv() { media_event(&ui, &mut s, event); }
+                let mut catalog_changed = false;
                 while let Ok(event) = rx.try_recv() {
                     match event {
                         ScanEvent::Progress(v, n) if v == generation.load(Ordering::Relaxed) => {
@@ -545,6 +591,7 @@ fn main() -> anyhow::Result<()> {
                                     s.selected = None;
                                     sort_albums(&ui, &mut s);
                                     albums(&ui, &s);
+                                    browse::rebuild(&ui, &mut s, true);
                                     ui.set_status(
                                         match saved {
                                             Ok(()) => status,
@@ -575,27 +622,15 @@ fn main() -> anyhow::Result<()> {
                                 let selected_updated = s.selected == Some(index);
                                 let order_changed = s.library.albums[index].title != album.title || s.library.albums[index].artist != album.artist;
                                 s.library.albums[index] = album;
-                                if let Some(model) = ui
-                                    .get_albums()
-                                    .as_any()
-                                    .downcast_ref::<VecModel<AlbumRow>>()
-                                {
-                                    let a = &s.library.albums[index];
-                                    model.set_row_data(
-                                        index,
-                                        AlbumRow {
-                                            title: a.title.clone().into(),
-                                            artist: a.artist.clone().into(),
-                                            detail: a.source_label.clone().into(),
-                                        },
-                                    );
-                                }
                                 if order_changed { sort_albums(&ui, &mut s); }
                                 if selected_updated && let Some(index) = s.selected {
                                     let show_library = ui.get_show_library();
+                                    let selected_track = ui.get_selected_track();
                                     select(&ui, &mut s, index);
+                                    ui.set_selected_track(selected_track);
                                     ui.set_show_library(show_library);
                                 }
+                                catalog_changed = true;
                             }
                         }
                         ScanEvent::MetadataDone(v, result)
@@ -621,13 +656,14 @@ fn main() -> anyhow::Result<()> {
                         _ => {}
                     }
                 }
+                if catalog_changed { browse::rebuild(&ui, &mut s, false); }
                 if let Some(player) = &s.player {
                     let snapshot = player.snapshot();
                     let upcoming = s
                         .playlist
                         .iter()
                         .skip(s.queue_start.max(snapshot.track + 1))
-                        .map(|t| SharedString::from(&t.title))
+                        .map(|t| SharedString::from(collector::queue_label(t)))
                         .collect::<Vec<_>>();
                     use slint::Model;
                     if ui.get_queued().iter().collect::<Vec<_>>() != upcoming {
@@ -652,7 +688,7 @@ fn main() -> anyhow::Result<()> {
                     }
                     if let Some(track) = s.playlist.get(snapshot.track) {
                         ui.set_now_title(track.title.clone().into());
-                        ui.set_now_artist(track.artist.clone().into());
+                        ui.set_now_artist(format!("{}{}",track.artist, if track.id.provider == "collector" {format!(" · {}",track.id.library)} else {String::new()}).into());
                         ui.set_elapsed(time(snapshot.seconds));
                         ui.set_duration(time(track.duration_seconds));
                         if !ui.get_scrubbing() {
@@ -670,7 +706,14 @@ fn main() -> anyhow::Result<()> {
             },
         );
     }
-    if !args.iter().any(|a| a == "--library" || a == "--demo") {
+    if !args.iter().any(|a| a == "--library" || a == "--demo")
+        && state
+            .borrow()
+            .library
+            .albums
+            .first()
+            .is_none_or(|a| a.id.provider != "collector")
+    {
         spawn_metadata(
             state.borrow().library.clone(),
             cache_path,
@@ -685,8 +728,44 @@ fn main() -> anyhow::Result<()> {
     {
         scan(PathBuf::from(path))
     }
+    if let Some(url) = args
+        .iter()
+        .position(|a| a == "--server")
+        .and_then(|i| args.get(i + 1))
+    {
+        ui.set_server_url(url.clone().into());
+        if let Some(path) = args
+            .iter()
+            .position(|a| a == "--trust")
+            .and_then(|i| args.get(i + 1))
+        {
+            ui.set_certificate_path(path.clone().into());
+        }
+        ui.set_collector_open(true);
+        ui.invoke_connect_server();
+    }
     if args.iter().any(|a| a == "--settings") {
         ui.set_settings(true);
+    }
+    if args.iter().any(|a| a == "--browse-artists") {
+        state.borrow_mut().preferences.browse_artists = true;
+        ui.set_sort_order(1);
+        browse::mode_changed(&ui, &mut state.borrow_mut());
+    }
+    if let Some(query) = args
+        .iter()
+        .position(|a| a == "--search")
+        .and_then(|i| args.get(i + 1))
+    {
+        ui.set_search_text(query.clone().into());
+        ui.invoke_search_changed();
+    }
+    if let Some(name) = args
+        .iter()
+        .position(|a| a == "--artist")
+        .and_then(|i| args.get(i + 1))
+    {
+        ui.invoke_open_artist(name.clone().into());
     }
     // Reproducible visual QA uses the actual Slint renderer, not a separate mockup.
     if let Some(i) = args.iter().position(|a| a == "--size")
@@ -699,6 +778,13 @@ fn main() -> anyhow::Result<()> {
         && let Some(value) = args.get(i + 1)
     {
         ui.set_text_scale(value.parse::<f32>()?.clamp(1.0, 2.0));
+    }
+    if let Some(offset) = args
+        .iter()
+        .position(|a| a == "--detail-scroll")
+        .and_then(|i| args.get(i + 1))
+    {
+        ui.set_detail_y(-offset.parse::<f32>()?);
     }
     if args.iter().any(|a| a == "--select-first") {
         select(&ui, &mut state.borrow_mut(), 0);
@@ -893,6 +979,9 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("trash-amp-sort-test-{}.db", std::process::id()));
         let mut state = State {
+            resolver: None,
+            artwork: Default::default(),
+            browser: browse::Browser::default(),
             library: amp_library::demo_library(),
             selected: Some(0),
             playlist: vec![],
@@ -912,7 +1001,7 @@ mod tests {
                 .windows(2)
                 .all(|w| w[0].title.to_lowercase() <= w[1].title.to_lowercase())
         );
-        state.preferences.sort_by_artist = true;
+        state.preferences.browse_artists = true;
         sort_albums(&ui, &mut state);
         assert_eq!(state.library.albums[state.selected.unwrap()].id, id);
         assert!(
@@ -920,7 +1009,7 @@ mod tests {
                 .library
                 .albums
                 .windows(2)
-                .all(|w| w[0].artist.to_lowercase() <= w[1].artist.to_lowercase())
+                .all(|w| w[0].title.to_lowercase() <= w[1].title.to_lowercase())
         );
         drop(state);
         let _ = std::fs::remove_file(dir);

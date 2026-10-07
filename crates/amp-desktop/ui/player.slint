@@ -1,16 +1,45 @@
-import { Button, ScrollView, ListView, Slider, CheckBox, AboutSlint, ComboBox } from "std-widgets.slint";
-export struct AlbumRow { title: string, artist: string, detail: string }
+import { Button, ScrollView, ListView, Slider, CheckBox, AboutSlint, ComboBox, LineEdit } from "std-widgets.slint";
+import { BrowserItem, BrowserRow } from "browser-item.slint";
+export { BrowserRow }
 import { TrackItem, TrackRow } from "track-item.slint";
 export { TrackRow }
 import { TransportSeek } from "transport-seek.slint";
 export component PlayerWindow inherits Window {
+    icon: @image-url("../../../assets/macos/trash-amp.png");
+    in property <[string]> sources;
+    in-out property <int> source-index;
+    callback source-changed(int);
+    in-out property <bool> collector-open;
+    in-out property <string> server-url;
+    in-out property <string> certificate-path;
+    in property <string> connection-status;
+    in property <bool> collector-active;
+    in property <bool> collector-online;
+    in property <bool> collector-busy;
+    in property <[string]> collections;
+    in-out property <int> collection-index;
+    callback collection-changed(int);
+    in property <[string]> saved-lists;
+    in-out property <int> list-index: -1;
+    callback list-selected(int);
+    in property <[BrowserRow]> list-rows;
+    in-out property <int> list-entry: -1;
+    in property <bool> list-editable;
+    in-out property <string> list-name;
+    in-out property <string> download-budget: "10";
+    in property <image> album-art;
+    in property <[string]> album-sources;
+    in-out property <int> album-source-index;
+    in property <bool> album-ambiguous;
+    callback album-source-selected(int);
+    callback connect-server(); callback cancel-connect(); callback refresh-server(); callback remove-server();
+    callback list-command(int); callback play-list(bool); callback download-action(int); callback save-budget();
     title: "Trash Amp";
     preferred-width: 980px; preferred-height: 680px; min-width: 330px; min-height: 230px; max-width: 10000px; max-height: 10000px;
     background: #20262d;
     default-font-family: "Helvetica Neue";
     default-font-size: 14px * root.text-scale;
     in-out property <float> text-scale: 1;
-    in property <[AlbumRow]> albums;
     in property <[TrackRow]> tracks;
     in property <[string]> queued;
     in property <string> album-title: "Your albums, close at hand.";
@@ -26,6 +55,25 @@ export component PlayerWindow inherits Window {
     in property <float> level;
     in property <bool> scanning;
     in property <float> scan-progress;
+    in property <[BrowserRow]> browser-rows;
+    in property <[BrowserRow]> artist-rows;
+    in property <bool> artist-view;
+    in property <bool> can-back;
+    in property <bool> section-open;
+    in property <int> browser-selected: -1;
+    in-out property <length> browser-y;
+    in-out property <length> detail-y;
+    in-out property <length> track-y;
+    in-out property <string> search-text;
+    in-out property <bool> search-editing;
+    in-out property <bool> focus-search;
+    callback search-changed();
+    callback focus-search-requested();
+    callback browse-action(bool, int, int);
+    callback open-artist(string);
+    callback back();
+    callback activate-selection();
+    callback album-track-selected();
     in-out property <int> sort-order;
     callback sort-changed();
     in-out property <int> selected-track: -1;
@@ -36,7 +84,7 @@ export component PlayerWindow inherits Window {
     in-out property <bool> automatic-metadata: true;
     in-out property <bool> settings;
     in-out property <bool> show-library: true;
-    private property <bool> show-queue;
+    in-out property <bool> show-queue;
     // Store the desktop choice independently of the temporary phone layout.
     in-out property <float> library-width: 280;
     // Snapshot the viewport to keep layout constraints independent of Window's layout hints.
@@ -45,7 +93,11 @@ export component PlayerWindow inherits Window {
     private property <length> desktop-library-width: min(max(220px * root.text-scale, root.library-width * root.text-scale * 1px), root.viewport-width * 0.45);
     in property <bool> wide: true;
     in property <bool> short: false;
-    callback open-folder(); callback demo(); callback select-album(int);
+    changed short => { if root.short { root.search-editing = false; } }
+    changed settings => { if root.settings { root.search-editing = false; } }
+    changed show-library => { if !root.show-library && !root.wide { root.search-editing = false; } }
+    changed wide => { if !root.wide && !root.show-library { root.search-editing = false; } }
+    callback open-folder(); callback demo();
     callback play-track(int); callback enqueue(int); callback toggle-play();
     callback previous(); callback next(); callback seek(float);
     callback preferences-changed(); callback clear-queue();
@@ -53,12 +105,16 @@ export component PlayerWindow inherits Window {
     keyboard := FocusScope {
       width: 100%; height: 100%;
       key-pressed(event) => {
+        if ((event.modifiers.control || event.modifiers.meta) && (event.text == "f" || event.text == "F")) {
+            root.focus-search-requested(); return accept;
+        }
+        if (root.search-editing) { return reject; }
         if (!root.settings && !event.modifiers.alt && !event.modifiers.control && !event.modifiers.meta) {
             if (event.text == " ") { root.toggle-play(); return accept; }
             if (event.text == Key.LeftArrow) { root.previous(); return accept; }
             if (event.text == Key.RightArrow) { root.next(); return accept; }
         }
-        if (event.text == Key.Return && root.selected-track >= 0 && !root.settings) { root.play-track(root.selected-track); return accept; }
+        if (event.text == Key.Return && !root.settings) { root.activate-selection(); return accept; }
         return reject;
       }
       VerticalLayout {
@@ -68,6 +124,70 @@ export component PlayerWindow inherits Window {
             Text { text: "trash amp"; color: #dce5ed; font-size: root.wide ? 20px : 16px; font-weight: 700; min-width: 90px; vertical-alignment: center; overflow: elide; }
             Button { text: "Open folder"; max-width: 120px; clicked => { root.open-folder(); } }
             Button { text: "Settings"; max-width: 90px; clicked => { root.settings = !root.settings; } }
+        }
+        HorizontalLayout {
+            height: 32px;
+            Button { text: "Servers / Lists"; clicked => { root.collector-open = !root.collector-open; } }
+            ComboBox { model: root.sources; current-index <=> root.source-index; selected(i) => { root.source-changed(self.current-index); } }
+            if root.collector-active: ComboBox { model: root.collections; current-index <=> root.collection-index; selected(i) => { root.collection-changed(self.current-index); } }
+            if root.collector-active: Button { text: "Refresh"; enabled: !root.collector-busy; clicked => { root.refresh-server(); } }
+        }
+        if root.collector-open: Rectangle {
+            background: #283039; border-radius: 6px;
+            collector-scroll := ScrollView {
+                width: 100%; height: 100%;
+                viewport-width: max(self.visible-width, collector-content.min-width);
+                viewport-height: max(self.visible-height, collector-content.min-height);
+                collector-content := VerticalLayout {
+                width: collector-scroll.viewport-width; height: collector-scroll.viewport-height;
+                padding: 12px; spacing: 8px;
+                HorizontalLayout {
+                    LineEdit { text <=> root.server-url; placeholder-text: "https://collector.example:8443"; accessible-label: "Collector server URL"; }
+                    Button { text: "Connect / Reconnect"; enabled: !root.collector-busy; clicked => { root.connect-server(); } }
+                    Button { text: "Cancel"; enabled: root.collector-busy; clicked => { root.cancel-connect(); } }
+                }
+                LineEdit { text <=> root.certificate-path; placeholder-text: "Optional owner-provided PEM or pairing JSON path"; accessible-label: "Owner-provided trust file"; }
+                Text { text: root.connection-status; color: #dce5ed; wrap: word-wrap; }
+                HorizontalLayout {
+                    Button { text: "Remove connection"; enabled: root.collector-active && !root.collector-busy; clicked => { root.remove-server(); } }
+                    LineEdit { text <=> root.download-budget; placeholder-text: "Audio budget (GiB)"; accessible-label: "Download budget in GiB"; }
+                    Button { text: "Set GiB limit"; clicked => { root.save-budget(); } }
+                    Button { text: "Retry downloads"; clicked => { root.download-action(4); } }
+                    Button { text: "Cancel downloads"; clicked => { root.download-action(5); } }
+                }
+                HorizontalLayout {
+                    ComboBox { model: root.saved-lists; current-index <=> root.list-index; selected(i) => { root.list-selected(self.current-index); } }
+                    Button { text: "Play"; enabled: root.list-index > 0; clicked => { root.play-list(false); } }
+                    Button { text: "Shuffle"; enabled: root.list-index > 0; clicked => { root.play-list(true); } }
+                    Button { text: "Download list"; enabled: !root.collector-busy && root.collector-online && root.list-index > 0; clicked => { root.download-action(2); } }
+                    Button { text: "Remove list downloads"; enabled: root.list-index > 0; clicked => { root.download-action(3); } }
+                }
+                HorizontalLayout {
+                    LineEdit { text <=> root.list-name; placeholder-text: "List name"; accessible-label: "List name"; }
+                    Button { text: "Create"; enabled: !root.collector-busy && root.collector-online && root.list-editable; clicked => { root.list-command(0); } }
+                    Button { text: "Rename"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-index > 0; clicked => { root.list-command(1); } }
+                    Button { text: "Delete"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-index > 0; clicked => { root.list-command(2); } }
+                }
+                HorizontalLayout {
+                    Button { text: "Append album"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.selected-album >= 0; clicked => { root.list-command(3); } }
+                    Button { text: "Append disc"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.selected-album >= 0; clicked => { root.list-command(10); } }
+                    Button { text: "Append track"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.selected-track >= 0; clicked => { root.list-command(4); } }
+                    Button { text: "Remove entry"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-entry >= 0; clicked => { root.list-command(5); } }
+                    Button { text: "Move up"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-entry > 0; clicked => { root.list-command(6); } }
+                    Button { text: "Move down"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-entry >= 0; clicked => { root.list-command(7); } }
+                }
+                HorizontalLayout {
+                    Button { text: "Retry original changes"; enabled: !root.collector-busy && root.collector-online; clicked => { root.list-command(8); } }
+                    Button { text: "Discard unresolved changes"; clicked => { root.list-command(9); } }
+                }
+                ListView {
+                    min-height: 180px; vertical-stretch: 1;
+                    for item[i] in root.list-rows: BrowserItem { item: item; selected: i == root.list-entry;
+                        activate => { root.list-entry = i; } pointer-activate => { root.list-entry = i; }
+                    }
+                }
+            }
+            }
         }
         if root.settings: Rectangle {
             background: #303942; border-radius: 8px;
@@ -99,7 +219,7 @@ export component PlayerWindow inherits Window {
                 }
             }
         }
-        if !root.short && !root.settings: HorizontalLayout {
+        if !root.short && !root.settings && !root.collector-open: HorizontalLayout {
             spacing: 0px;
             if root.wide || root.show-library: Rectangle {
                 accessible-role: groupbox;
@@ -109,29 +229,46 @@ export component PlayerWindow inherits Window {
                 min-width: root.wide ? root.desktop-library-width : 0px;
                 horizontal-stretch: root.wide ? 0 : 1;
                 background: #283039; border-radius: 6px;
-                VerticalLayout {
-                    padding: 8px; spacing: 6px;
-                    Text { text: "Albums"; color: #a8bdcc; height: 24px; font-weight: 600; }
-                    ComboBox { model: ["Album title", "Album artist"]; current-index <=> root.sort-order; selected(_) => { root.sort-changed(); } }
-                    list := ListView {
-                        min-height: 0px; preferred-height: 0px; vertical-stretch: 1;
-                        for album[i] in root.albums: Rectangle {
-                            accessible-role: button;
-                            accessible-label: album.title + " by " + album.artist;
-                            accessible-action-default => { root.select-album(i); root.show-library = false; keyboard.focus(); }
-                            height: 68px * root.text-scale;
-                            background: i == root.selected-album ? #3a5062 : (tile.has-hover ? #333f49 : transparent);
-                            border-radius: 4px;
-                            VerticalLayout {
-                                padding: 9px; spacing: 3px;
-                                Text { text: album.title; color: #edf1f5; overflow: elide; font-weight: 600; }
-                                Text { text: album.artist; color: #adbbc6; overflow: elide; font-size: 12px * root.text-scale; }
-                            }
-                            tile := TouchArea { clicked => { root.select-album(i); root.show-library = false; keyboard.focus(); } }
+                HorizontalLayout {
+                    x: 8px; y: 8px; width: parent.width - 16px; height: 32px;
+                    ComboBox { model: ["Albums", "Artists"]; current-index <=> root.sort-order; selected(_) => { root.sort-changed(); } }
+                    if root.section-open: Button { text: "Back"; clicked => { root.back(); keyboard.focus(); } }
+                }
+                search-bar := HorizontalLayout {
+                    x: 8px; y: root.wide ? 46px : parent.height - self.height - 8px;
+                    width: parent.width - 16px; height: 36px * root.text-scale; spacing: 4px;
+                    search := LineEdit {
+                        in-out property <bool> request-focus <=> root.focus-search;
+                        changed request-focus => { if self.request-focus { self.focus(); self.request-focus = false; } }
+                        init => { if self.request-focus { self.focus(); self.request-focus = false; } }
+                        changed has-focus => { root.search-editing = self.has-focus; }
+                        placeholder-text: "Search library"; accessible-label: "Search library";
+                        text <=> root.search-text;
+                        edited(_) => { root.search-changed(); }
+                        key-pressed(event) => {
+                            if event.text == Key.Escape { keyboard.focus(); return accept; }
+                            return reject;
                         }
+                    }
+                    if root.search-text != "": Button { text: "×"; accessible-label: "Clear search"; max-width: 32px;
+                        clicked => { root.search-text = ""; root.search-changed(); search.focus(); } }
+                }
+                list := ListView {
+                    x: 8px; y: root.wide ? 52px + search-bar.height : 46px;
+                    width: parent.width - 16px;
+                    height: parent.height - 60px - search-bar.height;
+                    viewport-y <=> root.browser-y;
+                    for item[i] in root.browser-rows: BrowserItem {
+                        item: item; text-scale: root.text-scale; selected: root.browser-selected == i;
+                        activate => { root.browse-action(false, i, 0); keyboard.focus(); }
+                        pointer-activate => { root.browse-action(false, i, 3); keyboard.focus(); }
+                        play => { root.browse-action(false, i, 1); }
+                        enqueue => { root.browse-action(false, i, 2); }
+                        artist(name) => { root.open-artist(name); keyboard.focus(); }
                     }
                 }
             }
+
             if root.wide: FocusScope {
                 width: 16px;
                 accessible-role: slider;
@@ -155,13 +292,45 @@ export component PlayerWindow inherits Window {
             if root.wide || !root.show-library: VerticalLayout {
                 min-width: 0px; horizontal-stretch: 1;
                 spacing: 10px;
-                if !root.wide: Button { text: "Back to albums"; clicked => { root.show-library = true; } }
-                Text { text: root.album-title; color: #f0f3f7; font-size: 27px * root.text-scale; font-weight: 600; wrap: word-wrap; }
-                Text { text: root.album-artist; color: #a9bac9; wrap: word-wrap; }
-                HorizontalLayout {
-                    Button { text: "Play album"; enabled: root.tracks.length > 0; clicked => { root.play-track(0); } }
+                if !root.wide || root.can-back: HorizontalLayout {
+                    Button { text: "Back"; max-width: 90px; clicked => { root.back(); keyboard.focus(); } }
+                    Rectangle { horizontal-stretch: 1; }
                 }
                 HorizontalLayout {
+                    Image { source: root.album-art; width: 64px; height: 64px; image-fit: contain; }
+                    Text { text: root.album-title; color: #f0f3f7; font-size: 27px * root.text-scale; font-weight: 600; wrap: word-wrap; }
+                }
+                if root.artist-view: Text { text: root.album-artist; color: #a9bac9; wrap: word-wrap; }
+                if !root.artist-view: artist-link := FocusScope {
+                    enabled: root.tracks.length > 0;
+                    height: 24px * root.text-scale;
+                    accessible-role: button; accessible-label: "Artist: " + root.album-artist;
+                    accessible-action-default => { root.open-artist(root.album-artist); }
+                    key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.open-artist(root.album-artist); return accept; } return reject; }
+                    Text { x: 0px; y: 0px; width: 100%; height: 100%; horizontal-alignment: left; text: root.album-artist; color: #a8c9e2; overflow: elide; font-weight: artist-link.has-focus || artist-click.has-hover ? 600 : 400; }
+                    artist-click := TouchArea { clicked => { root.open-artist(root.album-artist); keyboard.focus(); } }
+                }
+                if root.artist-view: ListView {
+                    accessible-label: "Artist releases";
+                    min-height: 0px; preferred-height: 0px; vertical-stretch: 1;
+                    viewport-y <=> root.detail-y;
+                    for item[i] in root.artist-rows: BrowserItem {
+                        item: item; text-scale: root.text-scale; show-album: false;
+                        activate => { root.browse-action(true, i, 0); keyboard.focus(); }
+                        pointer-activate => { root.browse-action(true, i, 3); keyboard.focus(); }
+                        play => { root.browse-action(true, i, 1); }
+                        enqueue => { root.browse-action(true, i, 2); }
+                        artist(name) => { root.open-artist(name); keyboard.focus(); }
+                    }
+                }
+                if !root.artist-view && root.collector-active: ComboBox { model: root.album-sources; current-index <=> root.album-source-index; selected(_) => { root.album-source-selected(self.current-index); } }
+                if !root.artist-view: HorizontalLayout {
+                    Button { text: "Play album"; enabled: root.tracks.length > 0 && !root.album-ambiguous; clicked => { root.play-track(0); } }
+                    if root.collector-active: Button { text: "Download album"; enabled: !root.collector-busy && root.collector-online; clicked => { root.download-action(0); } }
+                    if root.collector-active: Button { text: "Download track"; enabled: !root.collector-busy && root.collector-online && root.selected-track >= 0; clicked => { root.download-action(6); } }
+                    if root.collector-active: Button { text: "Remove download"; clicked => { root.download-action(1); } }
+                }
+                if !root.artist-view: HorizontalLayout {
                     spacing: 0px;
                     for label[i] in ["Tracks", "Up next (" + root.queued.length + ")"] : tab := FocusScope {
                         height: 34px;
@@ -178,17 +347,19 @@ export component PlayerWindow inherits Window {
                         TouchArea { clicked => { root.show-queue = i == 1; tab.focus(); } }
                     }
                 }
-                if !root.show-queue: ListView {
+                if !root.show-queue && !root.artist-view: ListView {
+                    accessible-label: "Album tracks";
+                    viewport-y <=> root.track-y;
                         min-height: 0px; preferred-height: 0px; vertical-stretch: 1;
                     for track[i] in root.tracks: TrackItem {
                         track: track; text-scale: root.text-scale;
                         selected: i == root.selected-track; current: i == root.active-track;
-                        select => { root.selected-track = i; keyboard.focus(); }
+                        select => { root.selected-track = i; root.album-track-selected(); keyboard.focus(); }
                         play => { root.play-track(i); keyboard.focus(); }
                         enqueue => { root.enqueue(i); }
                     }
                 }
-                if root.show-queue: VerticalLayout {
+                if root.show-queue && !root.artist-view: VerticalLayout {
                     Button { text: "Clear up next"; clicked => { root.clear-queue(); } }
                     ListView {
                         min-height: 0px; preferred-height: 0px; vertical-stretch: 1;

@@ -361,6 +361,8 @@ fn tagged_track(path: &Path, library: &str) -> Result<(String, Option<String>, b
         .context("Track path must be valid UTF-8")?
         .to_owned();
     let track = Track {
+        availability: Default::default(),
+        source: None,
         id: id(library, locator.clone()),
         title: tag
             .and_then(|t| t.title())
@@ -511,6 +513,8 @@ fn disc_album(
     let tracks = layouts
         .iter()
         .map(|l| Track {
+            availability: Default::default(),
+            source: None,
             id: id(library, format!("{cue_path}#{}", l.0)),
             title: block
                 .and_then(|b| b.tracks.iter().find(|t| t.track_number == l.0))
@@ -586,6 +590,8 @@ pub fn demo_library() -> Library {
                 source_label: "Generated layout fixture".into(),
                 tracks: (1..=10)
                     .map(|n| Track {
+                        availability: Default::default(),
+                        source: None,
                         id: id("demo", format!("{i}/{n}")),
                         title: format!("Movement {n}"),
                         artist: "Layout fixture".into(),

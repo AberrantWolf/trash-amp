@@ -1,0 +1,61 @@
+import { Button } from "std-widgets.slint";
+export struct BrowserRow { artwork: image, kind: int, title: string, artist: string, subtitle: string, duration: string }
+export component BrowserItem inherits Rectangle {
+    in property <BrowserRow> item;
+    in property <float> text-scale: 1;
+    in property <bool> selected;
+    in property <bool> show-album: true;
+    callback activate(); callback pointer-activate(); callback play(); callback enqueue(); callback artist(string);
+    height: (item.kind == 0 || item.kind == 5 || item.kind == 4 || item.kind == 6 ? 32px : item.kind == 3 ? (root.show-album ? 106px : 86px) : 66px) * text-scale;
+    background: root.selected ? #3a5062 : (touch.has-hover ? #303c47 : transparent);
+    border-radius: 4px;
+    forward-focus: focus;
+    focus := FocusScope {
+        width: 100%; height: 100%;
+        enabled: root.item.kind != 0 && root.item.kind != 6;
+        accessible-role: list-item;
+        accessible-label: root.item.title + " " + root.item.subtitle;
+        accessible-action-default => { root.activate(); }
+        key-pressed(event) => {
+            if (event.text == Key.Return) { if root.item.kind == 3 { root.play(); } else { root.activate(); } return accept; }
+            return reject;
+        }
+        Rectangle { width: 2px; height: 100%; visible: focus.has-focus; background: #7ca7c9; }
+        touch := TouchArea {
+            enabled: root.item.kind != 0 && root.item.kind != 6;
+            clicked => { focus.focus(); if root.item.kind == 3 { root.pointer-activate(); } else { root.activate(); } }
+            double-clicked => { if root.item.kind == 3 { root.play(); } }
+        }
+        Image { source: root.item.artwork; x: 6px; y: 6px; width: 40px; height: 40px; image-fit: contain; }
+        VerticalLayout {
+            padding-left: root.item.kind == 1 || root.item.kind == 3 ? 52px : 8px; padding-right: 8px; padding-top: 5px; padding-bottom: 5px; spacing: 2px;
+            Text { text: root.item.title; color: root.item.kind == 0 || root.item.kind == 6 ? #a8bdcc : #edf1f5;
+                font-size: (root.item.kind == 5 ? 12px : 14px) * root.text-scale;
+                font-weight: root.item.kind == 5 || root.item.kind == 6 ? 400 : 600;
+                vertical-alignment: center; overflow: elide; }
+            if root.item.kind == 1 || root.item.kind == 2: Text {
+                text: root.item.subtitle; color: #adbbc6; overflow: elide; font-size: 12px * root.text-scale;
+            }
+            if root.item.kind == 3: Rectangle {
+                height: 17px * root.text-scale;
+                artist-focus := FocusScope {
+                    width: 100%; height: 100%;
+                    accessible-role: button; accessible-label: "Artist: " + root.item.artist;
+                    accessible-action-default => { root.artist(root.item.artist); }
+                    key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.artist(root.item.artist); return accept; } return reject; }
+                    Text { x: 0px; y: 0px; width: 100%; height: 100%; horizontal-alignment: left; text: root.item.artist; color: #a8c9e2; overflow: elide; font-size: 12px * root.text-scale;
+                        font-weight: artist-touch.has-hover || artist-focus.has-focus ? 600 : 400; }
+                    artist-touch := TouchArea { clicked => { root.artist(root.item.artist); } }
+                }
+            }
+            if root.item.kind == 3 && root.show-album: Text { text: root.item.subtitle; color: #adbbc6; overflow: elide; font-size: 11px * root.text-scale; }
+            if root.item.kind == 3: HorizontalLayout {
+                height: 28px * root.text-scale; spacing: 6px;
+                Button { text: "Play"; width: 56px * root.text-scale; accessible-label: "Play " + root.item.title; clicked => { root.play(); } }
+                Button { text: "+ Queue"; width: 88px * root.text-scale; accessible-label: "Add " + root.item.title + " to up next"; clicked => { root.enqueue(); } }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: root.item.duration; width: 34px * root.text-scale; color: #9eafbd; font-size: 11px * root.text-scale; vertical-alignment: center; }
+            }
+        }
+    }
+}

@@ -2,6 +2,20 @@
 
 An album-focused Rust music player. The first development target is macOS, with a Slint UI over independent library and audio crates.
 
+## macOS app bundle
+
+```sh
+./scripts/bundle-macos.sh --open
+# Faster development build:
+./scripts/bundle-macos.sh --debug --open
+```
+
+This creates `target/release/Trash Amp.app` (or `target/debug/Trash Amp.app`) with
+its own Finder and Dock icon. Move the bundle into Applications if desired.
+The bundle uses an ad-hoc development signature; distribution signing and
+notarization remain release work. Bundling requires Python 3 and the Xcode
+command-line tools in addition to Rust.
+
 ## Run
 
 ```sh
@@ -25,7 +39,9 @@ The initial build downloads Slint/Skia dependencies and can take several minutes
 - Keyless MusicBrainz metadata retrieval, a persistent local response cache, and background name updates.
 - Transient album playback order and up-next controls, with Tracks / Up next tabs.
 - A draggable desktop album divider; double-click to reset. Its width survives phone/desktop layout switches within the window.
-- Album title or Album artist sorting, persisted locally; album-artist tags take precedence over compilation fallbacks.
+- Albums / Artists browsing, persisted locally; artist entries retain complete album-artist credits and show album counts.
+- Live library search across artists, albums, and tracks, with accent-insensitive multi-word matching, grouped previews, and full result lists.
+- Artist pages with primary albums and compact album-grouped guest appearances; Back restores search and browsing positions.
 - Desktop single-click selection, double-click/hover-button playback, and a current-track marker.
 - Space to play/pause and Left/Right to go previous/next when browsing. Focused controls retain their native keyboard behavior; Enter plays a selected track. Previous restarts after three seconds.
 - OS media keys and Now Playing metadata through Souvlaki (macOS integrated; Windows/Linux still need platform validation).
@@ -38,6 +54,18 @@ Supported decoding is determined by the pinned Symphonia version. WAV/FLAC/MP3/V
 Current redumper `.scram/.state/.subcode/.toc` audio packages now play directly, including without BIN/CUE files. Raw remains the default; turn off “Prefer redumper raw dumps” and reopen the folder to choose BIN/CUE. With raw selected, invalid packages are reported rather than silently replaced with BIN playback. Missing BIN files can use a supported raw package even when BIN is preferred. Reopen existing cached libraries to replace the old pending-decoder entries.
 
 The initial raw reader supports single-session, two-channel, all-audio discs. Mixed-mode/multisession raw images remain explicitly unsupported. Raw samples retain the recording timeline; drive offset is not applied twice. Skipped/C2-error samples stop playback with an error. CUE playback includes stored and synthetic gaps and excludes data pregaps. Hidden first-track audio is exposed by junk-libs but has no player UI yet. PRE flags are reported in album source text; de-emphasis is not yet applied. Full real-dump comparison is still pending the fixture path.
+
+## Search and artist browsing
+
+Choose **Albums** or **Artists** above the library list. Artists includes complete album-artist credits; track-only artists can be found through search. Opening an artist also associates collaborations containing their complete name, using name boundaries rather than guessing how to split credits. These are textual associations, not authoritative artist identities.
+
+Search matches all query words across the applicable metadata fields, ignoring case and accents. For example, an artist name plus part of an album title can find a track. Artists, Albums, and Tracks each show five results and a total count; **Show all** opens the full list. Search covers the loaded catalog, never additional folders or unconfigured services.
+
+On desktop the field stays above the sidebar; on phone layouts it sits above playback controls in the library view. Cmd/Ctrl+F focuses search. Escape leaves text editing without clearing the query. Back restores the query, selection, and scroll position. Clearing search returns to the selected browser mode while keeping open details. Search is not saved across restarts.
+
+Selecting a track opens its album and highlights it without playing. Play, double-click, or Enter on a search/artist track plays that song followed by the remaining explicit queue. Album-view playback continues through the album. Add to queue does not navigate or start playback. Where selecting a track replaces its row, pointer navigation waits briefly to distinguish a double-click; keyboard and accessibility selection navigate immediately.
+
+Existing saved album-artist sorting preferences become Artists browsing automatically. The library cache and provider/media identities remain compatible. Search does not test media availability; playback reports unavailable sources as before.
 
 ## Automatic metadata
 
@@ -76,3 +104,8 @@ A read-only diagnostic for scanner counts, timing and metadata outcomes uses a t
 ```sh
 cargo run -p amp-library --example scan_probe -- /path/to/album
 ```
+
+Collector servers can be added from Servers / Lists. Approve enrollment in the
+server interface; provide owner certificate material for private certificate
+trust when required. See [connection and validation](docs/collector-connection.md)
+for offline downloads, list editing and qualification limits.
