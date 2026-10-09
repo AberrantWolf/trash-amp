@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 slint::include_modules!();
+mod artwork;
 mod browse;
 mod collector;
 struct State {
@@ -128,7 +129,7 @@ fn select(ui: &PlayerWindow, state: &mut State, index: usize) {
         state
             .artwork
             .get(&album.id.item)
-            .and_then(|p| slint::Image::load_from_path(std::path::Path::new(p)).ok())
+            .and_then(|p| artwork::load(std::path::Path::new(p)))
             .unwrap_or_default(),
     );
     ui.set_album_title(album.title.clone().into());

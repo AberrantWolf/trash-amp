@@ -79,7 +79,7 @@ fn decorate(
         };
         row.artwork = id
             .and_then(|id| artwork.get(&id.item))
-            .and_then(|p| slint::Image::load_from_path(std::path::Path::new(p)).ok())
+            .and_then(|p| super::artwork::load(std::path::Path::new(p)))
             .unwrap_or_default();
     }
 }

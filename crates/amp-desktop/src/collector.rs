@@ -179,7 +179,7 @@ fn render_list(ui: &PlayerWindow, view: &View, adapter: &Adapter) {
                 artwork: e
                     .item_id
                     .and_then(|id| view.snapshot.as_ref()?.artwork.get(&id.to_string()))
-                    .and_then(|path| slint::Image::load_from_path(Path::new(path)).ok())
+                    .and_then(|path| artwork::load(Path::new(path)))
                     .unwrap_or_default(),
                 kind: 1,
                 title: e.title.clone().into(),
