@@ -476,6 +476,7 @@ pub(super) fn wire(ui: &PlayerWindow, state: &Rc<RefCell<State>>) {
         if let Some(ui) = weak.upgrade() {
             state1.borrow_mut().browser.pending_open = None;
             ui.set_settings(false);
+            ui.set_lists_open(false);
             ui.set_show_library(true);
             // Conditional phone content must be instantiated before requesting focus.
             let weak = ui.as_weak();
@@ -808,6 +809,8 @@ mod tests {
         assert_eq!(toggles.get(), 1);
         ui.set_wide(false);
         ui.set_show_library(false);
+        ui.set_lists_open(true);
+        slint::platform::update_timers_and_animations();
         ui.window().dispatch_event(WindowEvent::KeyPressed {
             text: Key::Control.into(),
         });
@@ -817,6 +820,8 @@ mod tests {
         });
         slint::platform::update_timers_and_animations();
         assert!(ui.get_show_library());
+        assert!(!ui.get_lists_open());
+        assert!(!ui.get_settings());
         i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(60));
         slint::platform::update_timers_and_animations();
         assert!(ui.get_search_editing());

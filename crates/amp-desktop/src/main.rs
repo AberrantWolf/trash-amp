@@ -741,7 +741,8 @@ fn main() -> anyhow::Result<()> {
         {
             ui.set_certificate_path(path.clone().into());
         }
-        ui.set_collector_open(true);
+        ui.set_settings_tab(1);
+        ui.set_settings(true);
         ui.invoke_connect_server();
     }
     if args.iter().any(|a| a == "--settings") {
@@ -841,6 +842,53 @@ mod tests {
                 play => { root.play(); } select => { root.select(); } enqueue => { root.enqueue(); }
             }
         }
+    }
+    #[test]
+    fn settings_and_lists_replace_library_and_preserve_selection() {
+        use i_slint_backend_testing::ElementHandle;
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(980.0, 680.0));
+        ui.set_selected_album(7);
+        ui.set_selected_track(3);
+        ui.set_search_text("Miles".into());
+        ui.show().unwrap();
+        let has_browser = || {
+            ElementHandle::find_by_accessible_label(&ui, "Album browser")
+                .next()
+                .is_some()
+        };
+        assert!(has_browser());
+        ui.set_lists_open(true);
+        slint::platform::update_timers_and_animations();
+        assert!(!has_browser());
+        ui.set_settings(true);
+        slint::platform::update_timers_and_animations();
+        assert!(!ui.get_lists_open());
+        assert!(!has_browser());
+        ui.set_settings_tab(1);
+        slint::platform::update_timers_and_animations();
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "Collector server URL")
+                .next()
+                .is_some()
+        );
+        ui.set_settings_tab(2);
+        slint::platform::update_timers_and_animations();
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "Download budget in GiB")
+                .next()
+                .is_some()
+        );
+        ui.set_lists_open(true);
+        slint::platform::update_timers_and_animations();
+        assert!(!ui.get_settings());
+        ui.set_lists_open(false);
+        slint::platform::update_timers_and_animations();
+        assert!(has_browser());
+        assert_eq!(ui.get_selected_album(), 7);
+        assert_eq!(ui.get_selected_track(), 3);
+        assert_eq!(ui.get_search_text(), "Miles");
     }
     #[test]
     fn album_pane_restores_desktop_width_and_remembers_drag_across_phone_mode() {

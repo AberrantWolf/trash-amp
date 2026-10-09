@@ -9,7 +9,8 @@ export component PlayerWindow inherits Window {
     in property <[string]> sources;
     in-out property <int> source-index;
     callback source-changed(int);
-    in-out property <bool> collector-open;
+    in-out property <bool> lists-open;
+    in-out property <int> settings-tab;
     in-out property <string> server-url;
     in-out property <string> certificate-path;
     in property <string> connection-status;
@@ -94,7 +95,8 @@ export component PlayerWindow inherits Window {
     in property <bool> wide: true;
     in property <bool> short: false;
     changed short => { if root.short { root.search-editing = false; } }
-    changed settings => { if root.settings { root.search-editing = false; } }
+    changed settings => { if root.settings { root.search-editing = false; root.lists-open = false; } }
+    changed lists-open => { if root.lists-open { root.search-editing = false; root.settings = false; } }
     changed show-library => { if !root.show-library && !root.wide { root.search-editing = false; } }
     changed wide => { if !root.wide && !root.show-library { root.search-editing = false; } }
     callback open-folder(); callback demo();
@@ -109,30 +111,36 @@ export component PlayerWindow inherits Window {
             root.focus-search-requested(); return accept;
         }
         if (root.search-editing) { return reject; }
-        if (!root.settings && !event.modifiers.alt && !event.modifiers.control && !event.modifiers.meta) {
+        if (!root.settings && !root.lists-open && !event.modifiers.alt && !event.modifiers.control && !event.modifiers.meta) {
             if (event.text == " ") { root.toggle-play(); return accept; }
             if (event.text == Key.LeftArrow) { root.previous(); return accept; }
             if (event.text == Key.RightArrow) { root.next(); return accept; }
         }
-        if (event.text == Key.Return && !root.settings) { root.activate-selection(); return accept; }
+        if (event.text == Key.Escape && (root.settings || root.lists-open)) { root.settings = false; root.lists-open = false; keyboard.focus(); return accept; }
+        if (event.text == Key.Return && !root.settings && !root.lists-open) { root.activate-selection(); return accept; }
         return reject;
       }
       VerticalLayout {
-        padding: 16px; spacing: 12px;
+        padding: 16px; spacing: 8px;
         HorizontalLayout {
-            height: 34px;
-            Text { text: "trash amp"; color: #dce5ed; font-size: root.wide ? 20px : 16px; font-weight: 700; min-width: 90px; vertical-alignment: center; overflow: elide; }
-            Button { text: "Open folder"; max-width: 120px; clicked => { root.open-folder(); } }
-            Button { text: "Settings"; max-width: 90px; clicked => { root.settings = !root.settings; } }
+            height: 32px; spacing: 6px;
+            if root.wide: ComboBox { model: root.sources; current-index <=> root.source-index; accessible-label: "Music source"; horizontal-stretch: 1; selected(i) => { root.source-changed(self.current-index); } }
+            if root.wide && root.collector-active && !root.settings: ComboBox { model: root.collections; current-index <=> root.collection-index; accessible-label: "Music collection"; horizontal-stretch: 1; selected(i) => { root.collection-changed(self.current-index); } }
+            if root.wide && root.collector-active && !root.settings: Button { text: "Refresh"; enabled: !root.collector-busy; clicked => { root.refresh-server(); } }
+            if !root.wide: Text { text: root.settings ? "Settings" : root.lists-open ? "Lists" : "trash amp"; color: #dce5ed; font-weight: 700; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+            Button { text: "Open folder"; clicked => { root.open-folder(); } }
+            Button { text: root.lists-open ? "Library" : "Lists"; enabled: root.collector-active || root.lists-open; clicked => { root.settings = false; root.lists-open = !root.lists-open; keyboard.focus(); } }
+            Button { text: root.settings ? "Done" : "Settings"; clicked => { root.lists-open = false; root.settings = !root.settings; keyboard.focus(); } }
         }
-        HorizontalLayout {
-            height: 32px;
-            Button { text: "Servers / Lists"; clicked => { root.collector-open = !root.collector-open; } }
-            ComboBox { model: root.sources; current-index <=> root.source-index; selected(i) => { root.source-changed(self.current-index); } }
-            if root.collector-active: ComboBox { model: root.collections; current-index <=> root.collection-index; selected(i) => { root.collection-changed(self.current-index); } }
-            if root.collector-active: Button { text: "Refresh"; enabled: !root.collector-busy; clicked => { root.refresh-server(); } }
+        if !root.wide && !root.settings: VerticalLayout {
+            spacing: 4px;
+            ComboBox { model: root.sources; current-index <=> root.source-index; accessible-label: "Music source"; selected(i) => { root.source-changed(self.current-index); } }
+            if root.collector-active: HorizontalLayout {
+                ComboBox { model: root.collections; current-index <=> root.collection-index; accessible-label: "Music collection"; selected(i) => { root.collection-changed(self.current-index); } }
+                Button { text: "Refresh"; enabled: !root.collector-busy; clicked => { root.refresh-server(); } }
+            }
         }
-        if root.collector-open: Rectangle {
+        if root.lists-open: Rectangle {
             background: #283039; border-radius: 6px;
             collector-scroll := ScrollView {
                 width: 100%; height: 100%;
@@ -141,20 +149,8 @@ export component PlayerWindow inherits Window {
                 collector-content := VerticalLayout {
                 width: collector-scroll.viewport-width; height: collector-scroll.viewport-height;
                 padding: 12px; spacing: 8px;
-                HorizontalLayout {
-                    LineEdit { text <=> root.server-url; placeholder-text: "https://collector.example:8443"; accessible-label: "Collector server URL"; }
-                    Button { text: "Connect / Reconnect"; enabled: !root.collector-busy; clicked => { root.connect-server(); } }
-                    Button { text: "Cancel"; enabled: root.collector-busy; clicked => { root.cancel-connect(); } }
-                }
-                LineEdit { text <=> root.certificate-path; placeholder-text: "Optional owner-provided PEM or pairing JSON path"; accessible-label: "Owner-provided trust file"; }
-                Text { text: root.connection-status; color: #dce5ed; wrap: word-wrap; }
-                HorizontalLayout {
-                    Button { text: "Remove connection"; enabled: root.collector-active && !root.collector-busy; clicked => { root.remove-server(); } }
-                    LineEdit { text <=> root.download-budget; placeholder-text: "Audio budget (GiB)"; accessible-label: "Download budget in GiB"; }
-                    Button { text: "Set GiB limit"; clicked => { root.save-budget(); } }
-                    Button { text: "Retry downloads"; clicked => { root.download-action(4); } }
-                    Button { text: "Cancel downloads"; clicked => { root.download-action(5); } }
-                }
+                Text { text: "Lists"; color: #edf3f8; font-size: 20px * root.text-scale; font-weight: 600; }
+                Text { text: root.connection-status; color: #a9bac9; wrap: word-wrap; }
                 HorizontalLayout {
                     ComboBox { model: root.saved-lists; current-index <=> root.list-index; selected(i) => { root.list-selected(self.current-index); } }
                     Button { text: "Play"; enabled: root.list-index > 0; clicked => { root.play-list(false); } }
@@ -199,27 +195,64 @@ export component PlayerWindow inherits Window {
                     width: settings-scroll.visible-width;
                     height: settings-scroll.viewport-height;
                     padding: 12px; spacing: 12px;
-                    CheckBox { text: "Prefer redumper raw dumps"; checked <=> root.prefer-raw;
-                        toggled => { root.preferences-changed(); } }
-                    CheckBox { text: "Automatic metadata from MusicBrainz"; checked <=> root.automatic-metadata;
-                        toggled => { root.preferences-changed(); } }
-                    CheckBox { text: "Reduce motion"; checked <=> root.reduced-motion;
-                        toggled => { root.preferences-changed(); } }
-                    Button { text: "Load 2,000-album layout demo"; clicked => { root.demo(); root.settings = false; } }
+                    Text { text: "Settings"; color: #edf3f8; font-size: 20px * root.text-scale; font-weight: 600; }
                     HorizontalLayout {
-                        Text { text: "Text size"; color: #dce5ed; }
-                        Slider { minimum: 1; maximum: 1.6; value: root.text-scale;
-                            changed(v) => { root.text-scale = v; root.preferences-changed(); } }
+                        spacing: 6px;
+                        Button { text: "General"; enabled: root.settings-tab != 0; clicked => { root.settings-tab = 0; } }
+                        Button { text: "Servers"; enabled: root.settings-tab != 1; clicked => { root.settings-tab = 1; } }
+                        Button { text: "Downloads"; enabled: root.settings-tab != 2; clicked => { root.settings-tab = 2; } }
+                    }
+                    if root.settings-tab == 0: VerticalLayout {
+                        spacing: 12px;
+                        CheckBox { text: "Prefer redumper raw dumps"; checked <=> root.prefer-raw;
+                            toggled => { root.preferences-changed(); } }
+                        CheckBox { text: "Automatic metadata from MusicBrainz"; checked <=> root.automatic-metadata;
+                            toggled => { root.preferences-changed(); } }
+                        CheckBox { text: "Reduce motion"; checked <=> root.reduced-motion;
+                            toggled => { root.preferences-changed(); } }
+                        Button { text: "Load 2,000-album layout demo"; clicked => { root.demo(); root.settings = false; } }
+                        HorizontalLayout {
+                            Text { text: "Text size"; color: #dce5ed; }
+                            Slider { minimum: 1; maximum: 1.6; value: root.text-scale;
+                                changed(v) => { root.text-scale = v; root.preferences-changed(); } }
+                        }
+                    }
+                    if root.settings-tab == 1: VerticalLayout {
+                        spacing: 10px;
+                        Text { text: "Servers"; color: #edf3f8; font-weight: 600; }
+                        ComboBox { model: root.sources; current-index <=> root.source-index; accessible-label: "Server to manage"; selected(i) => { root.source-changed(self.current-index); } }
+                        LineEdit { text <=> root.server-url; placeholder-text: "https://collector.example:8443"; accessible-label: "Collector server URL"; }
+                        HorizontalLayout {
+                            Button { text: "Connect / Reconnect"; enabled: !root.collector-busy; clicked => { root.connect-server(); } }
+                            Button { text: "Cancel"; enabled: root.collector-busy; clicked => { root.cancel-connect(); } }
+                        }
+                        LineEdit { text <=> root.certificate-path; placeholder-text: "Optional owner-provided PEM or pairing JSON path"; accessible-label: "Owner-provided trust file"; }
+                        Text { text: root.connection-status; color: #dce5ed; wrap: word-wrap; }
+                        Button { text: "Remove connection"; enabled: root.collector-active && !root.collector-busy; clicked => { root.remove-server(); } }
+                    }
+                    if root.settings-tab == 2: VerticalLayout {
+                        spacing: 10px;
+                        Text { text: "Downloads"; color: #edf3f8; font-weight: 600; }
+                        Text { text: "Audio storage limit (GiB)"; color: #a9bac9; }
+                        HorizontalLayout {
+                            LineEdit { text <=> root.download-budget; placeholder-text: "Audio budget (GiB)"; accessible-label: "Download budget in GiB"; }
+                            Button { text: "Set GiB limit"; clicked => { root.save-budget(); } }
+                        }
+                        HorizontalLayout {
+                            Button { text: "Retry downloads"; clicked => { root.download-action(4); } }
+                            Button { text: "Cancel downloads"; clicked => { root.download-action(5); } }
+                        }
+                        Text { text: root.connection-status; color: #a9bac9; wrap: word-wrap; }
                     }
                     Rectangle { min-height: 12px; vertical-stretch: 1; }
-                    HorizontalLayout {
+                    if root.settings-tab == 0: HorizontalLayout {
                         alignment: center;
                         AboutSlint { width: 240px; height: 112px; }
                     }
                 }
             }
         }
-        if !root.short && !root.settings && !root.collector-open: HorizontalLayout {
+        if !root.short && !root.settings && !root.lists-open: HorizontalLayout {
             spacing: 0px;
             if root.wide || root.show-library: Rectangle {
                 accessible-role: groupbox;
@@ -369,10 +402,10 @@ export component PlayerWindow inherits Window {
             }
         }
         Rectangle {
-            height: 108px * root.text-scale;
+            height: 104px * root.text-scale;
             background: #151d24; border-radius: 9px;
             VerticalLayout {
-                padding: 12px; spacing: 6px;
+                padding: 8px; spacing: 4px;
                 HorizontalLayout {
                     spacing: 10px;
                     Button { icon: @image-url("icons/previous.svg"); accessible-label: "Previous track"; width: 40px; clicked => { root.previous(); } }
@@ -398,13 +431,14 @@ export component PlayerWindow inherits Window {
                     playhead := TransportSeek { position <=> root.progress; seek(v) => { root.seek(v); } }
                     Text { text: root.duration; color: #97adbe; width: 40px; vertical-alignment: center; }
                 }
+                if root.scanning: Rectangle {
+                    height: 3px; background: #303c47;
+                    Rectangle { height: 100%; width: parent.width * root.scan-progress; background: #7ca7c9; }
+                }
+                Text { text: root.status; color: #a7b8c6; overflow: elide; height: 14px * root.text-scale; font-size: 11px * root.text-scale; accessible-label: "Playback status"; }
             }
         }
-        if root.scanning: Rectangle {
-            height: 3px; background: #303c47;
-            Rectangle { height: 100%; width: parent.width * root.scan-progress; background: #7ca7c9; }
-        }
-        Text { text: root.status; color: #a7b8c6; overflow: elide; height: 18px; font-size: 11px; }
+
     }
     }
 }

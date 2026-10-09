@@ -7,6 +7,15 @@ preserves the player and queue; each remote track retains immutable originating
 source coordinates. Filesystem browsing remains available. Collector metadata
 bypasses MusicBrainz enrichment.
 
+The desktop toolbar combines source and collection selection with Refresh, Open
+folder, Lists, and Settings. Settings is a dedicated page with General, Servers,
+and Downloads tabs. Add, reconnect, or remove a server under Servers; change the
+audio storage limit or retry/cancel downloads under Downloads. Lists has its own
+page for playback, editing, and list downloads. Done or Escape returns from
+Settings, and Library or Escape returns from Lists. Search (Cmd/Ctrl+F) returns
+to the library from either page. The playback bar remains available on all pages
+and includes a compact status line.
+
 Credentials are stored through macOS Keychain. Enrollment supports system HTTPS
 trust and explicit owner PEM/pairing material; catalog and media share that trust
 policy. SQLite snapshots are isolated by server/account, published only after all
