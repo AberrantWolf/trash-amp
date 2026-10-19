@@ -1,7 +1,7 @@
 # Collector connection
 
 Trash Amp has an `amp-collector` adapter for authenticated Collector browsing,
-revisioned list commands, authenticated seekable FLAC streams and explicit
+revisioned list commands, authenticated seekable FLAC/MP3 original and prepared FLAC streams and explicit
 downloads. Select one remembered server/account for browsing. Switching selection
 preserves the player and queue; each remote track retains immutable originating
 source coordinates. Filesystem browsing remains available. Collector metadata
@@ -50,3 +50,27 @@ revocation matrix, rapid-switch UI automation, two-account live authorization
 isolation and comprehensive download failure/restart UI journeys remain release
 gates. Mobile qualification, discovery, failover, certificate rotation and new
 codecs are deferred.
+
+
+## Digital purchases — 2026-10-19
+
+Collector file sources carry native format/timing and immutable package-file
+identity without a conversion profile. The adapter prefers playable originals,
+uses their media type for decoder hints, calculates duration at the native rate,
+and keeps printed numbering separate from source positions. Album refresh honors
+explicit alternate-encoding selection. Download identity retains account/server,
+source, actual file index and digest, so two tracks in one original package remain
+separate. Retained artwork/text and FLAC/MP3 audio reopen offline after server or
+credentials are removed; purchase/order fields are absent from this snapshot.
+
+Collector and junk-libs use exact published Git revisions in Cargo manifests and
+lockfiles; local patches and sibling checkouts are no longer required. Real TLS streaming/decode/seek/download/offline and actual
+CoreAudio callback checks pass; see Collector's
+`docs/validation/digital-purchases-2026-10-19.md` for the full matrix. The actual
+native GUI purchase journey also passed on this Mac: actual FLAC/MP3 streaming,
+seek/next/queue, album artwork and download, responsive connection removal, and
+server-stopped offline reopen/search/artwork/playback/seek with both originals.
+Descriptive artist/queue captions keep immutable source IDs internal. Credential
+removal runs on a worker with a visible pending state, so an OS Keychain wait does
+not stall the UI. Temporary profiles and servers were used throughout. Broader
+LAN/device-loss/revocation qualification remains in Collector's HL-04 queue.

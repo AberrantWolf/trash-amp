@@ -17,6 +17,7 @@ export component PlayerWindow inherits Window {
     in property <bool> collector-active;
     in property <bool> collector-online;
     in property <bool> collector-busy;
+    in property <bool> removing-connection;
     in property <[string]> collections;
     in-out property <int> collection-index;
     callback collection-changed(int);
@@ -228,7 +229,7 @@ export component PlayerWindow inherits Window {
                         }
                         LineEdit { text <=> root.certificate-path; placeholder-text: "Optional owner-provided PEM or pairing JSON path"; accessible-label: "Owner-provided trust file"; }
                         Text { text: root.connection-status; color: #dce5ed; wrap: word-wrap; }
-                        Button { text: "Remove connection"; enabled: root.collector-active && !root.collector-busy; clicked => { root.remove-server(); } }
+                        Button { text: root.removing-connection ? "Removing connection…" : "Remove connection"; enabled: root.collector-active && !root.collector-busy && !root.removing-connection; clicked => { root.remove-server(); } }
                     }
                     if root.settings-tab == 2: VerticalLayout {
                         spacing: 10px;

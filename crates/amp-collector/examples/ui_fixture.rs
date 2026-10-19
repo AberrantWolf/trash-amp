@@ -10,6 +10,16 @@ async fn main() -> anyhow::Result<()> {
         "Trash Amp acceptance album",
     )
     .await;
+    if let Some(media) = std::env::args().nth(2) {
+        let media = std::path::Path::new(&media);
+        server.add_digital_purchase_files(
+            &std::fs::read(media.join("01.flac"))?,
+            &std::fs::read(media.join("02.mp3"))?,
+            &std::fs::read(media.join("cover.png"))?,
+        );
+    } else {
+        server.add_digital_purchase();
+    }
     let output = std::env::args()
         .nth(1)
         .ok_or_else(|| anyhow::anyhow!("Supply a temporary output directory"))?;

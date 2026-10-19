@@ -383,10 +383,10 @@ impl Adapter {
                     let playback = client.music_tracks(album.id).await?;
                     let mut tracks = vec![];
                     let mut coordinates = BTreeSet::new();
-                    for row in playback
-                        .iter()
-                        .filter(|t| t.profile == ids::ConversionProfile::Flac)
-                    {
+                    for row in playback.iter().filter(|t| {
+                        t.primary_playback()
+                            && t.album_selection == api::MusicAlbumSelection::Included
+                    }) {
                         if coordinates.insert((
                             row.capture_id,
                             row.source_representation_id,
@@ -886,9 +886,9 @@ fn remote_track(
         },
         title: row.title.clone(),
         artist: artist.into(),
-        number: row.track_position.into(),
+        number: row.display_position.unwrap_or(row.track_position).into(),
         disc: row.disc_position.unwrap_or(1).into(),
-        duration_seconds: row.frame_count.0 as f64 / 44100.,
+        duration_seconds: row.frame_count.0 as f64 / f64::from(row.sample_rate()),
         access: MediaAccess::Managed {
             provider: "collector".into(),
             item: serde_json::to_string(&remote).expect("serializable remote track"),
@@ -993,7 +993,12 @@ impl amp_audio::MediaResolver for Adapter {
             file.rewind()?;
             return Ok(amp_audio::ByteSource::new(
                 CachedReader { file, cancellation },
-                amp_audio::MediaHint::new(Some(length), Some("flac"), Some("audio/flac")),
+                record
+                    .remote
+                    .audio
+                    .as_ref()
+                    .map(|audio| media_hint(Some(length), &audio.state))
+                    .unwrap_or_else(|| amp_audio::MediaHint::new(Some(length), None, None)),
             ));
         }
         let client = self.client(remote.key)?;
@@ -1013,7 +1018,7 @@ impl amp_audio::MediaResolver for Adapter {
                 a.capture_id == remote.capture
                     && a.source_representation_id == remote.source
                     && a.track_position == remote.position
-                    && a.profile == ids::ConversionProfile::Flac
+                    && a.primary_playback()
             })
             .context("Source no longer available")?;
         let api::MusicTrackAvailabilityState::Available {
@@ -1029,7 +1034,7 @@ impl amp_audio::MediaResolver for Adapter {
             client.media_reader(remote.item, *representation_id, *file_index, cancellation)?;
         Ok(amp_audio::ByteSource::new(
             reader,
-            amp_audio::MediaHint::new(Some(length.0), Some("flac"), Some("audio/flac")),
+            media_hint(Some(length.0), &audio.state),
         ))
     }
     fn cancel(&self) {
@@ -1037,6 +1042,22 @@ impl amp_audio::MediaResolver for Adapter {
             token.cancel()
         }
     }
+}
+
+fn media_hint(
+    length: Option<u64>,
+    state: &api::MusicTrackAvailabilityState,
+) -> amp_audio::MediaHint {
+    let media_type = match state {
+        api::MusicTrackAvailabilityState::Available { media_type, .. } => Some(media_type.as_str()),
+        _ => None,
+    };
+    let extension = match media_type {
+        Some("audio/flac") => Some("flac"),
+        Some("audio/mpeg") => Some("mp3"),
+        _ => None,
+    };
+    amp_audio::MediaHint::new(length, extension, media_type)
 }
 
 #[cfg(test)]
@@ -1081,6 +1102,9 @@ mod tests {
     }
     fn track(key: ConnectionKey, data: &[u8]) -> Track {
         let row = api::MusicTrackAvailability {
+            album_selection: api::MusicAlbumSelection::Included,
+            display_position: None,
+            audio_format: None,
             capture_id: ids::CaptureId::new(),
             source_label: "fixture".into(),
             disc_position: Some(1),
@@ -1089,7 +1113,7 @@ mod tests {
             start_frame: ids::PcmFrame(0),
             frame_count: ids::PcmFrame(588),
             title: "Fixture".into(),
-            profile: ids::ConversionProfile::Flac,
+            profile: Some(ids::ConversionProfile::Flac),
             state: api::MusicTrackAvailabilityState::Available {
                 representation_id: ids::RepresentationId::new(),
                 file_id: ids::PackageFileId::new(),

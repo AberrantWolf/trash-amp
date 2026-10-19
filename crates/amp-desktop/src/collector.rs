@@ -20,6 +20,7 @@ enum Event {
     Message(String),
     Mutation(u64, ConnectionKey, anyhow::Result<()>),
     Downloads,
+    Removed(ConnectionKey, anyhow::Result<()>),
 }
 pub struct Controller {
     rx: mpsc::Receiver<Event>,
@@ -32,10 +33,10 @@ pub struct Controller {
     download_busy: Arc<AtomicBool>,
 }
 pub fn queue_label(t: &Track) -> String {
-    if t.id.provider == "collector" {
-        format!("{} · {}", t.title, t.id.library)
-    } else {
+    if t.artist.is_empty() {
         t.title.clone()
+    } else {
+        format!("{} · {}", t.title, t.artist)
     }
 }
 fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
@@ -387,20 +388,24 @@ impl Controller {
         {
             let a = adapter.clone();
             let view = view.clone();
+            let tx = tx.clone();
             let weak = ui.as_weak();
             ui.on_remove_server(move || {
-                if let (Some(key), Some(ui)) = (view.borrow().selected, weak.upgrade()) {
-                    error(&ui, a.remove(key));
-                    if let Ok(c) = a.connections() {
-                        let mut view = view.borrow_mut();
-                        view.connections = c;
-                        view.online = false;
-                        sources(&ui, &view);
-                        ui.set_collector_online(false);
-                        ui.set_connection_status(
-                            "Connection removed; completed downloads retained".into(),
-                        );
+                let key = view.borrow().selected;
+                if let (Some(key), Some(ui)) = (key, weak.upgrade()) {
+                    if ui.get_removing_connection() {
+                        return;
                     }
+                    ui.set_removing_connection(true);
+                    ui.set_connection_status("Removing connection…".into());
+                    let a = a.clone();
+                    let tx = tx.clone();
+                    // Keychain can wait for OS authorization. Keep that wait,
+                    // and its failure, off the UI thread.
+                    std::thread::spawn(move || {
+                        let result = a.remove(key);
+                        let _ = tx.send(Event::Removed(key, result));
+                    });
                 }
             });
         }
@@ -906,6 +911,32 @@ impl Controller {
                 Event::Mutation(v, key, result) if v == current => {
                     ui.set_collector_busy(false);
                     match result{Ok(())=>{ui.set_collector_busy(true);refresh(self.adapter.clone(),self.tx.clone(),self.generation.clone(),v,key)},Err(e)=>ui.set_connection_status(format!("List change unresolved: {e}. Refresh and retry the original command.").into())}
+                }
+                Event::Removed(key, result) => {
+                    ui.set_removing_connection(false);
+                    match result {
+                        Ok(()) => {
+                            let mut view = self.view.borrow_mut();
+                            match self.adapter.connections() {
+                                Ok(connections) => view.connections = connections,
+                                Err(error) => {
+                                    ui.set_connection_status(error.to_string().into());
+                                    continue;
+                                }
+                            }
+                            sources(&ui, &view);
+                            if view.selected == Some(key) {
+                                view.online = false;
+                                ui.set_collector_online(false);
+                                ui.set_connection_status(
+                                    "Connection removed; completed downloads retained".into(),
+                                );
+                            }
+                        }
+                        Err(error) => ui.set_connection_status(
+                            format!("Could not remove connection: {error}").into(),
+                        ),
+                    }
                 }
                 Event::Message(message) => ui.set_connection_status(message.into()),
                 Event::Downloads => {

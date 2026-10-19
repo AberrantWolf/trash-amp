@@ -689,7 +689,7 @@ fn main() -> anyhow::Result<()> {
                     }
                     if let Some(track) = s.playlist.get(snapshot.track) {
                         ui.set_now_title(track.title.clone().into());
-                        ui.set_now_artist(format!("{}{}",track.artist, if track.id.provider == "collector" {format!(" · {}",track.id.library)} else {String::new()}).into());
+                        ui.set_now_artist(track.artist.clone().into());
                         ui.set_elapsed(time(snapshot.seconds));
                         ui.set_duration(time(track.duration_seconds));
                         if !ui.get_scrubbing() {

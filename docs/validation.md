@@ -89,3 +89,42 @@ validated its Info.plist and `codesign --verify --deep --strict` accepted the
 ad-hoc signature. Formatting, workspace tests and Clippy with warnings denied
 passed again after adding the icon. Distribution signing/notarization remain
 release gates.
+
+
+## FLAC/MP3 Collector originals — 2026-10-19
+
+Real TLS tests import actual high-resolution FLAC and MP3 purchases into an
+isolated Collector, stream/decode/seek both, retain independent downloads and
+artwork/text, remove credentials/stop the server and reopen/decode offline.
+The separately invoked real-device test opens a fresh Player for each format:
+FLAC callback peak 0.088371746 and MP3 0.08895567, each beyond 0.0213125 seconds.
+Workspace tests, strict all-target Clippy and formatting pass. Collector's dated
+HL-02 validation records the full fixture/client matrix and final reruns.
+Actual desktop GUI acceptance passed after the user unlocked this Mac. A fresh
+profile and real TLS fixture served 30-second 96-kHz stereo 24-bit FLAC and
+44.1-kHz stereo VBR MP3 originals with a 256×256 cover. The actual Slint app paired,
+browsed album/artwork, played/sought both, advanced tracks, queued readable
+artist/title labels and downloaded both originals. Removing the connection stayed
+responsive and retained downloads. After quitting, stopping the server and
+reopening without server arguments, playback started paused; both downloads,
+artwork and offline search remained available, and FLAC/MP3 played and sought.
+Collector's dated HL-02 record includes the actual offline screenshot.
+
+The initial GUI run exposed source IDs in captions and a main-thread Keychain
+removal stall after replacing the enrolled executable. Captions now show artist
+text and credential removal runs on a worker with pending state. The final repeat
+kept executable identity unchanged and completed removal/reopen successfully.
+After those repairs, full workspace tests passed (53 passed, 2 ignored), strict
+all-target Clippy, formatting and the app build passed. No subjective-fidelity,
+gapless-output or broader HL-04 device/LAN qualification is inferred.
+
+
+## HL-02 pinned-revision publication — 2026-10-19
+
+The user authorized committing/pushing this delivery and removing local patches.
+Cargo manifests pin junk-libs `2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98` and
+Collector `201085448cbd727bd04f60275e47431c2c7dd3bd`. All sibling packages resolve
+from those exact Git sources. Unrelated staged alpha packaging/release changes
+are preserved locally and excluded from this delivery commit. Publication checks
+run against an isolated export of the candidate source as well as the working
+checkout; their final results are recorded after completion.

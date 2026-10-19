@@ -162,11 +162,13 @@ impl Fixture {
                     },
                     files: vec![
                         collector_app::UploadFile {
+                            visibility: Default::default(),
                             name: "disc.cue".into(),
                             bytes: ByteLength(cue.len() as u64),
                             sha256: None,
                         },
                         collector_app::UploadFile {
+                            visibility: Default::default(),
                             name: "disc.bin".into(),
                             bytes: ByteLength(pcm.len() as u64),
                             sha256: None,
@@ -227,7 +229,7 @@ impl Fixture {
             .music_track_availability(&owner, item_id)
             .unwrap()
             .into_iter()
-            .find(|r| r.profile == ConversionProfile::Flac)
+            .find(|r| r.primary_playback())
             .unwrap();
         let tool = collector_providers::ConfiguredEncoder::probe(
             collector_providers::EncoderKind::Flac,
@@ -306,6 +308,88 @@ impl Fixture {
         key
     }
 }
+impl Fixture {
+    pub fn add_digital_purchase(&self) {
+        let flac = include_bytes!("fixtures/digital-audio/01.flac").as_slice();
+        let mp3 = include_bytes!("fixtures/digital-audio/02.mp3").as_slice();
+        let cover = include_bytes!("fixtures/digital-audio/cover.png").as_slice();
+        self.add_digital_purchase_files(flac, mp3, cover);
+    }
+    pub fn add_digital_purchase_files(&self, flac: &[u8], mp3: &[u8], cover: &[u8]) {
+        let service = &self._state.service;
+        let collection = service
+            .create_collection(
+                &AuthenticatedPrincipal {
+                    principal: self.owner.clone(),
+                    credential_kind: CredentialKind::TestLocal,
+                    authenticated_at: chrono::Utc::now(),
+                },
+                collector_app::CreateCollectionCommand {
+                    name: "Digital purchases".into(),
+                    module: ModuleId("org.junk.music".into()),
+                },
+                &command(),
+            )
+            .unwrap();
+        let plan = service
+            .plan_ingest(
+                &self.owner,
+                collector_app::PlanIngestCommand {
+                    collection_id: collection.id,
+                    packages: vec![collector_app::IngestPackageSelection {
+                        purchase: Some(DigitalPurchase {
+                            store: Some("Private store".into()),
+                            ..Default::default()
+                        }),
+                        source: collector_app::ImportSourceSummary {
+                            kind: collector_app::ImportSourceKind::Browser,
+                            label: None,
+                            package_name: "Digital native".into(),
+                        },
+                        anchor_file_index: None,
+                        files: [("01.flac", flac), ("02.mp3", mp3), ("cover.png", cover)]
+                            .into_iter()
+                            .map(|(name, bytes)| collector_app::UploadFile {
+                                visibility: Some(Visibility::Shared),
+                                name: name.into(),
+                                bytes: ByteLength(bytes.len() as u64),
+                                sha256: None,
+                            })
+                            .collect(),
+                    }],
+                },
+            )
+            .unwrap();
+        let accepted = service
+            .start_ingest(
+                &self.owner,
+                collector_app::StartIngestCommand {
+                    purchase: None,
+                    clean_reimport: None,
+                    plan,
+                    analysis: collector_app::IngestAnalysisPolicy::Automatic,
+                    enrichment: collector_app::IngestEnrichmentPolicy::None,
+                    prepare_music: false,
+                    destination: None,
+                },
+                &command(),
+            )
+            .unwrap();
+        let import = accepted.imports[0].import_id;
+        for (index, bytes) in [flac, mp3, cover].into_iter().enumerate() {
+            service
+                .stage_provisional_import_chunk(&self.owner, import, index, 0, bytes)
+                .unwrap();
+        }
+        for _ in 0..10 {
+            if !service.run_next_job("digital-native").unwrap() {
+                break;
+            }
+        }
+        service.resume_guided_ingests().unwrap();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -420,4 +504,152 @@ async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
     .await
     .unwrap();
     assert_eq!(adapter.downloads().unwrap()[0].status, "complete");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn digital_flac_mp3_stream_seek_download_and_offline_reopen() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let fixture = Fixture::new(ItemId::new(), "CD control").await;
+    fixture.add_digital_purchase();
+    let secrets = Arc::new(Secrets::default());
+    let key = fixture.enroll(&secrets).await;
+    let cache = tempfile::tempdir().unwrap();
+    let adapter = Adapter::with_credentials(cache.path(), secrets.clone()).unwrap();
+    let snapshot = adapter.refresh(key, &|| false).await.unwrap();
+    let album = snapshot
+        .library
+        .albums
+        .iter()
+        .find(|album| album.title == "Purchased album")
+        .expect("purchased album in native library");
+    assert_eq!(album.tracks.len(), 2);
+    assert!(
+        !snapshot.artwork.is_empty(),
+        "purchase artwork retained in native snapshot"
+    );
+    assert!(
+        !serde_json::to_string(&snapshot)
+            .unwrap()
+            .contains("Private store")
+    );
+    let tracks = album.tracks.clone();
+    assert_ne!(tracks[0].id, tracks[1].id);
+    let a = adapter.clone();
+    let selected = tracks.clone();
+    tokio::task::spawn_blocking(move || {
+        use amp_audio::MediaResolver;
+        for (index, track) in selected.iter().enumerate() {
+            let mut decoder =
+                junk_libs_audio::AudioDecoder::open(a.resolve(track).unwrap()).unwrap();
+            assert_eq!(
+                decoder.format().sample_rate(),
+                if index == 0 { 96000 } else { 44100 }
+            );
+            decoder
+                .seek_exact(junk_libs_audio::FramePosition(100))
+                .unwrap();
+            assert_eq!(
+                decoder.read_frames(128).unwrap().unwrap().start_frame,
+                junk_libs_audio::FramePosition(100)
+            );
+        }
+        a.schedule(&selected).unwrap();
+        for track in selected {
+            a.download(track).unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        adapter
+            .downloads()
+            .unwrap()
+            .iter()
+            .filter(|d| d.status == "complete")
+            .count(),
+        2
+    );
+    fixture.stop.shutdown();
+    secrets.remove(key).unwrap();
+    drop(adapter);
+    let adapter = Adapter::with_credentials(cache.path(), secrets).unwrap();
+    assert_eq!(
+        adapter
+            .snapshot(key)
+            .unwrap()
+            .unwrap()
+            .library
+            .albums
+            .iter()
+            .find(|album| album.title == "Purchased album")
+            .unwrap()
+            .tracks
+            .len(),
+        2
+    );
+    tokio::task::spawn_blocking(move || {
+        use amp_audio::MediaResolver;
+        for track in tracks {
+            let mut decoder =
+                junk_libs_audio::AudioDecoder::open(adapter.resolve(&track).unwrap()).unwrap();
+            decoder
+                .seek_exact(junk_libs_audio::FramePosition(100))
+                .unwrap();
+            assert!(decoder.read_frames(128).unwrap().is_some());
+        }
+    })
+    .await
+    .unwrap();
+}
+
+/// Manual qualification uses the actual default output device and the ordinary
+/// decoder/resampler/ring-buffer callback. Ordinary CI never requires a device.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the host audio output device"]
+async fn purchased_originals_reach_the_real_audio_output_callback() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let fixture = Fixture::new(ItemId::new(), "CD control").await;
+    fixture.add_digital_purchase();
+    let secrets = Arc::new(Secrets::default());
+    let key = fixture.enroll(&secrets).await;
+    let cache = tempfile::tempdir().unwrap();
+    let adapter = Adapter::with_credentials(cache.path(), secrets).unwrap();
+    let snapshot = adapter.refresh(key, &|| false).await.unwrap();
+    let tracks = snapshot
+        .library
+        .albums
+        .iter()
+        .find(|a| a.title == "Purchased album")
+        .unwrap()
+        .tracks
+        .clone();
+    tokio::task::spawn_blocking(move || {
+        for track in tracks {
+            let player = amp_audio::Player::with_resolver(Some(adapter.clone())).unwrap();
+            let label = track.title.clone();
+            player.play(vec![track], 0);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut peak = 0.0f32;
+            let mut position = 0.0f64;
+            while std::time::Instant::now() < deadline {
+                if let Some(error) = player.error() {
+                    panic!("{label}: {error}");
+                }
+                let snapshot = player.snapshot();
+                peak = peak.max(snapshot.level);
+                position = position.max(snapshot.seconds);
+                if peak > 0.0001 && position > 0.02 {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(
+                peak > 0.0001 && position > 0.02,
+                "{label}: device callback peak={peak}, seconds={position}"
+            );
+            println!("{label}: actual device callback peak={peak}, position={position}");
+        }
+    })
+    .await
+    .unwrap();
 }

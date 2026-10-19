@@ -91,9 +91,14 @@ See [architecture](docs/architecture.md), [release gates](docs/release-gates.md)
 
 ## junk-libs development
 
-This implementation temporarily depends directly on `../junk-libs/junk-libs-disc` so both repositories can be developed and tested together. Clone junk-libs as a sibling of trash-amp. This checkpoint requires junk-libs commit `1e424737db7bb3ba329aea709de6fe3ca8fe9eea` (or a compatible descendant). Before distribution, publish those changes and replace the local path with a pinned Git revision. Do not revert to the old revision: it lacks the new APIs.
-
-Use the package-scoped formatting command above during sibling development; `cargo fmt --all` also traverses the sibling workspace's path dependencies. The disc API contract and upstream format evidence are in `../junk-libs/junk-libs-disc/PLAYBACK.md`.
+The disc, audio and playback crates use junk-libs revision
+`2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98`. The Collector client SDK and server
+integration tests use Collector revision `201085448cbd727bd04f60275e47431c2c7dd3bd`.
+Cargo manifests and the lockfile pin the exact Git sources; Cargo fetches them
+automatically, and no sibling checkout or local Cargo patch is required. Server
+crates are test dependencies and are not bundled into the player.
+The disc API contract and upstream format evidence are in
+[junk-libs-disc/PLAYBACK.md](https://github.com/AberrantWolf/junk-libs/blob/2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98/junk-libs-disc/PLAYBACK.md).
 
 ## License
 
