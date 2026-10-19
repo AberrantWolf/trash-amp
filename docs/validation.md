@@ -125,6 +125,23 @@ The user authorized committing/pushing this delivery and removing local patches.
 Cargo manifests pin junk-libs `2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98` and
 Collector `201085448cbd727bd04f60275e47431c2c7dd3bd`. All sibling packages resolve
 from those exact Git sources. Unrelated staged alpha packaging/release changes
-are preserved locally and excluded from this delivery commit. Publication checks
-run against an isolated export of the candidate source as well as the working
-checkout; their final results are recorded after completion.
+are preserved locally and excluded from this delivery commit. Publication checks passed against an isolated export of the candidate
+source and the working checkout, using Rust 1.95.0:
+
+- Isolated HL-02 workspace: 51 passed, 2 existing opt-in tests ignored; strict
+  all-target Clippy, formatting and the normal desktop build passed.
+- Working checkout with preserved staged release changes: 53 passed, 2 ignored;
+  strict all-target Clippy and formatting passed. The additional two tests belong
+  to that separate release work and are excluded from the HL-02 commit.
+- The real CoreAudio callback test was invoked separately from the isolated
+  source and passed for both formats: FLAC peak 0.088371746, MP3 0.08895567,
+  each beyond 0.0213125 seconds.
+- Cargo metadata confirms all 16 Collector/junk-libs packages resolve from the
+  two exact Git revisions above. No sibling path or Cargo patch remains.
+
+The first isolated build caught three `include_bytes!` references to media in a
+sibling Collector checkout. Those generated fixtures now live under
+`crates/amp-collector/tests/fixtures/digital-audio`, making both the tests and
+acceptance example self-contained. The isolated gates passed after this repair.
+Every candidate tracked file was compared with the isolated checked source;
+alpha packaging and unrelated release changes remain outside this commit.
