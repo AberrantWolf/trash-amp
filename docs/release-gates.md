@@ -22,3 +22,7 @@ Collector implementation and local evidence are recorded in
 [Collector connection](collector-connection.md). Complete the remaining native
 adversarial acceptance matrix and output-capture fidelity checks before declaring
 that integration release-qualified. The existing local-library gates remain.
+
+Collector game-disc CD audio now has [source and offline acceptance](game-disc-audio.md).
+It reuses prepared FLAC and the Collector cache; this does not close local raw-format,
+physical-device or native-package release gates above.

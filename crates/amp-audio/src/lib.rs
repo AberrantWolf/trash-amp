@@ -487,7 +487,7 @@ impl Converted {
             // Drain output before admitting more input. Upsampling can leave
             // more than one output chunk ready for each input chunk.
             if let Some(chunk) = self.resampler.as_mut().unwrap().read_frames(1_024)? {
-                for frame in chunk.samples.chunks_exact(2) {
+                for frame in chunk.samples.as_chunks::<2>().0 {
                     self.ready.push_back([frame[0], frame[1]]);
                 }
                 continue;

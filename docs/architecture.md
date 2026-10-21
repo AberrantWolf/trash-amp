@@ -67,3 +67,12 @@ SQLite snapshots, artwork, receipts and explicit download mechanisms. `amp-audio
 accepts an injected seekable media resolver and cancellation handle, retaining
 the shared junk-libs decoder and CPAL pipeline. Desktop browsing generations
 are independent of playback and download lifetimes.
+
+## Collector game-disc audio
+
+Collector listening catalogs can include Games entries with recorded CD audio.
+The adapter keeps the original game identity and source-specific track positions;
+only server-admitted audio derivatives use the existing ranged stream/download
+and offline cache path. Native playlist creation explicitly requests audio tracks,
+so a Games collection's default inventory lists stay separate. No game importer,
+PCM parser or second playback engine is introduced in Trash Amp.

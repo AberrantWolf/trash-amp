@@ -1216,6 +1216,7 @@ mod tests {
             collection: ids::CollectionId::new(),
             list: None,
             create: Some(api::CreateCollectionList {
+                kind: Some(ids::CollectionListKind::MusicTracks),
                 name: "Original".into(),
             }),
             update: None,

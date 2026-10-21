@@ -1304,8 +1304,8 @@ dependencies = [
 
 [[package]]
 name = "collector-api-types"
-version = "0.1.0-alpha.1"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=201085448cbd727bd04f60275e47431c2c7dd3bd#201085448cbd727bd04f60275e47431c2c7dd3bd"
+version = "0.1.0-alpha.3"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=59faf341a0141c0424231d1700cfc16a006146a7#59faf341a0141c0424231d1700cfc16a006146a7"
 dependencies = [
  "chrono",
  "collector-core",
@@ -1315,8 +1315,8 @@ dependencies = [
 
 [[package]]
 name = "collector-app"
-version = "0.1.0-alpha.1"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=201085448cbd727bd04f60275e47431c2c7dd3bd#201085448cbd727bd04f60275e47431c2c7dd3bd"
+version = "0.1.0-alpha.3"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=59faf341a0141c0424231d1700cfc16a006146a7#59faf341a0141c0424231d1700cfc16a006146a7"
 dependencies = [
  "chrono",
  "collector-api-types",
@@ -1335,8 +1335,8 @@ dependencies = [
 
 [[package]]
 name = "collector-client"
-version = "0.1.0-alpha.1"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=201085448cbd727bd04f60275e47431c2c7dd3bd#201085448cbd727bd04f60275e47431c2c7dd3bd"
+version = "0.1.0-alpha.3"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=59faf341a0141c0424231d1700cfc16a006146a7#59faf341a0141c0424231d1700cfc16a006146a7"
 dependencies = [
  "chrono",
  "collector-api-types",
@@ -1354,8 +1354,8 @@ dependencies = [
 
 [[package]]
 name = "collector-core"
-version = "0.1.0-alpha.1"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=201085448cbd727bd04f60275e47431c2c7dd3bd#201085448cbd727bd04f60275e47431c2c7dd3bd"
+version = "0.1.0-alpha.3"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=59faf341a0141c0424231d1700cfc16a006146a7#59faf341a0141c0424231d1700cfc16a006146a7"
 dependencies = [
  "chrono",
  "hex",
@@ -1370,8 +1370,8 @@ dependencies = [
 
 [[package]]
 name = "collector-modules"
-version = "0.1.0-alpha.1"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=201085448cbd727bd04f60275e47431c2c7dd3bd#201085448cbd727bd04f60275e47431c2c7dd3bd"
+version = "0.1.0-alpha.3"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=59faf341a0141c0424231d1700cfc16a006146a7#59faf341a0141c0424231d1700cfc16a006146a7"
 dependencies = [
  "collector-core",
  "junk-libs-accuraterip",
@@ -1388,8 +1388,8 @@ dependencies = [
 
 [[package]]
 name = "collector-providers"
-version = "0.1.0-alpha.1"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=201085448cbd727bd04f60275e47431c2c7dd3bd#201085448cbd727bd04f60275e47431c2c7dd3bd"
+version = "0.1.0-alpha.3"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=59faf341a0141c0424231d1700cfc16a006146a7#59faf341a0141c0424231d1700cfc16a006146a7"
 dependencies = [
  "collector-app",
  "collector-core",
@@ -1412,8 +1412,8 @@ dependencies = [
 
 [[package]]
 name = "collector-server"
-version = "0.1.0-alpha.1"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=201085448cbd727bd04f60275e47431c2c7dd3bd#201085448cbd727bd04f60275e47431c2c7dd3bd"
+version = "0.1.0-alpha.3"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=59faf341a0141c0424231d1700cfc16a006146a7#59faf341a0141c0424231d1700cfc16a006146a7"
 dependencies = [
  "anyhow",
  "axum",
@@ -1451,8 +1451,8 @@ dependencies = [
 
 [[package]]
 name = "collector-store"
-version = "0.1.0-alpha.1"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=201085448cbd727bd04f60275e47431c2c7dd3bd#201085448cbd727bd04f60275e47431c2c7dd3bd"
+version = "0.1.0-alpha.3"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=59faf341a0141c0424231d1700cfc16a006146a7#59faf341a0141c0424231d1700cfc16a006146a7"
 dependencies = [
  "argon2",
  "chrono",
@@ -3637,7 +3637,7 @@ dependencies = [
 [[package]]
 name = "junk-libs-accuraterip"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98#2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=993afc932c6b2acb5cf02c95d3cb8a387d9a70a5#993afc932c6b2acb5cf02c95d3cb8a387d9a70a5"
 dependencies = [
  "junk-libs-core",
  "junk-libs-disc",
@@ -3647,7 +3647,7 @@ dependencies = [
 [[package]]
 name = "junk-libs-audio"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98#2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=993afc932c6b2acb5cf02c95d3cb8a387d9a70a5#993afc932c6b2acb5cf02c95d3cb8a387d9a70a5"
 dependencies = [
  "claxon",
  "junk-libs-disc",
@@ -3661,7 +3661,7 @@ dependencies = [
 [[package]]
 name = "junk-libs-core"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98#2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=993afc932c6b2acb5cf02c95d3cb8a387d9a70a5#993afc932c6b2acb5cf02c95d3cb8a387d9a70a5"
 dependencies = [
  "crc32fast",
  "md5",
@@ -3673,7 +3673,7 @@ dependencies = [
 [[package]]
 name = "junk-libs-dat"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98#2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=993afc932c6b2acb5cf02c95d3cb8a387d9a70a5#993afc932c6b2acb5cf02c95d3cb8a387d9a70a5"
 dependencies = [
  "log",
  "quick-xml 0.37.5",
@@ -3683,7 +3683,7 @@ dependencies = [
 [[package]]
 name = "junk-libs-disc"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98#2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=993afc932c6b2acb5cf02c95d3cb8a387d9a70a5#993afc932c6b2acb5cf02c95d3cb8a387d9a70a5"
 dependencies = [
  "chd",
  "crc32fast",
@@ -3698,7 +3698,7 @@ dependencies = [
 [[package]]
 name = "junk-libs-disc-id"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98#2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=993afc932c6b2acb5cf02c95d3cb8a387d9a70a5#993afc932c6b2acb5cf02c95d3cb8a387d9a70a5"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -3709,7 +3709,7 @@ dependencies = [
 [[package]]
 name = "junk-libs-game-formats"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98#2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=993afc932c6b2acb5cf02c95d3cb8a387d9a70a5#993afc932c6b2acb5cf02c95d3cb8a387d9a70a5"
 dependencies = [
  "crc32fast",
  "junk-libs-core",
@@ -3722,7 +3722,7 @@ dependencies = [
 [[package]]
 name = "junk-libs-playback"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98#2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=993afc932c6b2acb5cf02c95d3cb8a387d9a70a5#993afc932c6b2acb5cf02c95d3cb8a387d9a70a5"
 dependencies = [
  "thiserror 2.0.20",
 ]

@@ -56,7 +56,12 @@ impl Drop for Fixture {
     }
 }
 impl Fixture {
-    pub async fn new(item_id: ItemId, label: &str) -> Self {
+    pub async fn new(item_id: ItemId, label: &str, game: bool) -> Self {
+        let module = if game {
+            "org.junk.games"
+        } else {
+            "org.junk.music"
+        };
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(
             collector_store::Store::open(root.path().join("archive"), root.path().join("state"))
@@ -106,7 +111,7 @@ impl Fixture {
                 &auth,
                 collector_app::CreateCollectionCommand {
                     name: label.into(),
-                    module: ModuleId("org.junk.music".into()),
+                    module: ModuleId(module.into()),
                 },
                 &command(),
             )
@@ -120,11 +125,13 @@ impl Fixture {
             subtitle: "Fixture artist".into(),
             identity_link: ItemIdentityLink::None,
             domain: ModuleData {
-                module: ModuleId("org.junk.music".into()),
+                module: ModuleId(module.into()),
                 schema_version: 1,
-                payload: RawJson::from_value(
-                    serde_json::json!({"tracks":[{"position":1,"title":"Song","start":0,"length":176400}]}),
-                ),
+                payload: RawJson::from_value(if game {
+                    serde_json::json!({})
+                } else {
+                    serde_json::json!({"tracks":[{"position":1,"title":"Song","start":0,"length":176400}]})
+                }),
             },
             identity: IdentityState::Unidentified,
             translations: vec![],
@@ -141,8 +148,30 @@ impl Fixture {
             .service
             .save_item(&owner, item_id, item.into(), Revision(0), &command())
             .unwrap();
+        if game {
+            state
+                .service
+                .create_asset(
+                    &owner,
+                    collector_app::CreateAssetCommand {
+                        collection_id: collection.id,
+                        subject: AssetSubject::Item { item_id },
+                        kind: AssetKind::Cover,
+                        visibility: Visibility::Shared,
+                        alt_text: "Game artwork".into(),
+                    },
+                    include_bytes!("fixtures/digital-audio/cover.png"),
+                    &command(),
+                )
+                .unwrap();
+        }
         let cue = b"FILE \"disc.bin\" BINARY\n TRACK 01 AUDIO\n INDEX 01 00:00:00\n";
-        let pcm = (0..176400)
+        let cue: &[u8] = if game {
+            b"FILE \"disc.bin\" BINARY\n TRACK 01 MODE2/2352\n INDEX 01 00:00:00\n TRACK 02 AUDIO\n INDEX 01 00:00:01\n"
+        } else {
+            cue
+        };
+        let pcm = (0..(176400 + if game { 588 } else { 0 }))
             .flat_map(|frame| {
                 let _ = frame;
                 let n = 0i16.to_le_bytes();
@@ -193,12 +222,7 @@ impl Fixture {
             .unwrap();
         state
             .service
-            .enqueue_import_analysis(
-                &owner,
-                import.id,
-                ModuleId("org.junk.music".into()),
-                &command(),
-            )
+            .enqueue_import_analysis(&owner, import.id, ModuleId(module.into()), &command())
             .unwrap();
         state.service.run_next_job("fixture-analysis").unwrap();
         let analyzed = state.service.provisional_import(&owner, import.id).unwrap();
@@ -249,7 +273,7 @@ impl Fixture {
                     source_representation_id: row.source_representation_id,
                     profile: ConversionProfile::Flac,
                 },
-                1,
+                row.track_position,
                 &command(),
             )
             .unwrap();
@@ -394,8 +418,8 @@ impl Fixture {
 async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let item = ItemId::new();
-    let first = Fixture::new(item, "First album").await;
-    let second = Fixture::new(item, "Second album").await;
+    let first = Fixture::new(item, "First album", false).await;
+    let second = Fixture::new(item, "Second album", false).await;
     let secrets = Arc::new(Secrets::default());
     let one = first.enroll(&secrets).await;
     let two = second.enroll(&secrets).await;
@@ -422,6 +446,7 @@ async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
             collection,
             list: None,
             create: Some(api::CreateCollectionList {
+                kind: Some(CollectionListKind::MusicTracks),
                 name: "Road music".into(),
             }),
             update: None,
@@ -509,7 +534,7 @@ async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
 #[tokio::test(flavor = "multi_thread")]
 async fn digital_flac_mp3_stream_seek_download_and_offline_reopen() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let fixture = Fixture::new(ItemId::new(), "CD control").await;
+    let fixture = Fixture::new(ItemId::new(), "CD control", false).await;
     fixture.add_digital_purchase();
     let secrets = Arc::new(Secrets::default());
     let key = fixture.enroll(&secrets).await;
@@ -608,7 +633,7 @@ async fn digital_flac_mp3_stream_seek_download_and_offline_reopen() {
 #[ignore = "requires the host audio output device"]
 async fn purchased_originals_reach_the_real_audio_output_callback() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let fixture = Fixture::new(ItemId::new(), "CD control").await;
+    let fixture = Fixture::new(ItemId::new(), "CD control", false).await;
     fixture.add_digital_purchase();
     let secrets = Arc::new(Secrets::default());
     let key = fixture.enroll(&secrets).await;
@@ -649,6 +674,75 @@ async fn purchased_originals_reach_the_real_audio_output_callback() {
             );
             println!("{label}: actual device callback peak={peak}, position={position}");
         }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn game_disc_audio_streams_seeks_and_reopens_offline() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let item = ItemId::new();
+    let fixture = Fixture::new(item, "Game soundtrack", true).await;
+    let secrets = Arc::new(Secrets::default());
+    let key = fixture.enroll(&secrets).await;
+    let cache = tempfile::tempdir().unwrap();
+    let adapter = Adapter::with_credentials(cache.path(), secrets.clone()).unwrap();
+    let snapshot = adapter.refresh(key, &|| false).await.unwrap();
+    assert_eq!(snapshot.library.albums.len(), 1);
+    assert_eq!(snapshot.artwork.len(), 1);
+    assert!(
+        snapshot
+            .artwork
+            .values()
+            .all(|path| std::path::Path::new(path).is_file())
+    );
+    let album = &snapshot.library.albums[0];
+    assert_eq!(album.title, "Game soundtrack");
+    assert_eq!(album.tracks.len(), 1);
+    let track = album.tracks[0].clone();
+    assert_eq!(track.title, "Track 02");
+    let a = adapter.clone();
+    let t = track.clone();
+    tokio::task::spawn_blocking(move || {
+        use amp_audio::MediaResolver;
+        let mut decoder = junk_libs_audio::AudioDecoder::open(a.resolve(&t).unwrap()).unwrap();
+        let mut frames = 0;
+        while let Some(chunk) = decoder.read_frames(1024).unwrap() {
+            frames += chunk.frame_count();
+        }
+        assert_eq!(frames, 176400);
+        decoder
+            .seek_exact(junk_libs_audio::FramePosition(44100))
+            .unwrap();
+        assert!(decoder.read_frames(1024).unwrap().is_some());
+        a.schedule(std::slice::from_ref(&t)).unwrap();
+        a.download(t).unwrap();
+    })
+    .await
+    .unwrap();
+    fixture.stop.shutdown();
+    secrets.remove(key).unwrap();
+    drop(adapter);
+    let adapter = Adapter::with_credentials(cache.path(), secrets).unwrap();
+    assert!(adapter.downloaded(&track));
+    let offline = adapter.snapshot(key).unwrap().unwrap();
+    assert_eq!(offline.library.albums[0].title, "Game soundtrack");
+    assert_eq!(offline.artwork.len(), 1);
+    assert!(
+        offline
+            .artwork
+            .values()
+            .all(|path| std::path::Path::new(path).is_file())
+    );
+    tokio::task::spawn_blocking(move || {
+        use amp_audio::MediaResolver;
+        let mut decoder =
+            junk_libs_audio::AudioDecoder::open(adapter.resolve(&track).unwrap()).unwrap();
+        decoder
+            .seek_exact(junk_libs_audio::FramePosition(88200))
+            .unwrap();
+        assert!(decoder.read_frames(1024).unwrap().is_some());
     })
     .await
     .unwrap();

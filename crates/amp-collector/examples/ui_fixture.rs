@@ -8,6 +8,7 @@ async fn main() -> anyhow::Result<()> {
     let server = fixture::Fixture::new(
         amp_collector::ids::ItemId::new(),
         "Trash Amp acceptance album",
+        std::env::var_os("COLLECTOR_TEST_GAME").is_some(),
     )
     .await;
     if let Some(media) = std::env::args().nth(2) {
