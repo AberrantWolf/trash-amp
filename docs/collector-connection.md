@@ -88,3 +88,9 @@ The native transport also passes actual uncached-read grant and device-credentia
 revocation: a Viewer reads a full network chunk before a real permission change,
 and its next uncached read is denied. This does not recall already fetched bytes
 or retained offline copies, and does not qualify physical output-device loss.
+
+Actual TLS fault checks reject changed/ignored/truncated range responses without
+publishing partial bytes, recover on a valid read/seek, cancel stalled headers and
+bodies, and retain the last good catalog when a pinned route has the wrong TLS
+identity. Native UI queue continuity and physical-device/network-loss cases retain
+their separate qualification limits.

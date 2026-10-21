@@ -56,3 +56,29 @@ All nine affected adapter tests passed after this addition (four unit, five actu
 TLS journeys; the one existing physical-output test ignored), with strict all-target
 Clippy and formatting. The production adapter and Collector pins are unchanged by
 this additional qualification.
+
+## Actual TLS range faults and cancellation — 2026-10-21
+
+A further bounded fault adapter changes only responses from the real TLS server.
+After a complete normal chunk, a changed ETag, ignored Range/200 response and
+truncated response body all fail without modifying the caller’s byte or advancing
+its position. The truncated body streams a byte before ending short; it is not
+only a malformed-header vector. An unmodified retry and backward seek then read
+successfully from the original source. No stored media is altered.
+
+Separate server stalls hold response headers or hold the actual authorized body.
+The client cancels each in-flight read promptly with Interrupted, before its normal
+request timeout. The test releases the stalled fixture before asserting results,
+and keeps the reader/runtime on a worker. Its body stall resumes the actual
+original body when released; it never manufactures successful source bytes.
+The existing two-server journey also redirects a saved pinned connection to a
+different TLS certificate: refresh fails, the last complete catalog is unchanged,
+and restoring the original trust/route allows a fresh successful refresh.
+
+All eleven affected adapter tests pass (four unit and seven real-TLS journeys;
+one existing physical-output callback ignored), with strict all-target Clippy and
+formatting. Axum/futures-util are test-only direct dependencies already resolved
+in the existing lockfile; dependency versions and source pins are unchanged.
+This qualifies the named transport/read/recovery behavior, not arbitrary protocol
+fuzzing, physical output-device loss, native UI queue continuity across every
+failure, system-trusted second-device enrollment or disconnected-LAN operation.

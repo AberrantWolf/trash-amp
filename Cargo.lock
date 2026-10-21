@@ -231,6 +231,7 @@ dependencies = [
  "collector-server",
  "collector-store",
  "fs2",
+ "futures-util",
  "hex",
  "junk-libs-audio",
  "keyring",

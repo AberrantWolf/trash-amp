@@ -41,6 +41,12 @@ impl NativeCredentialStorage for Secrets {
 fn command() -> CommandContext {
     CommandContext::new(uuid::Uuid::new_v4().to_string()).unwrap()
 }
+#[derive(Default)]
+struct MediaFault {
+    mode: std::sync::atomic::AtomicU8,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
 pub struct Fixture {
     _root: tempfile::TempDir,
     _state: collector_server::AppState,
@@ -49,6 +55,7 @@ pub struct Fixture {
     stop: axum_server::Handle<std::net::SocketAddr>,
     task: tokio::task::JoinHandle<()>,
     lose_list_response: Arc<std::sync::atomic::AtomicBool>,
+    media_fault: Arc<MediaFault>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -283,15 +290,78 @@ impl Fixture {
         let handle = stop.clone();
         let lose_list_response = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let response_fault = lose_list_response.clone();
+        let media_fault = Arc::new(MediaFault::default());
+        let range_fault = media_fault.clone();
         let app = collector_server::router(state.clone()).layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let fault = response_fault.clone();
+                let media = range_fault.clone();
                 async move {
                     let list_write = matches!(
                         *request.method(),
                         axum::http::Method::POST | axum::http::Method::PUT
                     ) && request.uri().path().contains("/lists");
+                    let ranged = request.method() == axum::http::Method::GET
+                        && request.headers().contains_key(axum::http::header::RANGE);
+                    let mode = if ranged {
+                        media.mode.swap(0, std::sync::atomic::Ordering::SeqCst)
+                    } else {
+                        0
+                    };
                     let mut response = next.run(request).await;
+                    if response.status() == axum::http::StatusCode::PARTIAL_CONTENT {
+                        match mode {
+                            1 => {
+                                response.headers_mut().insert(
+                                    axum::http::header::ETAG,
+                                    axum::http::HeaderValue::from_static("\"changed\""),
+                                );
+                            }
+                            2 => {
+                                *response.status_mut() = axum::http::StatusCode::OK;
+                            }
+                            3 => {
+                                *response.body_mut() = axum::body::Body::from_stream(
+                                    futures_util::stream::unfold(false, |sent| async move {
+                                        if !sent {
+                                            Some((
+                                                Ok::<_, std::convert::Infallible>(
+                                                    axum::body::Bytes::from_static(&[0x7f]),
+                                                ),
+                                                true,
+                                            ))
+                                        } else {
+                                            tokio::time::sleep(std::time::Duration::from_millis(
+                                                20,
+                                            ))
+                                            .await;
+                                            None
+                                        }
+                                    }),
+                                );
+                            }
+                            4 => {
+                                media.entered.notify_one();
+                                media.release.notified().await;
+                            }
+                            5 => {
+                                let original = std::mem::replace(
+                                    response.body_mut(),
+                                    axum::body::Body::empty(),
+                                );
+                                let blocked = media.clone();
+                                *response.body_mut() = axum::body::Body::from_stream(
+                                    futures_util::stream::once(async move {
+                                        blocked.entered.notify_one();
+                                        blocked.release.notified().await;
+                                        axum::body::to_bytes(original, 256 * 1024).await
+                                    }),
+                                );
+                            }
+                            _ => {}
+                        }
+                    }
+
                     if list_write
                         && response.status().is_success()
                         && fault.swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -322,6 +392,7 @@ impl Fixture {
             stop,
             task,
             lose_list_response,
+            media_fault,
         }
     }
     async fn enroll(&self, secrets: &Secrets) -> ConnectionKey {
@@ -541,6 +612,19 @@ async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
     let retained = adapter.list_tracks(one, &historical);
     assert_eq!(retained.len(), 2);
     assert!(retained.iter().all(|track| adapter.downloaded(track)));
+    // A route with a different TLS identity must not replace the last good catalog.
+    let retained = serde_json::to_value(adapter.snapshot(one).unwrap()).unwrap();
+    let trusted = secrets.load(one).unwrap().unwrap();
+    let mut wrong_route = trusted.clone();
+    wrong_route.pairing.endpoints = second.pairing.endpoints.clone();
+    secrets.save(&wrong_route).unwrap();
+    assert!(adapter.refresh(one, &|| false).await.is_err());
+    assert_eq!(
+        serde_json::to_value(adapter.snapshot(one).unwrap()).unwrap(),
+        retained
+    );
+    secrets.save(&trusted).unwrap();
+    adapter.refresh(one, &|| false).await.unwrap();
     first.stop.shutdown();
     second.stop.shutdown();
     secrets.remove(one).unwrap();
@@ -991,5 +1075,105 @@ async fn grant_and_native_credential_revocation_deny_the_next_actual_uncached_re
             .await
             .unwrap()
             .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn actual_ranges_reject_changed_ignored_and_truncated_responses_then_recover() {
+    use std::io::{Read, Seek, SeekFrom};
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let item = ItemId::new();
+    let fixture = Fixture::new(item, "Range failure control", false).await;
+    let record = collector_app::Catalog::item(fixture._state.store.as_ref(), item).unwrap();
+    let master = record
+        .captures
+        .iter()
+        .flat_map(|capture| &capture.representations)
+        .find(|representation| representation.role == RepresentationRole::PreservationMaster)
+        .unwrap();
+    let source = master.id;
+    let file_index = master
+        .files
+        .iter()
+        .position(|file| file.name == "disc.bin")
+        .unwrap();
+    let secrets = Secrets::default();
+    let key = fixture.enroll(&secrets).await;
+    let client = collector_client::EnrolledClient::from_storage(&secrets, key).unwrap();
+    let fault = fixture.media_fault.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut reader = client
+            .media_reader(
+                item,
+                source,
+                file_index,
+                collector_client::MediaCancellation::default(),
+            )
+            .unwrap();
+        reader.read_exact(&mut vec![0u8; 256 * 1024]).unwrap();
+        for mode in [1, 2, 3] {
+            fault.mode.store(mode, std::sync::atomic::Ordering::SeqCst);
+            let mut byte = [0x55];
+            assert!(reader.read(&mut byte).is_err());
+            assert_eq!(byte, [0x55]);
+            assert_eq!(reader.stream_position().unwrap(), 256 * 1024);
+        }
+        let mut byte = [0x55];
+        reader.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, [0]);
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        reader.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, [0]);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stalled_actual_range_cancels_before_timeout_and_releases_the_reader() {
+    use std::{
+        io::{ErrorKind, Read},
+        time::Duration,
+    };
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    for mode in [4, 5] {
+        let item = ItemId::new();
+        let fixture = Fixture::new(item, "Range cancellation control", false).await;
+        let record = collector_app::Catalog::item(fixture._state.store.as_ref(), item).unwrap();
+        let master = record
+            .captures
+            .iter()
+            .flat_map(|capture| &capture.representations)
+            .find(|representation| representation.role == RepresentationRole::PreservationMaster)
+            .unwrap();
+        let source = master.id;
+        let file_index = master
+            .files
+            .iter()
+            .position(|file| file.name == "disc.bin")
+            .unwrap();
+        let secrets = Secrets::default();
+        let key = fixture.enroll(&secrets).await;
+        let client = collector_client::EnrolledClient::from_storage(&secrets, key).unwrap();
+        let fault = fixture.media_fault.clone();
+        let cancellation = collector_client::MediaCancellation::default();
+        let token = cancellation.clone();
+        fault.mode.store(mode, std::sync::atomic::Ordering::SeqCst);
+        let worker = tokio::task::spawn_blocking(move || {
+            let mut reader = client
+                .media_reader(item, source, file_index, cancellation)
+                .unwrap();
+            reader.read(&mut [0u8; 1]).unwrap_err().kind()
+        });
+        let entered = tokio::time::timeout(Duration::from_secs(5), fault.entered.notified()).await;
+        if mode == 5 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        token.cancel();
+        let outcome = tokio::time::timeout(Duration::from_secs(2), worker).await;
+        // Release the fixture even if cancellation failed, before asserting outcomes.
+        fault.release.notify_one();
+        entered.unwrap();
+        assert_eq!(outcome.unwrap().unwrap(), ErrorKind::Interrupted);
     }
 }
