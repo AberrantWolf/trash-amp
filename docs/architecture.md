@@ -76,3 +76,14 @@ only server-admitted audio derivatives use the existing ranged stream/download
 and offline cache path. Native playlist creation explicitly requests audio tracks,
 so a Games collection's default inventory lists stay separate. No game importer,
 PCM parser or second playback engine is introduced in Trash Amp.
+
+### Native list-command recovery — 2026-10-21
+
+The Collector adapter persists the complete server/account, collection, list,
+revision, operation and receipt before HTTP delivery. A pending receipt is bound
+to those exact inputs under the profile’s database mutex; changed inputs fail
+without replacing the original. The existing Lists retry action resubmits that
+saved request after restart. Collector owns the effect and receipt outcome; a
+truncated response after commit must resolve to the original result, including
+intentional playlist occurrences, rather than issue a new command. Desktop policy
+still blocks unrelated list editing while an unresolved command is pending.

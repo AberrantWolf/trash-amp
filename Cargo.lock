@@ -222,6 +222,7 @@ dependencies = [
  "amp-audio",
  "amp-core",
  "anyhow",
+ "axum",
  "axum-server",
  "chrono",
  "collector-app",

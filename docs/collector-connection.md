@@ -74,3 +74,12 @@ Descriptive artist/queue captions keep immutable source IDs internal. Credential
 removal runs on a worker with a visible pending state, so an OS Keychain wait does
 not stall the UI. Temporary profiles and servers were used throughout. Broader
 LAN/device-loss/revocation qualification remains in Collector's HL-04 queue.
+
+## Playlist response recovery — 2026-10-21
+
+Pending receipts now reject changed inputs locally instead of overwriting the saved
+request. Actual TLS create/append tests truncate the response after Collector
+commits, reopen the profile, and retry the original request without duplicate
+playlists or entries. The existing Lists retry action uses this durable path;
+discarding an unresolved local command does not undo an already committed server
+change. See [acceptance and limits](validation/collector-command-recovery-2026-10-21.md).

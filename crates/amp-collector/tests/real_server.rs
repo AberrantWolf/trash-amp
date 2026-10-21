@@ -48,6 +48,7 @@ pub struct Fixture {
     pub owner: Principal,
     stop: axum_server::Handle<std::net::SocketAddr>,
     task: tokio::task::JoinHandle<()>,
+    lose_list_response: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -280,7 +281,31 @@ impl Fixture {
         state.service.run_next_job("fixture-flac").unwrap();
         let stop = axum_server::Handle::new();
         let handle = stop.clone();
-        let app = collector_server::router(state.clone());
+        let lose_list_response = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let response_fault = lose_list_response.clone();
+        let app = collector_server::router(state.clone()).layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let fault = response_fault.clone();
+                async move {
+                    let list_write = matches!(
+                        *request.method(),
+                        axum::http::Method::POST | axum::http::Method::PUT
+                    ) && request.uri().path().contains("/lists");
+                    let mut response = next.run(request).await;
+                    if list_write
+                        && response.status().is_success()
+                        && fault.swap(false, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        // The actual effect has committed. Only delivery is damaged.
+                        response
+                            .headers_mut()
+                            .remove(axum::http::header::CONTENT_LENGTH);
+                        *response.body_mut() = axum::body::Body::from("{");
+                    }
+                    response
+                }
+            },
+        ));
         let task = tokio::spawn(async move {
             axum_server::from_tcp_rustls(listener, config)
                 .unwrap()
@@ -296,6 +321,7 @@ impl Fixture {
             owner,
             stop,
             task,
+            lose_list_response,
         }
     }
     async fn enroll(&self, secrets: &Secrets) -> ConnectionKey {
@@ -746,4 +772,124 @@ async fn game_disc_audio_streams_seeks_and_reopens_offline() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn committed_list_response_loss_restarts_with_exact_input_and_no_duplicate_entries() {
+    use std::sync::atomic::Ordering;
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let item = ItemId::new();
+    let fixture = Fixture::new(item, "Durable list control", false).await;
+    let secrets = Arc::new(Secrets::default());
+    let key = fixture.enroll(&secrets).await;
+    let cache = tempfile::tempdir().unwrap();
+    let adapter = Adapter::with_credentials(cache.path(), secrets.clone()).unwrap();
+    let snapshot = adapter.refresh(key, &|| false).await.unwrap();
+    let collection = snapshot.collections[0].id;
+    let create = ListCommand {
+        key,
+        collection,
+        list: None,
+        create: Some(api::CreateCollectionList {
+            kind: Some(CollectionListKind::MusicTracks),
+            name: "Original request".into(),
+        }),
+        update: None,
+        receipt: "uncertain-create".into(),
+    };
+    fixture.lose_list_response.store(true, Ordering::SeqCst);
+    assert!(adapter.submit(create.clone()).await.is_err());
+    let client = adapter.client(key).unwrap();
+    let lists = client
+        .lists(
+            collection,
+            &api::CollectionListsQuery {
+                search: None,
+                cursor: None,
+                limit: Some(100),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(lists.items.len(), 1);
+    let committed = lists.items[0].clone();
+    let mut changed = create.clone();
+    changed.create.as_mut().unwrap().name = "Changed request".into();
+    assert!(adapter.submit(changed).await.is_err());
+    let mut other_server = create.clone();
+    other_server.key.server_id = ServerId::new();
+    assert!(adapter.submit(other_server).await.is_err());
+    let pending = adapter.pending_commands(key).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&pending[0]).unwrap(),
+        serde_json::to_value(&create).unwrap()
+    );
+    drop(adapter);
+    let adapter = Adapter::with_credentials(cache.path(), secrets.clone()).unwrap();
+    let retried = adapter
+        .submit(adapter.pending_commands(key).unwrap().pop().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(retried.id, committed.id);
+    assert_eq!(retried.revision, committed.revision);
+    assert!(adapter.pending_commands(key).unwrap().is_empty());
+    let remote: amp_collector::RemoteTrack =
+        serde_json::from_str(match &snapshot.library.albums[0].tracks[0].access {
+            amp_core::MediaAccess::Managed { item, .. } => item,
+            _ => panic!(),
+        })
+        .unwrap();
+    let append = ListCommand {
+        key,
+        collection,
+        list: Some(committed.id),
+        create: None,
+        update: Some(api::UpdateCollectionList {
+            expected_revision: committed.revision,
+            change: api::CollectionListChange::Append {
+                item_id: item,
+                source_representation_id: Some(remote.source),
+                track_position: Some(1),
+            },
+        }),
+        receipt: "uncertain-append".into(),
+    };
+    fixture.lose_list_response.store(true, Ordering::SeqCst);
+    assert!(adapter.submit(append.clone()).await.is_err());
+    let committed_list = client
+        .list_snapshot(collection, committed.id)
+        .await
+        .unwrap();
+    assert_eq!(committed_list.entries.items.len(), 1);
+    let entry = committed_list.entries.items[0].id;
+    let mut changed = append.clone();
+    changed.update.as_mut().unwrap().expected_revision = committed_list.list.revision;
+    assert!(adapter.submit(changed).await.is_err());
+    drop(adapter);
+    let adapter = Adapter::with_credentials(cache.path(), secrets).unwrap();
+    let replay = adapter
+        .submit(adapter.pending_commands(key).unwrap().pop().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(replay.revision, committed_list.list.revision);
+    assert!(adapter.pending_commands(key).unwrap().is_empty());
+    let final_list = client
+        .list_snapshot(collection, committed.id)
+        .await
+        .unwrap();
+    assert_eq!(final_list.entries.items.len(), 1);
+    assert_eq!(final_list.entries.items[0].id, entry);
+    let final_lists = client
+        .lists(
+            collection,
+            &api::CollectionListsQuery {
+                search: None,
+                cursor: None,
+                limit: Some(100),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(final_lists.items.len(), 1);
 }

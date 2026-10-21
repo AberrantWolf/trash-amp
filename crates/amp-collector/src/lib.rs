@@ -517,8 +517,33 @@ impl Adapter {
             })
             .collect()
     }
+    fn stage_command(&self, command: &ListCommand) -> Result<()> {
+        use rusqlite::OptionalExtension;
+        let submitted = serde_json::to_value(command)?;
+        let db = self.db.lock().unwrap();
+        let existing: Option<String> = db
+            .query_row(
+                "SELECT value FROM records WHERE kind='command' AND id=?",
+                [&command.receipt],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if serde_json::from_str::<serde_json::Value>(&existing)? != submitted {
+                bail!(
+                    "This pending receipt belongs to a different command. Retry or discard the original command."
+                )
+            }
+        } else {
+            db.execute(
+                "INSERT INTO records(kind,id,value) VALUES('command',?,?)",
+                params![command.receipt, submitted.to_string()],
+            )?;
+        }
+        Ok(())
+    }
     pub async fn submit(&self, command: ListCommand) -> Result<api::CollectionListSummary> {
-        self.put("command", &command.receipt, &command)?;
+        self.stage_command(&command)?;
         let client = self.client(command.key)?;
         let result = if let Some(create) = &command.create {
             client
