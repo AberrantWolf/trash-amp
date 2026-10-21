@@ -36,3 +36,23 @@ teardown. No UI or public API change requires a second playback engine or pipeli
 The named checks qualify native adapter/transport/disk recovery, not a physical
 output device, system-trusted second-device enrollment, network route loss or the
 remaining stalled/malformed media-range matrix. No native package is released.
+
+## Actual uncached-read revocation — 2026-10-21
+
+A subsequent real-TLS case enrolls a distinct non-administrator Viewer, reads a
+complete 256 KiB original-media chunk through the same blocking RangeReader used
+by native playback, then coordinates a real permission mutation before its next
+uncached byte. One case removes the collection grant; another revokes that native
+credential. Both next reads fail with PermissionDenied. The reader/runtime remain
+on their worker, coordination and teardown are bounded, and no response or access
+outcome is mocked. Existing owner enrollment still uses the same helper.
+
+This qualifies new network reads for those cases, not instant recall of bytes
+already fetched, offline DRM or audio-output-device behavior. Explicitly retained
+offline copies remain available under the existing product policy. Broader stalled,
+changed or malformed-range and physical-output cases remain separate.
+
+All nine affected adapter tests passed after this addition (four unit, five actual
+TLS journeys; the one existing physical-output test ignored), with strict all-target
+Clippy and formatting. The production adapter and Collector pins are unchanged by
+this additional qualification.

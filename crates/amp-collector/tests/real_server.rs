@@ -325,6 +325,9 @@ impl Fixture {
         }
     }
     async fn enroll(&self, secrets: &Secrets) -> ConnectionKey {
+        self.enroll_as(secrets, "owner", "long test password").await
+    }
+    async fn enroll_as(&self, secrets: &Secrets, username: &str, password: &str) -> ConnectionKey {
         let client = self.pairing.lan_client().unwrap();
         let base = self.pairing.endpoints[0].url.to_string();
         let mut pending =
@@ -332,7 +335,7 @@ impl Fixture {
                 .await
                 .unwrap();
         pending.pin(self.pairing.clone()).unwrap();
-        let login=client.post(format!("{base}api/v1/auth/login")).header("origin",base.trim_end_matches('/')).json(&serde_json::json!({"username":"owner","password":"long test password","device_name":"fixture"})).send().await.unwrap();
+        let login=client.post(format!("{base}api/v1/auth/login")).header("origin",base.trim_end_matches('/')).json(&serde_json::json!({"username":username,"password":password,"device_name":"fixture"})).send().await.unwrap();
         assert!(login.status().is_success());
         let cookie = login.headers()["set-cookie"]
             .to_str()
@@ -892,4 +895,101 @@ async fn committed_list_response_loss_restarts_with_exact_input_and_no_duplicate
         .await
         .unwrap();
     assert_eq!(final_lists.items.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn grant_and_native_credential_revocation_deny_the_next_actual_uncached_read() {
+    use std::{
+        io::{ErrorKind, Read},
+        time::Duration,
+    };
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    for device_revocation in [false, true] {
+        let item = ItemId::new();
+        let fixture = Fixture::new(item, "Native read control", false).await;
+        let service = &fixture._state.service;
+        let store = &fixture._state.store;
+        let record = collector_app::Catalog::item(store.as_ref(), item).unwrap();
+        let master = record
+            .captures
+            .iter()
+            .flat_map(|capture| &capture.representations)
+            .find(|representation| representation.role == RepresentationRole::PreservationMaster)
+            .unwrap();
+        let file_index = master
+            .files
+            .iter()
+            .position(|file| file.name == "disc.bin")
+            .unwrap();
+        assert!(master.files[file_index].bytes.0 > 256 * 1024);
+        let source = master.id;
+        let collection = record.collection_id;
+        let user = store
+            .create_user("native-reader", "long reader password", false)
+            .unwrap();
+        collector_app::Catalog::grant(store.as_ref(), collection, user, Role::Viewer).unwrap();
+        let secrets = Arc::new(Secrets::default());
+        let key = fixture
+            .enroll_as(&secrets, "native-reader", "long reader password")
+            .await;
+        let client = collector_client::EnrolledClient::from_storage(secrets.as_ref(), key).unwrap();
+        let cancellation = collector_client::MediaCancellation::default();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let read = tokio::task::spawn_blocking(move || {
+            let mut reader = client
+                .media_reader(item, source, file_index, cancellation)
+                .unwrap();
+            let mut first = vec![0u8; 256 * 1024];
+            reader.read_exact(&mut first).unwrap();
+            ready_tx.send(()).unwrap();
+            continue_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let error = reader.read(&mut [0u8; 1]).unwrap_err();
+            assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+        });
+        tokio::time::timeout(Duration::from_secs(5), ready_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        if device_revocation {
+            let authenticated = store
+                .login("native-reader", "long reader password", "revoke control")
+                .unwrap()
+                .1;
+            let devices = service.native_devices(&authenticated).unwrap();
+            assert_eq!(devices.len(), 1);
+            service
+                .revoke_native_device(
+                    &authenticated,
+                    devices[0].id,
+                    devices[0].revision,
+                    &command(),
+                )
+                .unwrap();
+        } else {
+            let authenticated = store
+                .login("owner", "long test password", "revoke control")
+                .unwrap()
+                .1;
+            let grant = service
+                .grant_for_username(&fixture.owner, collection, "native-reader")
+                .unwrap()
+                .unwrap();
+            service
+                .set_grant(
+                    &authenticated,
+                    collection,
+                    "native-reader",
+                    grant.revision,
+                    None,
+                    &command(),
+                )
+                .unwrap();
+        }
+        continue_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), read)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }

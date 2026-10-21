@@ -83,3 +83,8 @@ commits, reopen the profile, and retry the original request without duplicate
 playlists or entries. The existing Lists retry action uses this durable path;
 discarding an unresolved local command does not undo an already committed server
 change. See [acceptance and limits](validation/collector-command-recovery-2026-10-21.md).
+
+The native transport also passes actual uncached-read grant and device-credential
+revocation: a Viewer reads a full network chunk before a real permission change,
+and its next uncached read is denied. This does not recall already fetched bytes
+or retained offline copies, and does not qualify physical output-device loss.
