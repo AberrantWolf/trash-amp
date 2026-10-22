@@ -2,6 +2,11 @@
 
 An album-focused Rust music player. The first development target is macOS, with a Slint UI over independent library and audio crates.
 
+The first alpha is **0.1.0-alpha.1**, for Apple Silicon Macs on macOS 15 or newer.
+See [alpha release notes](docs/releases/0.1.0-alpha.1.md) for installation and
+known limits, and [release preparation](docs/alpha-release.md) for the GitHub
+build and draft-release workflow.
+
 ## macOS app bundle
 
 ```sh
@@ -26,6 +31,13 @@ cargo run -p trash-amp --release -- --demo
 
 `--demo` loads 2,000 generated albums for layout testing. They contain no audio.
 Use `TRASH_AMP_DATA_DIR=/some/local/directory` to isolate the SQLite cache during development. The default is the platform's application data directory. Never put this cache on the music share.
+
+Each successfully scanned folder keeps a separate saved catalog. Under **Local
+folder**, use the saved folder selector to reopen one immediately, including
+while its network share is disconnected. **Refresh folder** rescans for changes;
+a failed scan keeps the saved catalog. Playback still requires the source files
+to be available. The last selected folder is restored on startup when using the
+local source. Existing single-library caches migrate automatically.
 
 The initial build downloads Slint/Skia dependencies and can take several minutes. A Rust toolchain and macOS Xcode command-line tools are required. The lockfile pins the development dependency set. Other targets have not yet been validated.
 

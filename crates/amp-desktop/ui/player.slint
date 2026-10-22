@@ -37,6 +37,7 @@ export component PlayerWindow inherits Window {
     callback connect-server(); callback cancel-connect(); callback refresh-server(); callback remove-server();
     callback list-command(int); callback play-list(bool); callback download-action(int); callback save-budget();
     title: "Trash Amp";
+    in property <string> application-version;
     preferred-width: 980px; preferred-height: 680px; min-width: 330px; min-height: 230px; max-width: 10000px; max-height: 10000px;
     background: #20262d;
     default-font-family: "Helvetica Neue";
@@ -101,6 +102,10 @@ export component PlayerWindow inherits Window {
     changed show-library => { if !root.show-library && !root.wide { root.search-editing = false; } }
     changed wide => { if !root.wide && !root.show-library { root.search-editing = false; } }
     callback open-folder(); callback demo();
+    in property <[string]> folder-libraries;
+    in-out property <int> folder-index: -1;
+    callback folder-selected(int);
+    callback refresh-folder();
     callback play-track(int); callback enqueue(int); callback toggle-play();
     callback previous(); callback next(); callback seek(float);
     callback preferences-changed(); callback clear-queue();
@@ -140,6 +145,13 @@ export component PlayerWindow inherits Window {
                 ComboBox { model: root.collections; current-index <=> root.collection-index; accessible-label: "Music collection"; selected(i) => { root.collection-changed(self.current-index); } }
                 Button { text: "Refresh"; enabled: !root.collector-busy; clicked => { root.refresh-server(); } }
             }
+        }
+        if !root.collector-active && !root.settings && !root.lists-open && root.folder-libraries.length > 0: HorizontalLayout {
+            height: 32px; spacing: 6px;
+            ComboBox { model: root.folder-libraries; current-index <=> root.folder-index; accessible-label: "Saved folder library"; horizontal-stretch: 1;
+                selected(i) => { root.folder-selected(self.current-index); } }
+            Button { text: "Refresh folder"; enabled: root.folder-index >= 0 && !root.scanning;
+                clicked => { root.refresh-folder(); } }
         }
         if root.lists-open: Rectangle {
             background: #283039; border-radius: 6px;
@@ -250,6 +262,7 @@ export component PlayerWindow inherits Window {
                         alignment: center;
                         AboutSlint { width: 240px; height: 112px; }
                     }
+                    if root.settings-tab == 0: Text { text: "Trash Amp " + root.application-version; color: #a9bac9; horizontal-alignment: center; }
                 }
             }
         }

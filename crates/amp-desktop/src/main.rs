@@ -81,6 +81,49 @@ fn albums(ui: &PlayerWindow, state: &State) {
     ui.set_album_title("Select an album".into());
     ui.set_album_artist(state.library.root.clone().into());
 }
+fn folder_choices(ui: &PlayerWindow, state: &State) -> anyhow::Result<()> {
+    let folders = state.store.saved_folders()?;
+    ui.set_folder_index(
+        folders
+            .iter()
+            .position(|f| f.id == state.library.id)
+            .map_or(-1, |i| i as i32),
+    );
+    ui.set_folder_libraries(ModelRc::new(VecModel::from(
+        folders
+            .into_iter()
+            .map(|f| SharedString::from(f.root))
+            .collect::<Vec<_>>(),
+    )));
+    Ok(())
+}
+fn wire_folder_selection(ui: &PlayerWindow, state: &Rc<RefCell<State>>) {
+    let weak = ui.as_weak();
+    let state = state.clone();
+    ui.on_folder_selected(move |index| {
+        let Some(ui) = weak.upgrade() else { return };
+        let result = (|| -> anyhow::Result<()> {
+            let s = state.borrow();
+            let folders = s.store.saved_folders()?;
+            let folder = usize::try_from(index)
+                .ok()
+                .and_then(|i| folders.get(i))
+                .ok_or_else(|| anyhow::anyhow!("Choose a saved folder"))?;
+            s.store.select_folder(&folder.id)?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                ui.invoke_source_changed(0);
+                ui.set_source_index(0);
+                ui.set_status(
+                    "Saved folder library opened. Refresh folder to scan for changes.".into(),
+                );
+            }
+            Err(e) => ui.set_status(format!("Cannot reopen folder: {e}").into()),
+        }
+    });
+}
 fn select(ui: &PlayerWindow, state: &mut State, index: usize) {
     let Some(album) = state.library.albums.get(index) else {
         return;
@@ -290,6 +333,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
     let ui = PlayerWindow::new()?;
+    ui.set_application_version(env!("CARGO_PKG_VERSION").into());
     ui.set_sort_order(i32::from(preferences.browse_artists));
     ui.set_reduced_motion(preferences.reduced_motion);
     ui.set_prefer_raw(preferences.dump_preference == DumpPreference::Redumper);
@@ -319,6 +363,7 @@ fn main() -> anyhow::Result<()> {
     ));
     let cache_path = data.join("library.sqlite3");
     let mut collector = collector::Controller::new(&ui, &state, &data, generation.clone())?;
+    folder_choices(&ui, &state.borrow())?;
     let scan: Rc<dyn Fn(PathBuf)> = {
         let state = state.clone();
         let weak = ui.as_weak();
@@ -367,6 +412,21 @@ fn main() -> anyhow::Result<()> {
             });
         })
     };
+    wire_folder_selection(&ui, &state);
+    {
+        let weak = ui.as_weak();
+        let state = state.clone();
+        let scan = scan.clone();
+        ui.on_refresh_folder(move || {
+            let root = state.borrow().library.root.clone();
+            if let Some(ui) = weak.upgrade()
+                && !ui.get_collector_active()
+                && ui.get_folder_index() >= 0
+            {
+                scan(PathBuf::from(root));
+            }
+        });
+    }
     {
         let scan = scan.clone();
         let weak = ui.as_weak();
@@ -377,6 +437,7 @@ fn main() -> anyhow::Result<()> {
             {
                 if let Some(ui) = weak.upgrade() {
                     ui.invoke_source_changed(0);
+                    ui.set_source_index(0);
                 }
                 scan(path)
             }
@@ -396,6 +457,9 @@ fn main() -> anyhow::Result<()> {
             s.selected = None;
             if let Some(ui) = weak.upgrade() {
                 ui.set_scanning(false);
+                if let Err(e) = folder_choices(&ui, &s) {
+                    eprintln!("Cannot list saved folders: {e}");
+                }
                 sort_albums(&ui, &mut s);
                 albums(&ui, &s);
                 browse::rebuild(&ui, &mut s, true);
@@ -589,7 +653,9 @@ fn main() -> anyhow::Result<()> {
                                     }
                                     let saved = s.store.save_library(&library);
                                     s.library = library;
+                                    s.artwork.clear();
                                     s.selected = None;
+                                    if let Err(e) = folder_choices(&ui, &s) { eprintln!("Cannot list saved folders: {e}"); }
                                     sort_albums(&ui, &mut s);
                                     albums(&ui, &s);
                                     browse::rebuild(&ui, &mut s, true);
@@ -727,6 +793,8 @@ fn main() -> anyhow::Result<()> {
     if let Some(index) = args.iter().position(|a| a == "--library")
         && let Some(path) = args.get(index + 1)
     {
+        ui.invoke_source_changed(0);
+        ui.set_source_index(0);
         scan(PathBuf::from(path))
     }
     if let Some(url) = args
@@ -843,6 +911,66 @@ mod tests {
                 play => { root.play(); } select => { root.select(); } enqueue => { root.enqueue(); }
             }
         }
+    }
+    #[test]
+    fn saved_folder_selector_reopens_offline_and_cancels_pending_scans() {
+        use i_slint_backend_testing::ElementHandle;
+        i_slint_backend_testing::init_no_event_loop();
+        let data = std::env::temp_dir().join(format!("trash-amp-folders-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data).unwrap();
+        let store = Store::open(&data.join("library.sqlite3")).unwrap();
+        for id in ["a", "b"] {
+            store
+                .save_library(&Library {
+                    id: id.into(),
+                    root: format!("/offline/{id}"),
+                    ..Library::default()
+                })
+                .unwrap();
+        }
+        let state = Rc::new(RefCell::new(State {
+            library: store.library().unwrap().unwrap(),
+            store,
+            resolver: None,
+            artwork: Default::default(),
+            browser: browse::Browser::default(),
+            selected: None,
+            playlist: vec![],
+            queued: vec![],
+            queue_start: 0,
+            player: None,
+            preferences: Preferences::default(),
+        }));
+        let ui = PlayerWindow::new().unwrap();
+        let generation = Arc::new(AtomicU64::new(0));
+        let controller =
+            collector::Controller::new(&ui, &state, &data, generation.clone()).unwrap();
+        folder_choices(&ui, &state.borrow()).unwrap();
+        wire_folder_selection(&ui, &state);
+        ui.show().unwrap();
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "Saved folder library")
+                .next()
+                .is_some()
+        );
+        assert_eq!(ui.get_folder_index(), 1);
+        ui.set_scanning(true);
+        ui.invoke_folder_selected(0);
+        assert!(!ui.get_scanning());
+        assert_eq!(generation.load(Ordering::Relaxed), 1);
+        assert_eq!(state.borrow().library.root, "/offline/a");
+        assert_eq!(state.borrow().store.library().unwrap().unwrap().id, "a");
+        assert_eq!(ui.get_folder_index(), 0);
+        ui.invoke_folder_selected(1);
+        assert_eq!(state.borrow().library.root, "/offline/b");
+        assert_eq!(state.borrow().store.saved_folders().unwrap().len(), 2);
+        ui.invoke_folder_selected(-1);
+        assert_eq!(state.borrow().library.id, "b");
+        assert!(ui.get_status().starts_with("Cannot reopen folder"));
+        drop(controller);
+        drop(ui);
+        drop(state);
+        std::fs::remove_dir_all(data).unwrap();
     }
     #[test]
     fn settings_and_lists_replace_library_and_preserve_selection() {

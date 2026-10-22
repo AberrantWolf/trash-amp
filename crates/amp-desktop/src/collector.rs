@@ -305,6 +305,9 @@ impl Controller {
                     s.library = s.store.library().ok().flatten().unwrap_or_default();
                     s.artwork.clear();
                     s.selected = None;
+                    if let Err(e) = folder_choices(&ui, &s) {
+                        ui.set_status(format!("Cannot list saved folders: {e}").into());
+                    }
                     sort_albums(&ui, &mut s);
                     albums(&ui, &s);
                     browse::rebuild(&ui, &mut s, true);

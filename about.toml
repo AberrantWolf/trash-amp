@@ -1,0 +1,12 @@
+# Runtime dependency notices for the macOS alpha. Slint's custom license
+# text is supplied separately by generate-notices.py because cargo-about
+# does not harvest LicenseRef text. The app retains its AboutSlint widget.
+accepted = [
+    "MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
+    "CDLA-Permissive-2.0", "Unicode-3.0", "Unicode-DFS-2016", "CC0-1.0", "BSL-1.0", "MPL-2.0",
+    "LicenseRef-Slint-Royalty-free-2.0",
+]
+targets = ["aarch64-apple-darwin"]
+ignore-dev-dependencies = true
+ignore-build-dependencies = true
+workarounds = ["ring", "rustls"]

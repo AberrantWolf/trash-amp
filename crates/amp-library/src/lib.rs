@@ -17,12 +17,21 @@ use std::{
 use walkdir::WalkDir;
 
 pub struct Store(Connection);
+pub struct SavedFolder {
+    pub id: String,
+    pub root: String,
+}
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let db = Connection::open(path)?;
         db.busy_timeout(std::time::Duration::from_secs(3))?;
         db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS metadata_http(key TEXT PRIMARY KEY, value TEXT NOT NULL, expires INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS metadata_matches(album_id TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
-        Ok(Self(db))
+        db.execute_batch("CREATE TABLE IF NOT EXISTS folder_libraries(id TEXT PRIMARY KEY, root TEXT NOT NULL, value TEXT NOT NULL);")?;
+        let store = Self(db);
+        if let Some(library) = store.get::<Library>("library")? {
+            store.save_library(&library)?;
+        }
+        Ok(store)
     }
     pub fn preferences(&self) -> Result<Preferences> {
         Ok(self.get("preferences")?.unwrap_or_default())
@@ -31,10 +40,54 @@ impl Store {
         self.put("preferences", p)
     }
     pub fn library(&self) -> Result<Option<Library>> {
-        self.get("library")
+        match self.get::<String>("active_folder")? {
+            Some(id) => self.library_by_id(&id),
+            None => Ok(None),
+        }
+    }
+    pub fn library_by_id(&self, id: &str) -> Result<Option<Library>> {
+        let json: Option<String> = self
+            .0
+            .query_row("SELECT value FROM folder_libraries WHERE id=?", [id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        json.map(|s| serde_json::from_str(&s).map_err(Into::into))
+            .transpose()
+    }
+    pub fn saved_folders(&self) -> Result<Vec<SavedFolder>> {
+        let mut query = self
+            .0
+            .prepare("SELECT id, root FROM folder_libraries ORDER BY root, id")?;
+        Ok(query
+            .query_map([], |r| {
+                Ok(SavedFolder {
+                    id: r.get(0)?,
+                    root: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+    pub fn select_folder(&self, id: &str) -> Result<Library> {
+        let library = self
+            .library_by_id(id)?
+            .context("Saved folder library is unavailable")?;
+        self.put("active_folder", &id)?;
+        Ok(library)
     }
     pub fn save_library(&self, library: &Library) -> Result<()> {
-        self.put("library", library)
+        // Empty startup catalogs and demo fixtures are not folder libraries.
+        if library.root.is_empty() || library.id == "demo" {
+            return Ok(());
+        }
+        let tx = self.0.unchecked_transaction()?;
+        tx.execute("INSERT INTO folder_libraries(id,root,value) VALUES (?1,?2,?3) ON CONFLICT(id) DO UPDATE SET root=excluded.root,value=excluded.value",
+            params![library.id, library.root, serde_json::to_string(library)?])?;
+        tx.execute("INSERT INTO state(key,value) VALUES ('active_folder',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [serde_json::to_string(&library.id)?])?;
+        tx.execute("DELETE FROM state WHERE key='library'", [])?;
+        tx.commit()?;
+        Ok(())
     }
     fn get<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
         let json: Option<String> = self
@@ -675,9 +728,10 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("cancelled"));
     }
     #[test]
-    fn preference_roundtrip_and_library_replacement() {
+    fn preferences_and_folder_libraries_survive_switching_and_restart() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("db")).unwrap();
+        let path = dir.path().join("db");
+        let store = Store::open(&path).unwrap();
         assert_eq!(
             store.preferences().unwrap().dump_preference,
             DumpPreference::Redumper
@@ -694,16 +748,90 @@ mod tests {
         store
             .save_library(&Library {
                 id: "a".into(),
+                root: "/missing/a".into(),
                 ..Library::default()
             })
             .unwrap();
         store
             .save_library(&Library {
                 id: "b".into(),
+                root: "/missing/b".into(),
                 ..Library::default()
             })
             .unwrap();
         assert_eq!(store.library().unwrap().unwrap().id, "b");
+        assert_eq!(store.saved_folders().unwrap().len(), 2);
+        store.select_folder("a").unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.library().unwrap().unwrap().root, "/missing/a");
+        assert_eq!(
+            store.library_by_id("b").unwrap().unwrap().root,
+            "/missing/b"
+        );
+        assert!(store.select_folder("unknown").is_err());
+        assert_eq!(store.library().unwrap().unwrap().id, "a");
+        let mut a = store.library().unwrap().unwrap();
+        a.warnings.push("refreshed".into());
+        store.save_library(&a).unwrap();
+        assert_eq!(store.saved_folders().unwrap().len(), 2);
+        assert!(
+            store
+                .library_by_id("b")
+                .unwrap()
+                .unwrap()
+                .warnings
+                .is_empty()
+        );
+        store.save_library(&Library::default()).unwrap();
+        store.save_library(&demo_library()).unwrap();
+        assert_eq!(store.library().unwrap().unwrap().warnings, ["refreshed"]);
+    }
+    #[test]
+    fn legacy_library_migrates_without_losing_preferences_or_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let store = Store::open(&path).unwrap();
+        let legacy = Library {
+            id: "old".into(),
+            root: "/offline/music".into(),
+            ..Library::default()
+        };
+        store.put("library", &legacy).unwrap();
+        let preferences = Preferences {
+            reduced_motion: true,
+            ..Preferences::default()
+        };
+        store.save_preferences(&preferences).unwrap();
+        store
+            .0
+            .execute(
+                "INSERT INTO metadata_http VALUES ('test','response',123)",
+                [],
+            )
+            .unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.library().unwrap().unwrap().id, "old");
+        assert_eq!(store.saved_folders().unwrap().len(), 1);
+        assert!(store.preferences().unwrap().reduced_motion);
+        assert!(store.get::<Library>("library").unwrap().is_none());
+        assert_eq!(
+            store
+                .0
+                .query_row(
+                    "SELECT value FROM metadata_http WHERE key='test'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
+            "response"
+        );
+        drop(store);
+        assert_eq!(
+            Store::open(&path).unwrap().saved_folders().unwrap().len(),
+            1
+        );
     }
     #[test]
     fn unavailable_root_does_not_become_empty_library() {

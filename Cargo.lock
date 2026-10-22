@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "amp-audio"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "amp-core",
  "anyhow",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "amp-collector"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "amp-audio",
  "amp-core",
@@ -246,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "amp-core"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "amp-library"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "amp-core",
  "anyhow",
@@ -7510,7 +7510,7 @@ dependencies = [
 
 [[package]]
 name = "trash-amp"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 dependencies = [
  "amp-audio",
  "amp-collector",
