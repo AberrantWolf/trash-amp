@@ -43,6 +43,7 @@ fn command() -> CommandContext {
 }
 pub struct Fixture {
     _root: tempfile::TempDir,
+    _local: collector_server::local_playback::Runtime,
     _state: collector_server::AppState,
     pub pairing: Pairing,
     pub owner: Principal,
@@ -256,6 +257,12 @@ impl Fixture {
         state.service.run_next_job("fixture-flac").unwrap();
         let stop = axum_server::Handle::new();
         let handle = stop.clone();
+        let local =
+            collector_server::local_playback::start(&mut state, "127.0.0.1:0".parse().unwrap())
+                .await
+                .unwrap();
+        state.direct_media = false;
+        state.remote_media_allowed = false;
         let app = collector_server::router(state.clone());
         let task = tokio::spawn(async move {
             axum_server::from_tcp_rustls(listener, config)
@@ -267,6 +274,7 @@ impl Fixture {
         });
         Self {
             _root: root,
+            _local: local,
             _state: state,
             pairing,
             owner,
@@ -422,6 +430,7 @@ async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
             collection,
             list: None,
             create: Some(api::CreateCollectionList {
+                kind: None,
                 name: "Road music".into(),
             }),
             update: None,

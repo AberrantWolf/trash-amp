@@ -9,7 +9,7 @@ amp-audio.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-collector-client = { git = "https://github.com/AberrantWolf/junk-collector", rev = "201085448cbd727bd04f60275e47431c2c7dd3bd" }
+collector-client = { git = "https://github.com/AberrantWolf/junk-collector", rev = "14d56ab4cceaf82c09086d56d987484bab46d618" }
 rusqlite = { version = "0.33", features = ["bundled"] }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
 keyring = { version = "3", features = ["apple-native"] }
@@ -19,10 +19,10 @@ hex = "0.4"
 fs2 = "0.4"
 [dev-dependencies]
 tempfile = "3"
-collector-server = { git = "https://github.com/AberrantWolf/junk-collector", rev = "201085448cbd727bd04f60275e47431c2c7dd3bd" }
-collector-store = { git = "https://github.com/AberrantWolf/junk-collector", rev = "201085448cbd727bd04f60275e47431c2c7dd3bd" }
-collector-app = { git = "https://github.com/AberrantWolf/junk-collector", rev = "201085448cbd727bd04f60275e47431c2c7dd3bd" }
-collector-providers = { git = "https://github.com/AberrantWolf/junk-collector", rev = "201085448cbd727bd04f60275e47431c2c7dd3bd" }
+collector-server = { git = "https://github.com/AberrantWolf/junk-collector", rev = "14d56ab4cceaf82c09086d56d987484bab46d618" }
+collector-store = { git = "https://github.com/AberrantWolf/junk-collector", rev = "14d56ab4cceaf82c09086d56d987484bab46d618" }
+collector-app = { git = "https://github.com/AberrantWolf/junk-collector", rev = "14d56ab4cceaf82c09086d56d987484bab46d618" }
+collector-providers = { git = "https://github.com/AberrantWolf/junk-collector", rev = "14d56ab4cceaf82c09086d56d987484bab46d618" }
 rcgen = "0.13"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 chrono = "0.4"

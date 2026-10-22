@@ -658,6 +658,7 @@ impl Controller {
                         collection,
                         list: list.map(|l| l.list.id),
                         create: (verb == 0).then(|| api::CreateCollectionList {
+                            kind: None,
                             name: ui.get_list_name().to_string(),
                         }),
                         update: change.map(|change| api::UpdateCollectionList {

@@ -145,3 +145,16 @@ sibling Collector checkout. Those generated fixtures now live under
 acceptance example self-contained. The isolated gates passed after this repair.
 Every candidate tracked file was compared with the isolated checked source;
 alpha packaging and unrelated release changes remain outside this commit.
+
+## Automatic private Collector playback — 2026-10-22
+
+The full workspace tests and `cargo clippy --workspace --all-targets -- -D warnings`
+pass against Collector Git pin `14d56ab4cceaf82c09086d56d987484bab46d618`, with
+`cargo fmt --all -- --check` clean. No local path patches are checked in or needed.
+The real-server integration fixture disables media on the enrolled control URL
+and starts a separate automatically trusted private media listener. Actual FLAC
+decoding, seeking, explicit downloads, revocation, retained cache and offline
+playback pass. Existing server/account/cache keys are retained. Hardware-audio,
+new-build NAS/work-Mac deployment and managed-VPN qualification remain distinct;
+these tests do not establish zero WAN traffic for arbitrary private OS routes.
+See [the connection contract](collector-connection.md#automatic-private-playback--2026-10-22).

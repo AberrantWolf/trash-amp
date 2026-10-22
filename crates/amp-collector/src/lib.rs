@@ -1001,6 +1001,9 @@ impl amp_audio::MediaResolver for Adapter {
                     .unwrap_or_else(|| amp_audio::MediaHint::new(Some(length), None, None)),
             ));
         }
+        // The shared client discovers and pins media-only private routes through
+        // the enrolled control connection. Keep this account/cache key unchanged;
+        // an unavailable LAN route must never become a public media retry.
         let client = self.client(remote.key)?;
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1216,6 +1219,7 @@ mod tests {
             collection: ids::CollectionId::new(),
             list: None,
             create: Some(api::CreateCollectionList {
+                kind: None,
                 name: "Original".into(),
             }),
             update: None,

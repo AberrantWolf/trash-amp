@@ -74,3 +74,31 @@ Descriptive artist/queue captions keep immutable source IDs internal. Credential
 removal runs on a worker with a visible pending state, so an OS Keychain wait does
 not stall the UI. Temporary profiles and servers were used throughout. Broader
 LAN/device-loss/revocation qualification remains in Collector's HL-04 queue.
+
+## Automatic private playback — 2026-10-22
+
+Collector's authenticated control connection now supplies private media endpoints
+and short-lived certificate pins to the shared native client. Both streaming and
+explicit downloads use this discovery through `media_reader`; playback does not
+replace the enrolled server/account or change offline-cache identities. No OS
+certificate import, private DNS, manual LAN URL or listener-side setup is needed.
+The server operator must allow the media listener's TCP/UDP port on their private
+network (default 9845); it is media-only and is not a management listener.
+
+Only a pinned listener reporting the enrolled server identity receives the native
+credential. Every range checks current authorization. Connection failure refreshes
+routes and retries the same immutable range once; changed validators, denied
+access and cancellation stop playback. The server's explicit media policy controls
+fallback; the current default disables public media fallback. Already downloaded
+tracks retain the existing offline behavior. Generic reachable private addresses
+may work over an existing OS route, but no overlay provider is inspected or managed.
+
+The prior `collector-lan` URL is a personal stopgap, not automatic detection. Real
+TLS integration fixtures now disable media on the control origin and exercise the
+actual FLAC decoder, seeks, downloads, revocation and retained offline playback
+through a distinct automatically trusted private listener.
+
+The delivery pins Collector client/server source `14d56ab4cceaf82c09086d56d987484bab46d618`.
+The new server and client builds must be installed together; the production NAS
+and work Mac are not changed by this source delivery. Initial private-route
+discovery needs the normal control connection; retained downloads work offline.
