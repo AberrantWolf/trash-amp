@@ -21,8 +21,8 @@ Record validation results, hardware, macOS version and the exact tested commit i
 
 ## Required before public beta publication
 
-- [ ] Pass formatting, strict all-target Clippy, workspace tests, release-version tests, packaging and extracted-package verification for the beta commit in CI. Local beta-candidate checks passed on 2026-10-23; see [the validation record](validation.md#beta-release-preparation--2026-10-23). CI qualification remains pending.
-- [ ] Run a signed manual candidate and confirm notary-service access, Apple's acceptance, stapling and extracted-package Gatekeeper verification. Initial validation is blocked by Apple's HTTP 403 agreement requirement; the Account Holder has accepted the pending agreement and a retry is required.
+- [x] Pass formatting, strict all-target Clippy, workspace tests, release-tooling tests, packaging and extracted-package verification in CI. [Signed candidate run 39885698740](https://github.com/AberrantWolf/trash-amp/actions/runs/39885698740) passed on `554e77a`: 53 Rust tests (two opt-in tests skipped) and 15 release-tooling tests. The release tag must repeat these checks for its final commit.
+- [x] Run a signed manual candidate and confirm Apple's acceptance, stapling and extracted-package Gatekeeper verification. Apple accepted submission `a835f3f1-ce2b-4043-bdb7-d6f8a1c95b7a` with no issues; both the hosted runner and this Mac verified the downloaded package as Notarized Developer ID. See [the signed validation record](validation.md#completed-signed-candidate--2026-10-23).
 - [ ] Verify first launch of the downloaded, Developer ID-signed and notarized package on another Mac. Local signing validation alone does not complete this gate.
 - [ ] Verify clean installation and upgrade with existing preferences, saved folders, Collector credentials, lists, downloads and artwork. Retest Keychain behavior using the final signing identity, including connection removal and offline reopen.
 - [ ] Qualify output-device loss/change, USB/Bluetooth reconnect, sleep/wake and playback after resume. Resolve the current restart-required device-failure behavior and verify that errors leave the UI responsive.

@@ -184,9 +184,10 @@ This is local packaging evidence, not separate-Mac or minimum-OS acceptance.
   metadata is short version `0.1.0`, build `2.1`, full version `0.1.0-beta.1` and
   minimum OS `15.0`; the archive filename must match the embedded full version.
 
-No tag, remote draft or published release was created. Developer ID signing,
-notarization, CI on the final commit, upgrade/Keychain checks and the remaining
-native beta acceptance gates in [the checklist](release-gates.md) remain open.
+At this initial preparation stage no tag, remote draft or published release had
+been created. Developer ID signing, notarization, CI on the final commit,
+upgrade/Keychain checks and the remaining native beta acceptance gates were open;
+later records below document progress against [the checklist](release-gates.md).
 
 ## Shared team signing credentials — 2026-10-23
 
@@ -222,7 +223,7 @@ values cannot be retrieved through GitHub's API, so they have not been copied.
 The GitHub owner is a personal account: configure copies of the same team
 credentials in each repository, or use organization secrets if the repositories
 later move to an organization. Setup is in [the release guide](macos-release.md).
-Actual Apple notarization/stapling and a signed Actions run remain pending;
+At that point Apple notarization/stapling and a signed Actions run remained pending;
 stubbed tests and successful Developer ID signing do not establish acceptance by
 Apple's notary service. No release was published.
 
@@ -251,3 +252,51 @@ passed on the same candidate: formatting, 11 release-tooling tests, strict
 all-target Clippy, 53 Rust tests (two existing opt-in tests skipped), optimized
 development packaging and extracted-ZIP verification. This run deliberately
 used ad-hoc signing, so its success does not qualify notarization.
+
+After the Account Holder confirmed the correct team, active membership and no
+remaining agreements, attempt 4 of the signed run validated the notarization
+credentials successfully. It then exposed a runner-only signing failure: the
+imported temporary keychain was absent from the user search list, which
+`codesign` still consults with `--keychain`. Import now preserves and extends that
+list; cleanup restores it. A regression test covers both adding the keychain and
+restoring paths containing spaces, bringing release-tooling coverage to 12 tests.
+Candidate `442187d735c13d16a0b2c2b4cd53360e741ab57c` was validated in
+[signed run 39884812620](https://github.com/AberrantWolf/trash-amp/actions/runs/39884812620).
+Developer ID signing, Hardened Runtime and timestamps passed. Apple accepted
+submission `b50b781c-d396-4f5b-aaa0-0b22cbdbe902`; its result was downloaded and
+confirmed as `Accepted`. Stapling then failed with error 68 after Apple's
+CloudKit ticket-delivery connection was lost. Bounded retries for transient
+ticket-service errors and retention of the signed submission ZIP were added,
+with regression tests for recovery, exhaustion and invalid-ticket rejection.
+All 15 release-tooling tests passed locally before the final signed ZIP validation
+recorded below.
+
+## Completed signed candidate — 2026-10-23
+
+[Signed Actions run 39885698740](https://github.com/AberrantWolf/trash-amp/actions/runs/39885698740)
+passed for candidate `554e77a64beb2fa1433354674a5dbafa210add19`, using the configured
+team credentials on the Apple Silicon macOS 15 runner. Formatting, strict
+all-target Clippy, 53 Rust tests (two opt-in tests skipped), all 15 release-tooling
+tests, optimized packaging and extracted-package verification passed. Temporary
+signing-keychain cleanup also passed.
+
+Apple accepted submission `a835f3f1-ce2b-4043-bdb7-d6f8a1c95b7a`; the retained
+notary log reports `Ready for distribution`, status code 0 and `issues: null`.
+Developer ID/Hardened Runtime/timestamp checks, stapling, ticket validation and
+Gatekeeper assessment passed on both the staged bundle and extracted final ZIP.
+Gatekeeper reported `source=Notarized Developer ID`. The successful run did not
+need to exercise the transient ticket-delivery retry.
+
+Downloaded the exact `macos-arm64-prerelease` Actions artifact to
+`target/dist/signed-ci` and ran the signed verifier locally on arm64 macOS 26.6.2.
+Checksum, metadata, architecture, notices, signature, stapled ticket, Gatekeeper,
+system-only dynamic dependencies and `--help` all passed. The distribution ZIP
+SHA-256 is `18d23eb51ab273a1e570602979caddf528873797b66614577e32a3a14659cd66`.
+The diagnostic artifact also retains the exact signed submission ZIP, Apple's
+submission result and full notary log for recovery/audit.
+
+The prior agreement restriction cleared without changing credentials after the
+Account Holder accepted the pending agreement and confirmed membership/team
+state. First launch on another Mac, minimum-OS and upgrade/Keychain/native audio
+acceptance remain separate beta gates. No beta tag or published release was
+created; the changes remain in draft PR #1.

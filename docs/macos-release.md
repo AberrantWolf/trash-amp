@@ -75,9 +75,19 @@ signing and notarization. A nonempty `RELEASE_TAG` always requires Developer ID
 signing and notarization, even without `--signed`. Missing credentials, signature
 failure, a rejected/timed-out submission, failed stapling or Gatekeeper rejection
 stop packaging. The final ZIP and checksum are generated after stapling.
-Submission results and rejection logs are retained in `target/notarization/<version>`;
-a timeout may leave a submission processing at Apple, so inspect its ID/status
-before resubmitting.
+The signed submission ZIP, submission result and Apple's log are retained in
+`target/notarization/<version>` and uploaded as the `macos-notarization` Actions
+artifact. Apple's log is requested for successful submissions as well as failures.
+A timeout may leave a submission processing at Apple, so inspect its ID/status
+before resubmitting. The submission ZIP is a recovery artifact; the distribution
+ZIP additionally contains release notes and the stapled ticket.
+
+`scripts/staple-macos.sh APP` retries ticket-service errors 68, 69 and 75 up to
+three times, with 10-second delays, then validates the ticket and Gatekeeper
+assessment. Invalid or revoked tickets fail immediately. If ticket delivery
+fails after Apple accepted the submission, the retained ZIP can be extracted and
+this helper rerun on the exact signed app without rebuilding or uploading it
+again. Recreate the distribution archive/checksum only after stapling succeeds.
 
 ### GitHub repository secrets
 
@@ -110,7 +120,10 @@ Set the remaining secrets through the repository UI or the same interactive
 `gh secret set` command. The workflow imports credentials only for tags or an
 explicit signed manual run, validates that the certificate matches the notary
 team, and stores notarization credentials in an isolated temporary keychain.
-Cleanup runs after success or failure. PR/main builds receive no signing secrets.
+The keychain is temporarily added to the runner's search list so `codesign` can
+resolve the identity and certificate chain. Cleanup restores the original search
+list and removes the temporary keychain after success or failure. PR/main builds
+receive no signing secrets.
 
 ### Apple account access failures
 
