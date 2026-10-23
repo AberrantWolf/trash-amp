@@ -91,8 +91,8 @@ jobs:
         if: always() && env.REQUIRE_MACOS_NOTARIZATION == 'true'
         run: ./scripts/cleanup-macos-signing.sh
 
-  draft-release:
-    name: Prepare draft prerelease
+  release:
+    name: Publish prerelease
     if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: build
     runs-on: ubuntu-latest
@@ -107,18 +107,9 @@ jobs:
       - name: Verify checksums
         working-directory: dist
         run: sha256sum --check *.sha256
-      - name: Create or update the draft
+      - name: Publish the verified prerelease
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          notes="docs/releases/${RELEASE_TAG#v}.md"
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
-            gh release edit "$RELEASE_TAG" --prerelease --notes-file "$notes"
-            gh release upload "$RELEASE_TAG" dist/*.zip dist/*.sha256 --clobber
-          else
-            gh release create "$RELEASE_TAG" dist/*.zip dist/*.sha256 \
-              --verify-tag --draft --prerelease --title "Trash Amp $RELEASE_TAG" --notes-file "$notes"
-          fi
+        run: ./scripts/publish-prerelease.sh "$RELEASE_TAG" dist
