@@ -59,6 +59,7 @@ The initial build downloads Slint/Skia dependencies and can take several minutes
 - Desktop single-click selection, double-click/hover-button playback, and a current-track marker.
 - Space to play/pause and Left/Right to go previous/next when browsing. Focused controls retain their native keyboard behavior; Enter plays a selected track. Previous restarts after three seconds.
 - OS media keys and Now Playing metadata through Souvlaki (macOS integrated; Windows/Linux still need platform validation).
+- Audio-output recovery preserves the queue and playback position, pauses on device loss or a default-output change, and reconnects in the background. Press Play to resume; an explicit Play request while disconnected is retained.
 - File discovery counts and scan progress, with four parallel tag readers and artwork skipped to reduce network traffic.
 
 Beta qualification is still in progress. The library scan currently refreshes a complete snapshot; incremental per-file caching, progressive filesystem results, filesystem artwork, text marquee, and FFT visualization are not implemented yet.

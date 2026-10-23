@@ -300,3 +300,43 @@ Account Holder accepted the pending agreement and confirmed membership/team
 state. First launch on another Mac, minimum-OS and upgrade/Keychain/native audio
 acceptance remain separate beta gates. No beta tag or published release was
 created; the changes remain in draft PR #1.
+
+## Output-device recovery — 2026-10-23
+
+[PR #1](https://github.com/AberrantWolf/trash-amp/pull/1) was squash-merged as
+`fef50fc4a91d802cee51267a8a236a6e93a8b04f`. Recovery implementation
+`33b27840c2faba4751b6b219f5254be4ffb837f3` was tested on arm64 macOS 26.6.2,
+using pinned Rust 1.95.0. No release tag or published release was created.
+
+- `cargo test --workspace --locked` passed: 63 tests, with the two existing
+  opt-in tests skipped. The audio crate has 15 passing tests, including ten new
+  recovery cases that use the production worker, decoder and render callback
+  with a controllable device backend. They cover failed/stalled streams,
+  default-output changes, callback position versus decoder read-ahead, retained
+  queue and exact resumed PCM, changed sample rates, seeks and queue edits with
+  no output, pending Play/Pause, clearing stale audio, retired callbacks, retry
+  backoff, and responsive transport/drop during blocked device setup.
+- Strict locked all-target Clippy, formatting and whitespace checks passed.
+- The actual CoreAudio silence probe advanced to 1.024 seconds with zero
+  callback underruns. The separately invoked real-server hardware test passed
+  for both FLAC and MP3: peaks 0.088371746 and 0.08895567, each beyond 0.021333
+  seconds. These establish callback output, not captured fidelity or gapless
+  qualification.
+- Both invocations of that optional hardware test printed a background
+  `Endpoint cannot be closed` panic during fixture shutdown, although the test
+  returned success after both playback assertions. A backtrace identifies the
+  pinned Collector server's private WebTransport accept loop at
+  `local_playback.rs:184` calling wtransport's `Endpoint::accept`. This is a
+  fixture/server teardown limitation; it is recorded rather than treated as a
+  clean server-shutdown result. The ordinary workspace integration tests passed.
+
+Device loss or a default-output/configuration change pauses playback, resets the
+level meter, retains the last callback position and queue, and reopens the
+system-default output on the audio worker. Reconnection stays paused unless an
+explicit Play request was made while disconnected. Failed opens retry once per
+second; callbacks stalled for three seconds also trigger recovery. No source
+decoding or device opening is performed on the UI thread.
+
+Physical USB/Bluetooth removal/reconnect, repeated output changes, differing
+hardware sample rates and sleep/wake still require native-app qualification in
+the extracted final package. The corresponding beta gate remains unchecked.

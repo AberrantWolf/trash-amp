@@ -1,7 +1,6 @@
 //! Streaming PCM pipeline. Only bounded ring-buffer reads and atomics run in the device callback.
 use amp_core::{MediaAccess, Track};
 use anyhow::{Context, Result, bail};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use junk_libs_audio::{
     AudioDecoder, CuePcmDecoder, FramePosition, PcmChunk, PcmFormat, RedumperPcmDecoder,
     SincResampler, WavDecoder,
@@ -24,8 +23,12 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
 };
+
+mod output;
+#[cfg(test)]
+mod recovery_tests;
+mod worker;
 
 #[derive(Clone, Copy, Default)]
 struct Frame {
@@ -43,9 +46,26 @@ struct Shared {
     level: AtomicU32,
     underruns: AtomicU64,
     shutdown: AtomicBool,
-    device_failed: AtomicBool,
+    sample_rate: AtomicU32,
+    output_state: AtomicUsize,
 }
+/// Availability of the current system-default output. Recovery never starts audio on its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OutputState {
+    #[default]
+    Connecting,
+    Ready,
+    Unavailable,
+}
+
+pub enum PlayerEvent {
+    OutputUnavailable(String),
+    OutputRecovered,
+    PlaybackError(String),
+}
+
 pub struct Snapshot {
+    pub output: OutputState,
     pub playing: bool,
     pub track: usize,
     pub seconds: f64,
@@ -54,7 +74,9 @@ pub struct Snapshot {
 }
 enum Command {
     Replace(Vec<Track>, usize),
-    Seek(u64),
+    Seek(f64),
+    Toggle,
+    SetPlaying(bool),
     Next,
     Previous,
     Append(Vec<Track>),
@@ -69,47 +91,40 @@ pub struct Player {
     resolver: Option<Arc<dyn MediaResolver>>,
     commands: mpsc::Sender<Command>,
     shared: Arc<Shared>,
-    errors: mpsc::Receiver<String>,
-    _stream: cpal::Stream,
-    rate: u32,
+    events: mpsc::Receiver<PlayerEvent>,
 }
 impl Player {
+    /// Starts the audio worker. Output availability and recovery are reported asynchronously.
     pub fn new() -> Result<Self> {
         Self::with_resolver(None)
     }
     pub fn with_resolver(resolver: Option<Arc<dyn MediaResolver>>) -> Result<Self> {
-        let device = cpal::default_host()
-            .default_output_device()
-            .context("No audio output device")?;
-        let supported = device.default_output_config()?;
-        let format = supported.sample_format();
-        let config: cpal::StreamConfig = supported.into();
-        let rate = config.sample_rate;
-        let shared = Arc::new(Shared::default());
-        let (producer, consumer) = rtrb::RingBuffer::<Frame>::new(rate as usize / 2);
-        let stream = match format {
-            cpal::SampleFormat::F32 => output::<f32>(&device, &config, consumer, shared.clone())?,
-            cpal::SampleFormat::I16 => output::<i16>(&device, &config, consumer, shared.clone())?,
-            cpal::SampleFormat::I32 => output::<i32>(&device, &config, consumer, shared.clone())?,
-            cpal::SampleFormat::U16 => output::<u16>(&device, &config, consumer, shared.clone())?,
-            other => bail!("Unsupported output sample format: {other}"),
-        };
-        stream.play()?;
+        Self::spawn(resolver, output::CpalBackend).map(|(player, _worker)| player)
+    }
+    fn spawn<B: output::Backend>(
+        resolver: Option<Arc<dyn MediaResolver>>,
+        backend: B,
+    ) -> Result<(Self, thread::JoinHandle<()>)> {
+        let shared = Arc::new(Shared {
+            sample_rate: AtomicU32::new(44_100),
+            ..Shared::default()
+        });
         let (commands, rx) = mpsc::channel();
-        let (tx, errors) = mpsc::channel();
+        let (tx, events) = mpsc::channel();
         let state = shared.clone();
         let worker_resolver = resolver.clone();
-        thread::Builder::new()
+        let worker = thread::Builder::new()
             .name("amp-decode".into())
-            .spawn(move || worker(rx, tx, producer, state, rate, worker_resolver))?;
-        Ok(Self {
-            resolver,
-            commands,
-            shared,
-            errors,
-            _stream: stream,
-            rate,
-        })
+            .spawn(move || worker::run(rx, tx, state, worker_resolver, backend))?;
+        Ok((
+            Self {
+                resolver,
+                commands,
+                shared,
+                events,
+            },
+            worker,
+        ))
     }
     pub fn play(&self, tracks: Vec<Track>, start: usize) {
         if let Some(resolver) = &self.resolver {
@@ -118,18 +133,16 @@ impl Player {
         let _ = self.commands.send(Command::Replace(tracks, start));
     }
     pub fn toggle(&self) {
-        self.shared.playing.fetch_xor(true, Ordering::Relaxed);
+        let _ = self.commands.send(Command::Toggle);
+    }
+    pub fn set_playing(&self, playing: bool) {
+        let _ = self.commands.send(Command::SetPlaying(playing));
     }
     pub fn seek(&self, seconds: f64) {
         if let Some(resolver) = &self.resolver {
             resolver.cancel();
         }
-        let frame = if seconds.is_finite() {
-            (seconds.max(0.0) * f64::from(self.rate)).round() as u64
-        } else {
-            0
-        };
-        let _ = self.commands.send(Command::Seek(frame));
+        let _ = self.commands.send(Command::Seek(seconds));
     }
     pub fn next(&self) {
         if let Some(resolver) = &self.resolver {
@@ -156,19 +169,33 @@ impl Player {
     }
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
+            output: match self.shared.output_state.load(Ordering::Acquire) {
+                1 => OutputState::Ready,
+                2 => OutputState::Unavailable,
+                _ => OutputState::Connecting,
+            },
             playing: self.shared.playing.load(Ordering::Relaxed),
             track: self.shared.track.load(Ordering::Relaxed),
-            seconds: self.shared.position.load(Ordering::Relaxed) as f64 / self.rate as f64,
+            seconds: self.shared.position.load(Ordering::Relaxed) as f64
+                / f64::from(self.shared.sample_rate.load(Ordering::Acquire).max(1)),
             level: f32::from_bits(self.shared.level.load(Ordering::Relaxed)),
             underruns: self.shared.underruns.load(Ordering::Relaxed),
         }
     }
     pub fn error(&self) -> Option<String> {
-        if self.shared.device_failed.swap(false, Ordering::Relaxed) {
-            Some("Audio device disconnected or failed. Restart the player to reopen output.".into())
-        } else {
-            self.errors.try_recv().ok()
+        while let Some(event) = self.event() {
+            match event {
+                PlayerEvent::OutputUnavailable(error) | PlayerEvent::PlaybackError(error) => {
+                    return Some(error);
+                }
+                PlayerEvent::OutputRecovered => {}
+            }
         }
+        None
+    }
+    /// Poll either events or errors; both consume the same notification queue.
+    pub fn event(&self) -> Option<PlayerEvent> {
+        self.events.try_recv().ok()
     }
 }
 impl Drop for Player {
@@ -178,65 +205,6 @@ impl Drop for Player {
         }
         self.shared.shutdown.store(true, Ordering::Relaxed);
     }
-}
-fn output<T: cpal::SizedSample + cpal::FromSample<f32>>(
-    device: &cpal::Device,
-    config: &cpal::StreamConfig,
-    mut consumer: rtrb::Consumer<Frame>,
-    shared: Arc<Shared>,
-) -> Result<cpal::Stream> {
-    let channels = config.channels as usize;
-    let errors = shared.clone();
-    Ok(device.build_output_stream(
-        *config,
-        move |data: &mut [T], _| {
-            let generation = shared.generation.load(Ordering::Acquire);
-            // Discard only the finite old ring; seeking cannot replay stale samples, even while paused.
-            while consumer.peek().is_ok_and(|f| f.generation != generation) {
-                let _ = consumer.pop();
-            }
-            let mut peak = 0.0f32;
-            let mut starved = false;
-            for output in data.chunks_mut(channels) {
-                let frame = if shared.playing.load(Ordering::Relaxed) {
-                    match consumer.pop() {
-                        Ok(f) if f.generation == generation => {
-                            shared.track.store(f.track, Ordering::Relaxed);
-                            shared.position.store(f.position, Ordering::Relaxed);
-                            Some(f)
-                        }
-                        _ => {
-                            starved = true;
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-                let samples = frame.map(|f| f.samples).unwrap_or_default();
-                peak = peak.max(samples[0].abs()).max(samples[1].abs());
-                for (channel, sample) in output.iter_mut().enumerate() {
-                    let value = if channels == 1 {
-                        (samples[0] + samples[1]) * 0.5
-                    } else {
-                        samples.get(channel).copied().unwrap_or(0.0)
-                    };
-                    *sample = T::from_sample(value);
-                }
-            }
-            shared
-                .level
-                .store(peak.min(1.0).to_bits(), Ordering::Relaxed);
-            if starved {
-                shared.underruns.fetch_add(1, Ordering::Relaxed);
-            }
-        },
-        move |_| {
-            errors.device_failed.store(true, Ordering::Relaxed);
-            errors.playing.store(false, Ordering::Relaxed);
-        },
-        None,
-    )?)
 }
 
 enum Source {
@@ -520,213 +488,11 @@ impl Converted {
         }
     }
 }
-fn worker(
-    rx: mpsc::Receiver<Command>,
-    errors: mpsc::Sender<String>,
-    mut producer: rtrb::Producer<Frame>,
-    shared: Arc<Shared>,
-    rate: u32,
-    resolver: Option<Arc<dyn MediaResolver>>,
-) {
-    let mut tracks: Vec<Track> = vec![];
-    let mut index = 0;
-    let mut reader: Option<Converted> = None;
-    let mut position = 0;
-    let mut generation = 0;
-    let mut pending = None;
-    let mut exhausted = true;
-    while !shared.shutdown.load(Ordering::Relaxed) {
-        while let Ok(command) = rx.try_recv() {
-            let mut requested_frame = 0;
-            let mut reset = true;
-            match command {
-                Command::Replace(t, start) => {
-                    if t.is_empty() {
-                        tracks.clear();
-                        index = 0;
-                        shared.playing.store(false, Ordering::Relaxed);
-                        exhausted = true;
-                        continue;
-                    }
-                    let mut policy = QueueState::new();
-                    let transition = match policy.replace(queue_tracks(&t, rate, None), start) {
-                        Ok(transition) => transition,
-                        Err(error) => {
-                            let _ = errors.send(error.to_string());
-                            continue;
-                        }
-                    };
-                    tracks = t;
-                    index = transition
-                        .position
-                        .expect("replacement has a track")
-                        .track_key;
-                    shared.playing.store(true, Ordering::Relaxed);
-                }
-                Command::Seek(s) => {
-                    let mut policy = match restore_audible_queue(&tracks, &shared, rate, generation)
-                    {
-                        Ok(policy) => policy,
-                        Err(error) => {
-                            let _ = errors.send(error.to_string());
-                            continue;
-                        }
-                    };
-                    let transition = match policy.seek(Generation(generation), s) {
-                        Ok(transition) => transition,
-                        Err(error) => {
-                            let _ = errors.send(error.to_string());
-                            continue;
-                        }
-                    };
-                    let position = transition.position.expect("seek retains current track");
-                    index = position.track_key;
-                    requested_frame = position.frame;
-                }
-                Command::Next => {
-                    let mut policy = match restore_audible_queue(&tracks, &shared, rate, generation)
-                    {
-                        Ok(policy) => policy,
-                        Err(error) => {
-                            let _ = errors.send(error.to_string());
-                            continue;
-                        }
-                    };
-                    index = policy
-                        .next_track()
-                        .ok()
-                        .and_then(|transition| transition.position)
-                        .map_or(tracks.len(), |position| position.track_key);
-                }
-                Command::Previous => {
-                    let mut policy = match restore_audible_queue(&tracks, &shared, rate, generation)
-                    {
-                        Ok(policy) => policy,
-                        Err(error) => {
-                            let _ = errors.send(error.to_string());
-                            continue;
-                        }
-                    };
-                    let transition = match policy.previous_track() {
-                        Ok(transition) => transition,
-                        Err(error) => {
-                            let _ = errors.send(error.to_string());
-                            continue;
-                        }
-                    };
-                    index = transition.position.expect("previous has a track").track_key;
-                }
-                Command::Truncate(len) => {
-                    let mut policy = match restore_audible_queue(&tracks, &shared, rate, generation)
-                    {
-                        Ok(policy) => policy,
-                        Err(error) => {
-                            let _ = errors.send(error.to_string());
-                            continue;
-                        }
-                    };
-                    let transition = match policy.truncate(len) {
-                        Ok(transition) => transition,
-                        Err(error) => {
-                            let _ = errors.send(error.to_string());
-                            continue;
-                        }
-                    };
-                    tracks.truncate(len);
-                    if let Some(position) = transition.position {
-                        index = position.track_key;
-                        requested_frame = position.frame;
-                    } else {
-                        index = tracks.len();
-                    }
-                }
-                Command::Append(t) => {
-                    tracks.extend(t);
-                    reset = false;
-                    if exhausted && index < tracks.len() {
-                        exhausted = false;
-                    }
-                }
-            }
-            if reset {
-                generation += 1;
-                shared.generation.store(generation, Ordering::Release);
-                shared.track.store(index, Ordering::Relaxed);
-                position = requested_frame;
-                shared.position.store(position, Ordering::Relaxed);
-                pending = None;
-                reader = None;
-                exhausted = false;
-                if let Some(track) = tracks.get(index) {
-                    match Converted::new(track, requested_frame, rate, resolver.as_deref()) {
-                        Ok(r) => reader = Some(r),
-                        Err(e) => {
-                            let _ = errors.send(format!("{}: {e:#}", track.title));
-                            shared.playing.store(false, Ordering::Relaxed);
-                            exhausted = true;
-                        }
-                    }
-                }
-            }
-        }
-        if !exhausted && reader.is_none() && pending.is_none() {
-            if let Some(track) = tracks.get(index) {
-                match Converted::new(track, 0, rate, resolver.as_deref()) {
-                    Ok(r) => reader = Some(r),
-                    Err(e) => {
-                        let _ = errors.send(format!("{}: {e:#}", track.title));
-                        exhausted = true;
-                        shared.playing.store(false, Ordering::Relaxed);
-                    }
-                }
-            } else {
-                exhausted = true;
-            }
-        }
-        if exhausted || !shared.playing.load(Ordering::Relaxed) || producer.slots() == 0 {
-            if exhausted && producer.slots() == producer.buffer().capacity() {
-                shared.playing.store(false, Ordering::Relaxed);
-            }
-            thread::sleep(Duration::from_millis(3));
-            continue;
-        }
-        if pending.is_none()
-            && let Some(r) = reader.as_mut()
-        {
-            match r.next() {
-                Ok(Some(samples)) => {
-                    pending = Some(Frame {
-                        samples,
-                        generation,
-                        track: index,
-                        position,
-                    });
-                    position += 1;
-                }
-                Ok(None) => {
-                    index += 1;
-                    position = 0;
-                    reader = None;
-                }
-                Err(e) => {
-                    let _ = errors.send(format!("Playback stopped: {e:#}"));
-                    exhausted = true;
-                    shared.playing.store(false, Ordering::Relaxed);
-                }
-            }
-        }
-        if let Some(frame) = pending.take()
-            && let Err(rtrb::PushError::Full(f)) = producer.push(frame)
-        {
-            pending = Some(f);
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fixture(rate: u32, frames: u32) -> (tempfile::TempDir, Track) {
+    pub(super) fn fixture(rate: u32, frames: u32) -> (tempfile::TempDir, Track) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.wav");
         let mut w = hound::WavWriter::create(
@@ -788,35 +554,6 @@ mod tests {
                 assert!(count <= 192000);
             }
             assert_eq!(count, (frames as f64 * 48000.0 / 44100.0).round() as u32);
-        }
-    }
-    #[test]
-    fn worker_joins_tracks_without_dropping_or_repeating_frames() {
-        let (_dir, t) = fixture(44100, 1176);
-        let (tx, rx) = mpsc::channel();
-        let (errors, err_rx) = mpsc::channel();
-        let (producer, mut consumer) = rtrb::RingBuffer::new(4096);
-        let shared = Arc::new(Shared::default());
-        let state = shared.clone();
-        let thread = thread::spawn(move || worker(rx, errors, producer, state, 44100, None));
-        tx.send(Command::Replace(vec![t.clone(), t], 0)).unwrap();
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        let mut frames = Vec::new();
-        while frames.len() < 2352 && std::time::Instant::now() < deadline {
-            if let Ok(frame) = consumer.pop() {
-                frames.push(frame);
-            } else {
-                thread::sleep(Duration::from_millis(1));
-            }
-        }
-        shared.shutdown.store(true, Ordering::Relaxed);
-        thread.join().unwrap();
-        assert!(err_rx.try_recv().is_err());
-        assert_eq!(frames.len(), 2352);
-        for (i, f) in frames.iter().enumerate() {
-            assert_eq!(f.track, i / 1176);
-            assert_eq!(f.position, (i % 1176) as u64);
-            assert_eq!(f.samples[0], ((i % 1176) % 1000) as f32 / 32768.0);
         }
     }
     #[test]
