@@ -274,9 +274,10 @@ fn media_event(ui: &PlayerWindow, state: &mut State, event: souvlaki::MediaContr
         }
         E::Play | E::Pause | E::Toggle | E::Stop => {
             if let Some(p) = &state.player {
-                let playing = p.snapshot().playing;
-                if matches!(event, E::Toggle) || (matches!(event, E::Play) != playing) {
-                    p.toggle();
+                match event {
+                    E::Toggle => p.toggle(),
+                    E::Play => p.set_playing(true),
+                    _ => p.set_playing(false),
                 }
                 if matches!(event, E::Stop) {
                     p.seek(0.0);
@@ -766,8 +767,14 @@ fn main() -> anyhow::Result<()> {
                             });
                         }
                     }
-                    if let Some(error) = player.error() {
-                        ui.set_status(error.into());
+                    while let Some(event) = player.event() {
+                        use amp_audio::PlayerEvent;
+                        let message = match event {
+                            PlayerEvent::OutputUnavailable(error) | PlayerEvent::PlaybackError(error) => error,
+                            PlayerEvent::OutputRecovered if snapshot.playing => "Audio output reconnected. Playing.".into(),
+                            PlayerEvent::OutputRecovered => "Audio output reconnected. Press Play to resume.".into(),
+                        };
+                        ui.set_status(message.into());
                     }
                 }
             },
