@@ -22,7 +22,7 @@ def main():
     output = Path(sys.argv[1]).resolve()
     output.mkdir(parents=True, exist_ok=True)
     if os.uname().sysname != "Darwin" or os.uname().machine != "arm64":
-        raise SystemExit("Alpha notice generation currently supports Apple Silicon macOS.")
+        raise SystemExit("Notice generation currently supports Apple Silicon macOS.")
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--locked", "--format-version", "1"], cwd=ROOT
     ))

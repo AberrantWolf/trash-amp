@@ -1,4 +1,4 @@
-# Runtime dependency notices for the macOS alpha. Slint's custom license
+# Runtime dependency notices for macOS prereleases. Slint's custom license
 # text is supplied separately by generate-notices.py because cargo-about
 # does not harvest LicenseRef text. The app retains its AboutSlint widget.
 accepted = [

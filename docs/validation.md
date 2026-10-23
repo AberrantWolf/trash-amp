@@ -158,3 +158,145 @@ playback pass. Existing server/account/cache keys are retained. Hardware-audio,
 new-build NAS/work-Mac deployment and managed-VPN qualification remain distinct;
 these tests do not establish zero WAN traffic for arbitrary private OS routes.
 See [the connection contract](collector-connection.md#automatic-private-playback--2026-10-22).
+
+## Beta release preparation — 2026-10-23
+
+Tested the working tree based on `fb70a4a` plus the beta release preparation
+changes, using pinned Rust 1.95.0 on arm64 macOS 26.6.2. Workspace version is
+`0.1.0-beta.1`; Cargo.lock changes only the five workspace package versions.
+This is local packaging evidence, not separate-Mac or minimum-OS acceptance.
+
+- `cargo fmt --all --check`, strict locked all-target Clippy and locked workspace
+  tests passed: 53 tests passed, two opt-in tests skipped (hardware output and
+  live MusicBrainz). No hardware audio test was invoked for this preparation.
+- Three Python release-version tests passed, covering alpha/beta metadata,
+  increasing build numbers across channels/sequences and rejected malformed or
+  unsupported versions. ShellCheck, shell syntax and updated Markdown links
+  passed; the workflow YAML parsed and includes the beta tag trigger.
+- An actual `RELEASE_TAG=v0.1.0-beta.2` package invocation rejected the mismatch
+  with Cargo's beta.1 version before building.
+- `RELEASE_TAG=v0.1.0-beta.1 ./scripts/package-macos.sh` built the optimized app,
+  generated runtime/native notices, ad-hoc signed the bundle and created the ZIP
+  and SHA-256 file under `target/dist`.
+- `./scripts/verify-macos-package.sh target/dist/trash-amp-0.1.0-beta.1-macos-arm64.zip`
+  passed: checksum, extracted executable, arm64 architecture, plist, signature,
+  dependency notices, system-only dynamic dependencies and `--help`. Verified
+  metadata is short version `0.1.0`, build `2.1`, full version `0.1.0-beta.1` and
+  minimum OS `15.0`; the archive filename must match the embedded full version.
+
+At this initial preparation stage no tag, remote draft or published release had
+been created. Developer ID signing, notarization, CI on the final commit,
+upgrade/Keychain checks and the remaining native beta acceptance gates were open;
+later records below document progress against [the checklist](release-gates.md).
+
+## Shared team signing credentials — 2026-10-23
+
+Inspected Print Junk's local release workflow and its successful `v0.5.0` release
+run to identify the existing signing/notarization setup. Its six GitHub secret
+names describe general Apple Developer team credentials, not app-specific
+dependencies. Trash Amp uses the same names and its own bundle ID; no Print Junk
+repository, executable or entitlement file is required by its build.
+
+Local verification used the working tree based on `fb70a4a` plus beta preparation
+and signing changes, on arm64 macOS 26.6.2:
+
+- The existing Developer ID Application identity for team `6DNZ4UX59T` signed an
+  isolated copy of the optimized app. Both executable and bundle signing passed;
+  the signature reports Hardened Runtime, a secure timestamp, the Developer ID
+  authority chain and the expected team.
+- The signed binary's `--help` passed. Its actual Slint/Skia demo rendered a
+  980×680 snapshot and exited using an isolated profile. The snapshot was visually
+  inspected. No JIT or unsigned executable-memory entitlement was needed for
+  that smoke test. Audio and upgrade/Keychain acceptance were not tested here.
+- Eleven Python release tests passed: three version-policy tests and eight
+  signing tests. Stubbed Apple tools cover Accepted versus Invalid status,
+  timeout, Gatekeeper rejection, ad-hoc rejection before upload, required
+  credentials for tags, generic runner-keychain configuration, certificate-file
+  cleanup and certificate/notarization team mismatch.
+- Modified shell scripts passed ShellCheck and shell syntax checks; workflow
+  YAML parsed with the signed manual-run option. Development ZIP packaging and
+  extracted-package verification passed; `--signed` verification correctly
+  rejected that ad-hoc ZIP.
+
+At initial implementation Trash Amp had no configured GitHub secrets. Existing repository-secret
+values cannot be retrieved through GitHub's API, so they have not been copied.
+The GitHub owner is a personal account: configure copies of the same team
+credentials in each repository, or use organization secrets if the repositories
+later move to an organization. Setup is in [the release guide](macos-release.md).
+At that point Apple notarization/stapling and a signed Actions run remained pending;
+stubbed tests and successful Developer ID signing do not establish acceptance by
+Apple's notary service. No release was published.
+
+## Signed Actions candidate — 2026-10-23
+
+All six required repository secret names were confirmed present. Candidate
+`f92294ef9f3327e38afe14ac34ff079684eb9030` was pushed to
+`codex/beta-release-pipeline` for a manually dispatched signed build, with the
+changes reviewable in [draft PR #1](https://github.com/AberrantWolf/trash-amp/pull/1).
+The workflow retains its registered `macos-alpha.yml` filename so signed branch
+validation can run before merge; its display name is macOS prerelease and it
+supports both alpha and beta tags.
+
+[Signed run 39880984729](https://github.com/AberrantWolf/trash-amp/actions/runs/39880984729)
+imported one signing identity and passed the identity/notarization-team match.
+Apple then rejected credential validation with HTTP 403: a required agreement
+was missing or expired. Cleanup of the temporary runner keychain succeeded.
+The Account Holder reported accepting the pending agreement. Both the immediate
+retry and a third attempt after a short propagation wait returned the same
+account-level rejection; further validation awaits restored notary-service
+access. Certificate import does not establish
+that the notarization password is valid or that Apple has accepted the app.
+
+[Normal PR run 39881180485](https://github.com/AberrantWolf/trash-amp/actions/runs/39881180485)
+passed on the same candidate: formatting, 11 release-tooling tests, strict
+all-target Clippy, 53 Rust tests (two existing opt-in tests skipped), optimized
+development packaging and extracted-ZIP verification. This run deliberately
+used ad-hoc signing, so its success does not qualify notarization.
+
+After the Account Holder confirmed the correct team, active membership and no
+remaining agreements, attempt 4 of the signed run validated the notarization
+credentials successfully. It then exposed a runner-only signing failure: the
+imported temporary keychain was absent from the user search list, which
+`codesign` still consults with `--keychain`. Import now preserves and extends that
+list; cleanup restores it. A regression test covers both adding the keychain and
+restoring paths containing spaces, bringing release-tooling coverage to 12 tests.
+Candidate `442187d735c13d16a0b2c2b4cd53360e741ab57c` was validated in
+[signed run 39884812620](https://github.com/AberrantWolf/trash-amp/actions/runs/39884812620).
+Developer ID signing, Hardened Runtime and timestamps passed. Apple accepted
+submission `b50b781c-d396-4f5b-aaa0-0b22cbdbe902`; its result was downloaded and
+confirmed as `Accepted`. Stapling then failed with error 68 after Apple's
+CloudKit ticket-delivery connection was lost. Bounded retries for transient
+ticket-service errors and retention of the signed submission ZIP were added,
+with regression tests for recovery, exhaustion and invalid-ticket rejection.
+All 15 release-tooling tests passed locally before the final signed ZIP validation
+recorded below.
+
+## Completed signed candidate — 2026-10-23
+
+[Signed Actions run 39885698740](https://github.com/AberrantWolf/trash-amp/actions/runs/39885698740)
+passed for candidate `554e77a64beb2fa1433354674a5dbafa210add19`, using the configured
+team credentials on the Apple Silicon macOS 15 runner. Formatting, strict
+all-target Clippy, 53 Rust tests (two opt-in tests skipped), all 15 release-tooling
+tests, optimized packaging and extracted-package verification passed. Temporary
+signing-keychain cleanup also passed.
+
+Apple accepted submission `a835f3f1-ce2b-4043-bdb7-d6f8a1c95b7a`; the retained
+notary log reports `Ready for distribution`, status code 0 and `issues: null`.
+Developer ID/Hardened Runtime/timestamp checks, stapling, ticket validation and
+Gatekeeper assessment passed on both the staged bundle and extracted final ZIP.
+Gatekeeper reported `source=Notarized Developer ID`. The successful run did not
+need to exercise the transient ticket-delivery retry.
+
+Downloaded the exact `macos-arm64-prerelease` Actions artifact to
+`target/dist/signed-ci` and ran the signed verifier locally on arm64 macOS 26.6.2.
+Checksum, metadata, architecture, notices, signature, stapled ticket, Gatekeeper,
+system-only dynamic dependencies and `--help` all passed. The distribution ZIP
+SHA-256 is `18d23eb51ab273a1e570602979caddf528873797b66614577e32a3a14659cd66`.
+The diagnostic artifact also retains the exact signed submission ZIP, Apple's
+submission result and full notary log for recovery/audit.
+
+The prior agreement restriction cleared without changing credentials after the
+Account Holder accepted the pending agreement and confirmed membership/team
+state. First launch on another Mac, minimum-OS and upgrade/Keychain/native audio
+acceptance remain separate beta gates. No beta tag or published release was
+created; the changes remain in draft PR #1.
