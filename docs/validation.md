@@ -217,7 +217,7 @@ and signing changes, on arm64 macOS 26.6.2:
   extracted-package verification passed; `--signed` verification correctly
   rejected that ad-hoc ZIP.
 
-Trash Amp currently has no configured GitHub secrets. Existing repository-secret
+At initial implementation Trash Amp had no configured GitHub secrets. Existing repository-secret
 values cannot be retrieved through GitHub's API, so they have not been copied.
 The GitHub owner is a personal account: configure copies of the same team
 credentials in each repository, or use organization secrets if the repositories
@@ -225,3 +225,29 @@ later move to an organization. Setup is in [the release guide](macos-release.md)
 Actual Apple notarization/stapling and a signed Actions run remain pending;
 stubbed tests and successful Developer ID signing do not establish acceptance by
 Apple's notary service. No release was published.
+
+## Signed Actions candidate — 2026-10-23
+
+All six required repository secret names were confirmed present. Candidate
+`f92294ef9f3327e38afe14ac34ff079684eb9030` was pushed to
+`codex/beta-release-pipeline` for a manually dispatched signed build, with the
+changes reviewable in [draft PR #1](https://github.com/AberrantWolf/trash-amp/pull/1).
+The workflow retains its registered `macos-alpha.yml` filename so signed branch
+validation can run before merge; its display name is macOS prerelease and it
+supports both alpha and beta tags.
+
+[Signed run 39880984729](https://github.com/AberrantWolf/trash-amp/actions/runs/39880984729)
+imported one signing identity and passed the identity/notarization-team match.
+Apple then rejected credential validation with HTTP 403: a required agreement
+was missing or expired. Cleanup of the temporary runner keychain succeeded.
+The Account Holder reported accepting the pending agreement. Both the immediate
+retry and a third attempt after a short propagation wait returned the same
+account-level rejection; further validation awaits restored notary-service
+access. Certificate import does not establish
+that the notarization password is valid or that Apple has accepted the app.
+
+[Normal PR run 39881180485](https://github.com/AberrantWolf/trash-amp/actions/runs/39881180485)
+passed on the same candidate: formatting, 11 release-tooling tests, strict
+all-target Clippy, 53 Rust tests (two existing opt-in tests skipped), optimized
+development packaging and extracted-ZIP verification. This run deliberately
+used ad-hoc signing, so its success does not qualify notarization.

@@ -112,6 +112,19 @@ explicit signed manual run, validates that the certificate matches the notary
 team, and stores notarization credentials in an isolated temporary keychain.
 Cleanup runs after success or failure. PR/main builds receive no signing secrets.
 
+### Apple account access failures
+
+A successful certificate import does not establish access to Apple's notary
+service. If credential validation returns HTTP 403 with “A required agreement
+is missing or has expired,” the team's Account Holder must review the pending
+agreement in [the Apple Developer account](https://developer.apple.com/account/).
+Confirm the selected team matches `MACOS_NOTARY_TEAM_ID`; also verify that the
+program membership is active. Apple documents these restrictions under
+[resolving access issues](https://developer.apple.com/help/account/access/resolving-access-issues/).
+After the account issue is resolved, allow time for the change to propagate and
+rerun the failed Actions job. Re-exporting a successfully imported certificate
+does not resolve this account-level rejection.
+
 ## GitHub build and draft release
 
 `.github/workflows/macos-alpha.yml` (display name **macOS prerelease**) validates

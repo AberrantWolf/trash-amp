@@ -17,11 +17,12 @@ Record validation results, hardware, macOS version and the exact tested commit i
 - [x] Apple Silicon ZIP packaging includes release notes, application/dependency/native license notices and SHA-256 checksums. Package verification checks architecture, metadata, signature and dynamic dependencies.
 - [x] Release automation accepts alpha and beta tags, verifies tag/version agreement, and creates drafts only after validation and packaging. Published releases cannot be overwritten by rerunning the workflow.
 - [x] Developer ID/Hardened Runtime signing, timestamping, notarization, stapling and extracted-package Gatekeeper checks are implemented. Tags require this path; local/PR/main development packages can remain ad-hoc signed. Generic Apple Developer team credentials use temporary runner-keychain cleanup and retained notarization diagnostics.
+- [x] All six required repository secret names are configured. The signed Actions candidate imported the certificate using its password and confirmed that the identity matches the configured notarization team.
 
 ## Required before public beta publication
 
 - [ ] Pass formatting, strict all-target Clippy, workspace tests, release-version tests, packaging and extracted-package verification for the beta commit in CI. Local beta-candidate checks passed on 2026-10-23; see [the validation record](validation.md#beta-release-preparation--2026-10-23). CI qualification remains pending.
-- [ ] Configure Trash Amp's access to the six shared Apple Developer signing/notarization secrets; repository secrets cannot be read back or automatically copied through GitHub's API. Run a signed manual candidate and confirm Apple's acceptance, stapling and extracted-package Gatekeeper verification.
+- [ ] Run a signed manual candidate and confirm notary-service access, Apple's acceptance, stapling and extracted-package Gatekeeper verification. Initial validation is blocked by Apple's HTTP 403 agreement requirement; the Account Holder has accepted the pending agreement and a retry is required.
 - [ ] Verify first launch of the downloaded, Developer ID-signed and notarized package on another Mac. Local signing validation alone does not complete this gate.
 - [ ] Verify clean installation and upgrade with existing preferences, saved folders, Collector credentials, lists, downloads and artwork. Retest Keychain behavior using the final signing identity, including connection removal and offline reopen.
 - [ ] Qualify output-device loss/change, USB/Bluetooth reconnect, sleep/wake and playback after resume. Resolve the current restart-required device-failure behavior and verify that errors leave the UI responsive.
