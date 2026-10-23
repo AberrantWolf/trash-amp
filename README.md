@@ -2,10 +2,12 @@
 
 An album-focused Rust music player. The first development target is macOS, with a Slint UI over independent library and audio crates.
 
-The first alpha is **0.1.0-alpha.1**, for Apple Silicon Macs on macOS 15 or newer.
-See [alpha release notes](docs/releases/0.1.0-alpha.1.md) for installation and
-known limits, and [release preparation](docs/alpha-release.md) for the GitHub
-build and draft-release workflow.
+The next release candidate is **0.1.0-beta.1**, for Apple Silicon Macs on macOS 15
+or newer. It is in preparation; public beta acceptance is incomplete.
+See the [beta checklist](docs/release-gates.md),
+[candidate notes](docs/releases/0.1.0-beta.1.md), and
+[release guide](docs/macos-release.md) for qualification, packaging and the GitHub
+draft-release workflow.
 
 ## macOS app bundle
 
@@ -17,9 +19,9 @@ build and draft-release workflow.
 
 This creates `target/release/Trash Amp.app` (or `target/debug/Trash Amp.app`) with
 its own Finder and Dock icon. Move the bundle into Applications if desired.
-The bundle uses an ad-hoc development signature; distribution signing and
-notarization remain release work. Bundling requires Python 3 and the Xcode
-command-line tools in addition to Rust.
+The bundle uses an ad-hoc development signature by default. Developer ID signing
+and notarized release packaging are described in the [release guide](docs/macos-release.md).
+Bundling requires Python 3 and the Xcode command-line tools in addition to Rust.
 
 ## Run
 
@@ -59,7 +61,7 @@ The initial build downloads Slint/Skia dependencies and can take several minutes
 - OS media keys and Now Playing metadata through Souvlaki (macOS integrated; Windows/Linux still need platform validation).
 - File discovery counts and scan progress, with four parallel tag readers and artwork skipped to reduce network traffic.
 
-This is a prototype, not a release candidate. The library scan currently refreshes a complete snapshot; incremental per-file caching, progressive filesystem results, artwork, text marquee, and FFT visualization are not implemented yet.
+Beta qualification is still in progress. The library scan currently refreshes a complete snapshot; incremental per-file caching, progressive filesystem results, filesystem artwork, text marquee, and FFT visualization are not implemented yet.
 
 Supported decoding is determined by the pinned Symphonia version. WAV/FLAC/MP3/Vorbis and CDDA are the first validation targets. AAC/M4A gapless playback and Opus require additional work before they can be advertised as supported. Stereo and mono are supported; multichannel needs an explicit channel mapper. Do not interpret successful playback as verified bit-perfect output.
 
@@ -94,7 +96,7 @@ API rules: [MusicBrainz API](https://musicbrainz.org/doc/MusicBrainz_API). Disc 
 ## Verify
 
 ```sh
-cargo fmt -p amp-core -p amp-library -p amp-audio -p trash-amp --check
+cargo fmt --all --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -105,7 +107,7 @@ See [architecture](docs/architecture.md), [release gates](docs/release-gates.md)
 
 The disc, audio and playback crates use junk-libs revision
 `2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98`. The Collector client SDK and server
-integration tests use Collector revision `201085448cbd727bd04f60275e47431c2c7dd3bd`.
+integration tests use Collector revision `14d56ab4cceaf82c09086d56d987484bab46d618`.
 Cargo manifests and the lockfile pin the exact Git sources; Cargo fetches them
 automatically, and no sibling checkout or local Cargo patch is required. Server
 crates are test dependencies and are not bundled into the player.

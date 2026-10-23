@@ -158,3 +158,70 @@ playback pass. Existing server/account/cache keys are retained. Hardware-audio,
 new-build NAS/work-Mac deployment and managed-VPN qualification remain distinct;
 these tests do not establish zero WAN traffic for arbitrary private OS routes.
 See [the connection contract](collector-connection.md#automatic-private-playback--2026-10-22).
+
+## Beta release preparation — 2026-10-23
+
+Tested the working tree based on `fb70a4a` plus the beta release preparation
+changes, using pinned Rust 1.95.0 on arm64 macOS 26.6.2. Workspace version is
+`0.1.0-beta.1`; Cargo.lock changes only the five workspace package versions.
+This is local packaging evidence, not separate-Mac or minimum-OS acceptance.
+
+- `cargo fmt --all --check`, strict locked all-target Clippy and locked workspace
+  tests passed: 53 tests passed, two opt-in tests skipped (hardware output and
+  live MusicBrainz). No hardware audio test was invoked for this preparation.
+- Three Python release-version tests passed, covering alpha/beta metadata,
+  increasing build numbers across channels/sequences and rejected malformed or
+  unsupported versions. ShellCheck, shell syntax and updated Markdown links
+  passed; the workflow YAML parsed and includes the beta tag trigger.
+- An actual `RELEASE_TAG=v0.1.0-beta.2` package invocation rejected the mismatch
+  with Cargo's beta.1 version before building.
+- `RELEASE_TAG=v0.1.0-beta.1 ./scripts/package-macos.sh` built the optimized app,
+  generated runtime/native notices, ad-hoc signed the bundle and created the ZIP
+  and SHA-256 file under `target/dist`.
+- `./scripts/verify-macos-package.sh target/dist/trash-amp-0.1.0-beta.1-macos-arm64.zip`
+  passed: checksum, extracted executable, arm64 architecture, plist, signature,
+  dependency notices, system-only dynamic dependencies and `--help`. Verified
+  metadata is short version `0.1.0`, build `2.1`, full version `0.1.0-beta.1` and
+  minimum OS `15.0`; the archive filename must match the embedded full version.
+
+No tag, remote draft or published release was created. Developer ID signing,
+notarization, CI on the final commit, upgrade/Keychain checks and the remaining
+native beta acceptance gates in [the checklist](release-gates.md) remain open.
+
+## Shared team signing credentials — 2026-10-23
+
+Inspected Print Junk's local release workflow and its successful `v0.5.0` release
+run to identify the existing signing/notarization setup. Its six GitHub secret
+names describe general Apple Developer team credentials, not app-specific
+dependencies. Trash Amp uses the same names and its own bundle ID; no Print Junk
+repository, executable or entitlement file is required by its build.
+
+Local verification used the working tree based on `fb70a4a` plus beta preparation
+and signing changes, on arm64 macOS 26.6.2:
+
+- The existing Developer ID Application identity for team `6DNZ4UX59T` signed an
+  isolated copy of the optimized app. Both executable and bundle signing passed;
+  the signature reports Hardened Runtime, a secure timestamp, the Developer ID
+  authority chain and the expected team.
+- The signed binary's `--help` passed. Its actual Slint/Skia demo rendered a
+  980×680 snapshot and exited using an isolated profile. The snapshot was visually
+  inspected. No JIT or unsigned executable-memory entitlement was needed for
+  that smoke test. Audio and upgrade/Keychain acceptance were not tested here.
+- Eleven Python release tests passed: three version-policy tests and eight
+  signing tests. Stubbed Apple tools cover Accepted versus Invalid status,
+  timeout, Gatekeeper rejection, ad-hoc rejection before upload, required
+  credentials for tags, generic runner-keychain configuration, certificate-file
+  cleanup and certificate/notarization team mismatch.
+- Modified shell scripts passed ShellCheck and shell syntax checks; workflow
+  YAML parsed with the signed manual-run option. Development ZIP packaging and
+  extracted-package verification passed; `--signed` verification correctly
+  rejected that ad-hoc ZIP.
+
+Trash Amp currently has no configured GitHub secrets. Existing repository-secret
+values cannot be retrieved through GitHub's API, so they have not been copied.
+The GitHub owner is a personal account: configure copies of the same team
+credentials in each repository, or use organization secrets if the repositories
+later move to an organization. Setup is in [the release guide](macos-release.md).
+Actual Apple notarization/stapling and a signed Actions run remain pending;
+stubbed tests and successful Developer ID signing do not establish acceptance by
+Apple's notary service. No release was published.

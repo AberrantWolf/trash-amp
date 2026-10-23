@@ -1,5 +1,11 @@
 #!/bin/sh
 set -eu
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
+signed=${REQUIRE_MACOS_NOTARIZATION:-false}
+case "${1:-}" in
+    --signed) signed=true; shift ;;
+esac
+case "$signed" in true|false) ;; *) echo 'REQUIRE_MACOS_NOTARIZATION must be true or false.' >&2; exit 2 ;; esac
 archive=${1:?Usage: verify-macos-package.sh ZIP}
 case "$archive" in /*) ;; *) archive="$PWD/$archive" ;; esac
 directory=$(dirname "$archive")
@@ -18,18 +24,26 @@ test -s "$app/Contents/Resources/licenses/native-licenses/skia-0.99.0/SOURCES.tx
 test "$(lipo -archs "$binary")" = arm64
 plutil -lint "$app/Contents/Info.plist"
 codesign --verify --strict "$app"
-python3 - "$app" <<'PY'
-import plistlib, re, sys
+if [ "$signed" = true ]; then
+    "$root/scripts/verify-macos-signature.sh" "$app"
+    xcrun stapler validate "$app"
+    spctl --assess --type execute --verbose=2 "$app"
+fi
+PYTHONPATH="$root/scripts" python3 - "$app" "$filename" <<'PY'
+import plistlib, sys
 from pathlib import Path
+from macos_version import bundle_versions
 app = Path(sys.argv[1])
 info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
-assert re.fullmatch(r'\d+\.\d+\.\d+', info['CFBundleShortVersionString'])
-assert re.fullmatch(r'\d+(\.\d+){0,2}', info['CFBundleVersion'])
-assert info['TrashAmpVersion'].startswith(info['CFBundleShortVersionString'] + '-alpha.')
+version = info['TrashAmpVersion']
+short_version, build_version = bundle_versions(version)
+assert info['CFBundleShortVersionString'] == short_version
+assert info['CFBundleVersion'] == build_version
+assert sys.argv[2] == f'trash-amp-{version}-macos-arm64.zip'
 assert info['LSMinimumSystemVersion'] == '15.0'
 notices = (app / 'Contents/Resources/licenses/THIRD_PARTY_LICENSES.html').read_text()
 assert 'Slint Royalty-free Desktop, Mobile, and Web Applications License' in notices
-print('Alpha metadata and notices verified.')
+print(f'Prerelease {version} metadata and notices verified.')
 PY
 # Shipping binaries must not depend on Homebrew or a developer's checkout.
 otool -L "$binary" | tail -n +2 | while IFS= read -r line; do
