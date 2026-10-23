@@ -39,6 +39,10 @@ elif name == 'security' and args[0] == 'find-identity':
     print('1) TESTHASH "Developer ID Application: Test (TESTTEAM01)"')
 elif name == 'security' and args[0] == 'create-keychain':
     Path(args[-1]).touch()
+elif name == 'security' and args == ['list-keychains', '-d', 'user']:
+    print('"/fake/login.keychain-db"\n"/fake/System keychain-db"')
+elif name == 'security' and args[0] == 'delete-keychain':
+    Path(args[-1]).unlink()
 '''
 
 
@@ -148,3 +152,20 @@ class MacOSSigningTests(unittest.TestCase):
         self.assertIn('matching the notarization team', result.stderr)
         self.assertFalse((directory / 'certificate.p12').exists())
         self.assertFalse(environment.exists())
+
+    def test_signing_keychain_is_searchable_and_cleanup_restores_the_original_list(self):
+        result, directory, _ = self.run_import()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        original = ['/fake/login.keychain-db', '/fake/System keychain-db']
+        self.assertEqual(json.loads((directory / 'search-list.json').read_text()), original)
+        commands = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertIn(['security', 'list-keychains', '-d', 'user', '-s',
+                       str(directory / 'signing.keychain-db'), *original], commands)
+        cleanup = subprocess.run(
+            [str(SCRIPTS / 'cleanup-macos-signing.sh')], capture_output=True, text=True,
+            env={**self.env, 'RUNNER_TEMP': str(directory.parent)},
+        )
+        self.assertEqual(cleanup.returncode, 0, cleanup.stderr)
+        self.assertFalse(directory.exists())
+        commands = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertIn(['security', 'list-keychains', '-d', 'user', '-s', *original], commands)

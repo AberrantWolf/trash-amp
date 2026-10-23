@@ -89,10 +89,7 @@ jobs:
           retention-days: 14
       - name: Remove the temporary signing keychain
         if: always() && env.REQUIRE_MACOS_NOTARIZATION == 'true'
-        run: |
-          keychain="$RUNNER_TEMP/macos-signing/signing.keychain-db"
-          if [ -f "$keychain" ]; then security delete-keychain "$keychain"; fi
-          rm -rf -- "$RUNNER_TEMP/macos-signing"
+        run: ./scripts/cleanup-macos-signing.sh
 
   draft-release:
     name: Prepare draft prerelease
