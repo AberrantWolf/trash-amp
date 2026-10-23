@@ -31,6 +31,11 @@ elif name == 'xcrun' and args[:2] == ['notarytool', 'submit']:
     sys.exit(int(os.environ.get('SUBMIT_EXIT', '0')))
 elif name == 'xcrun' and args[:2] == ['notarytool', 'log']:
     Path(args[-1]).write_text('{}')
+elif name == 'xcrun' and args[:2] == ['stapler', 'staple']:
+    with open(os.environ['TOOL_LOG']) as log:
+        attempts = sum(json.loads(line)[:3] == ['xcrun', 'stapler', 'staple'] for line in log)
+    if attempts <= int(os.environ.get('STAPLE_FAILURES', '0')):
+        sys.exit(int(os.environ.get('STAPLE_EXIT', '68')))
 elif name == 'spctl':
     sys.exit(int(os.environ.get('GATEKEEPER_EXIT', '0')))
 elif name == 'cargo':
@@ -52,7 +57,7 @@ class MacOSSigningTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
         self.log = self.directory / 'commands.jsonl'
-        for name in ('codesign', 'ditto', 'xcrun', 'spctl', 'cargo', 'security'):
+        for name in ('codesign', 'ditto', 'xcrun', 'spctl', 'cargo', 'security', 'sleep'):
             tool = self.directory / name
             tool.write_text(f'#!{sys.executable}\n' + FAKE_TOOL)
             tool.chmod(0o755)
@@ -79,13 +84,16 @@ class MacOSSigningTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         transitions = [c[:3] for c in commands if c[0] == 'xcrun']
         self.assertEqual(transitions, [
-            ['xcrun', 'notarytool', 'submit'], ['xcrun', 'stapler', 'staple'],
+            ['xcrun', 'notarytool', 'submit'], ['xcrun', 'notarytool', 'log'],
+            ['xcrun', 'stapler', 'staple'],
             ['xcrun', 'stapler', 'validate'],
         ])
         submit = next(c for c in commands if c[:3] == ['xcrun', 'notarytool', 'submit'])
         self.assertIn('--wait', submit)
         self.assertIn('--timeout', submit)
         self.assertEqual(commands[-1][0], 'spctl')
+        self.assertTrue((self.directory / 'notary-logs/submission.zip').exists())
+        self.assertTrue((self.directory / 'notary-logs/notary-log.json').exists())
 
     def test_rejected_submission_fails_even_when_notarytool_exits_zero(self):
         result, commands = self.run_notary(NOTARY_STATUS='Invalid')
@@ -102,6 +110,26 @@ class MacOSSigningTests(unittest.TestCase):
     def test_gatekeeper_failure_is_fatal_after_acceptance(self):
         result, _ = self.run_notary(GATEKEEPER_EXIT='3')
         self.assertNotEqual(result.returncode, 0)
+
+    def test_ticket_network_error_retries_without_resubmitting(self):
+        result, commands = self.run_notary(STAPLE_FAILURES='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sum(c[:3] == ['xcrun', 'stapler', 'staple'] for c in commands), 2)
+        self.assertEqual(sum(c[:3] == ['xcrun', 'notarytool', 'submit'] for c in commands), 1)
+        self.assertEqual(commands[-1][0], 'spctl')
+
+    def test_ticket_network_failure_remains_fatal_after_bounded_retries(self):
+        result, commands = self.run_notary(STAPLE_FAILURES='10')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(sum(c[:3] == ['xcrun', 'stapler', 'staple'] for c in commands), 3)
+        self.assertFalse(any(c[0] == 'spctl' for c in commands))
+        self.assertTrue((self.directory / 'notary-logs/submission.zip').exists())
+
+    def test_invalid_ticket_failure_is_not_retried(self):
+        result, commands = self.run_notary(STAPLE_FAILURES='10', STAPLE_EXIT='65')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(sum(c[:3] == ['xcrun', 'stapler', 'staple'] for c in commands), 1)
+        self.assertFalse(any(c[0] == 'spctl' for c in commands))
 
     def test_adhoc_signature_is_rejected_before_upload(self):
         result, commands = self.run_notary(ADHOC='1')
