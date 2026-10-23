@@ -36,6 +36,11 @@ elif name == 'xcrun' and args[:2] == ['stapler', 'staple']:
         attempts = sum(json.loads(line)[:3] == ['xcrun', 'stapler', 'staple'] for line in log)
     if attempts <= int(os.environ.get('STAPLE_FAILURES', '0')):
         sys.exit(int(os.environ.get('STAPLE_EXIT', '68')))
+elif name == 'xcrun' and args[:2] == ['stapler', 'validate']:
+    with open(os.environ['TOOL_LOG']) as log:
+        attempts = sum(json.loads(line)[:3] == ['xcrun', 'stapler', 'validate'] for line in log)
+    if attempts <= int(os.environ.get('VALIDATE_FAILURES', '0')):
+        sys.exit(int(os.environ.get('VALIDATE_EXIT', '68')))
 elif name == 'spctl':
     sys.exit(int(os.environ.get('GATEKEEPER_EXIT', '0')))
 elif name == 'cargo':
@@ -129,6 +134,41 @@ class MacOSSigningTests(unittest.TestCase):
         result, commands = self.run_notary(STAPLE_FAILURES='10', STAPLE_EXIT='65')
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(sum(c[:3] == ['xcrun', 'stapler', 'staple'] for c in commands), 1)
+        self.assertFalse(any(c[0] == 'spctl' for c in commands))
+
+    def test_validation_network_error_retries_without_resubmitting(self):
+        result, commands = self.run_notary(VALIDATE_FAILURES='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sum(c[:3] == ['xcrun', 'stapler', 'validate'] for c in commands), 2)
+        self.assertEqual(sum(c[:3] == ['xcrun', 'notarytool', 'submit'] for c in commands), 1)
+        self.assertEqual(commands[-1][0], 'spctl')
+
+    def validate_only(self, **environment):
+        result = subprocess.run(
+            [str(SCRIPTS / 'staple-macos.sh'), '--validate-only', str(self.directory / 'Test.app')],
+            env={**self.env, **environment}, capture_output=True, text=True,
+        )
+        commands = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertFalse(any(c[:3] == ['xcrun', 'stapler', 'staple'] for c in commands))
+        self.assertFalse(any(c[:2] == ['xcrun', 'notarytool'] for c in commands))
+        return result, commands
+
+    def test_extracted_ticket_validation_retries_without_modifying_the_app(self):
+        result, commands = self.validate_only(VALIDATE_FAILURES='1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sum(c[:3] == ['xcrun', 'stapler', 'validate'] for c in commands), 2)
+        self.assertEqual(commands[-1][0], 'spctl')
+
+    def test_extracted_ticket_validation_stops_after_three_network_failures(self):
+        result, commands = self.validate_only(VALIDATE_FAILURES='10')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(sum(c[:3] == ['xcrun', 'stapler', 'validate'] for c in commands), 3)
+        self.assertFalse(any(c[0] == 'spctl' for c in commands))
+
+    def test_invalid_extracted_ticket_is_not_retried(self):
+        result, commands = self.validate_only(VALIDATE_FAILURES='10', VALIDATE_EXIT='65')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(sum(c[:3] == ['xcrun', 'stapler', 'validate'] for c in commands), 1)
         self.assertFalse(any(c[0] == 'spctl' for c in commands))
 
     def test_adhoc_signature_is_rejected_before_upload(self):

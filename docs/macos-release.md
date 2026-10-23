@@ -1,10 +1,12 @@
 # Preparing a macOS prerelease
 
-The current candidate is `v0.1.0-beta.1`, Apple Silicon only, with macOS 15 as
+The current testing release is `v0.1.0-beta.1`, Apple Silicon only, with macOS 15 as
 its minimum deployment target. Rust is pinned by `rust-toolchain.toml` and Cargo
 dependencies by the committed lockfile. Hosted Git dependencies require no
-sibling checkouts. Public beta publication requires the unchecked gates in
-[the beta checklist](release-gates.md); generating a draft does not qualify it.
+sibling checkouts. Pushing an alpha or beta tag automatically publishes a
+downloadable prerelease after all build, signing and package checks pass.
+[The beta checklist](release-gates.md) tracks the remaining acceptance work;
+publishing a testing build does not mark those checks complete.
 
 ## Versioning
 
@@ -83,8 +85,10 @@ before resubmitting. The submission ZIP is a recovery artifact; the distribution
 ZIP additionally contains release notes and the stapled ticket.
 
 `scripts/staple-macos.sh APP` retries ticket-service errors 68, 69 and 75 up to
-three times, with 10-second delays, then validates the ticket and Gatekeeper
-assessment. Invalid or revoked tickets fail immediately. If ticket delivery
+three times per stapling or validation operation, with 10-second delays, then
+checks Gatekeeper. Extracted-package verification uses its `--validate-only`
+mode to retry transient validation errors without modifying the extracted app.
+Invalid or revoked tickets fail immediately. If ticket delivery
 fails after Apple accepted the submission, the retained ZIP can be extracted and
 this helper rerun on the exact signed app without rebuilding or uploading it
 again. Recreate the distribution archive/checksum only after stapling succeeds.
@@ -138,32 +142,38 @@ After the account issue is resolved, allow time for the change to propagate and
 rerun the failed Actions job. Re-exporting a successfully imported certificate
 does not resolve this account-level rejection.
 
-## GitHub build and draft release
+## GitHub build and automatic publication
 
 `.github/workflows/macos-alpha.yml` (display name **macOS prerelease**) validates
 and packages pull requests, main
 pushes and manual runs. These runs upload a `macos-arm64-prerelease` Actions
 artifact. Manual runs offer a `notarize` checkbox for signed candidate validation
-before tagging. Alpha and beta tags require signed, notarized packages and create
-a **draft prerelease** only after validation, packaging, extracted-ticket/Gatekeeper
-checks and checksum verification succeed. Missing secrets fail the run; tags
-cannot fall back to ad-hoc signing. Re-running a tag
-workflow may update a draft, but refuses to replace a published release.
+before tagging. Alpha and beta tags require signed, notarized packages and
+automatically publish a **prerelease** only after validation, packaging,
+extracted-ticket/Gatekeeper checks and downloaded-artifact checksum verification
+succeed. Missing secrets fail the run; tags cannot fall back to ad-hoc signing.
+`scripts/publish-prerelease.sh` uploads the ZIP and checksum before publication.
+It finishes an interrupted draft automatically; upload failures leave it
+unpublished. Rerunning an already published tag leaves its notes and assets
+unchanged. Testing prereleases are not marked as the latest stable release.
 
 The workflow retains its original filename so the existing Actions registration
 can dispatch a signed candidate from a branch before the changes are merged.
 
 Once the reviewed version/lockfile/notes changes are on main and Actions passes,
-the maintainer can prepare the draft:
+push the new version's tag. For example, after updating the workspace version,
+lockfile and notes to `0.1.0-beta.2`:
 
 ```sh
-git tag -a v0.1.0-beta.1 -m 'Trash Amp 0.1.0 beta 1'
-git push origin v0.1.0-beta.1
+git tag -a v0.1.0-beta.2 -m 'Trash Amp 0.1.0 beta 2'
+git push origin v0.1.0-beta.2
 ```
 
-Download the draft's ZIP and checksum and test on a separate Mac before
-publication. Complete and record the [beta checklist](release-gates.md), including
+No separate Publish click or local `gh release edit` command is required.
+Download the published ZIP and checksum from Releases and test on a separate Mac.
+Complete and record the [beta checklist](release-gates.md), including
 upgrade/Keychain checks with the final signing identity. Confirm Finder launch,
 version and Slint attribution, folders/restart, local audio, Collector
-enrollment/streaming/downloads/offline playback and media keys. Review the final
-release notes and publish the draft manually after acceptance.
+enrollment/streaming/downloads/offline playback and media keys. Record known
+limits in the version's release notes before tagging; remaining native checks
+stay open until there is evidence for the tested package.

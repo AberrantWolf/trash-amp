@@ -25,9 +25,7 @@ test "$(lipo -archs "$binary")" = arm64
 plutil -lint "$app/Contents/Info.plist"
 codesign --verify --strict "$app"
 if [ "$signed" = true ]; then
-    "$root/scripts/verify-macos-signature.sh" "$app"
-    xcrun stapler validate "$app"
-    spctl --assess --type execute --verbose=2 "$app"
+    "$root/scripts/staple-macos.sh" --validate-only "$app"
 fi
 PYTHONPATH="$root/scripts" python3 - "$app" "$filename" <<'PY'
 import plistlib, sys
