@@ -53,7 +53,13 @@ fi
 app="$root/target/$target/$profile/Trash Amp.app"
 mkdir -p "$app"
 cp "$binary" "$app/trash-amp-ios"
-python3 - "$root" "$app" "$mode" <<'PY'
+icon_info=$(mktemp "${TMPDIR:-/tmp}/trash-amp-icon.XXXXXX")
+trap 'rm -f "$icon_info"' EXIT
+xcrun actool "$root/assets/ios/Assets.xcassets" \
+    --compile "$app" --platform "$sdk" --minimum-deployment-target 15.0 \
+    --app-icon AppIcon --target-device iphone --target-device ipad \
+    --output-partial-info-plist "$icon_info" --output-format human-readable-text
+python3 - "$root" "$app" "$mode" "$icon_info" <<'PY'
 from pathlib import Path
 import plistlib
 import sys
@@ -61,6 +67,8 @@ import tomllib
 root, app = map(Path, sys.argv[1:3])
 with (root / "assets/ios/Info.plist").open("rb") as source:
     info = plistlib.load(source)
+with Path(sys.argv[4]).open("rb") as source:
+    info.update(plistlib.load(source))
 version = tomllib.loads((root / "Cargo.toml").read_text())["workspace"]["package"]["version"]
 info.update(
     CFBundleIdentifier="org.aberrantwolf.TrashAmp.iOS",

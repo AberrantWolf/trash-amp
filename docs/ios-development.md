@@ -94,8 +94,10 @@ open TrashAmp.xcodeproj
 Select your development team in Xcode's Signing & Capabilities panel and choose
 your connected device. Account login, provisioning, device trust and Developer
 Mode may require your interaction. The project invokes the same Cargo build
-script; it does not introduce a second UI. Archive/TestFlight qualification,
-app icons and release numbering remain future work.
+script; it does not introduce a second UI. Xcode and standalone bundles include
+the headphones app icon from `assets/ios/Assets.xcassets`; see the
+[icon packaging notes](../assets/ios/README.md). Archive/TestFlight qualification
+and release numbering remain future work.
 
 The Rust build phase declares `$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)` as an
 output. Keep this declaration: the script replaces the executable on every
