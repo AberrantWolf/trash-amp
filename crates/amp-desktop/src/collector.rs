@@ -1,6 +1,8 @@
 //! Slint presentation adapter. Every operation runs on a worker; browsing and playback have separate lifetimes.
 use super::*;
-use amp_collector::{Adapter, ConnectionKey, ListCommand, SavedConnection, Snapshot, api, ids};
+use amp_collector::{
+    Adapter, ConnectionKey, ConnectionState, ListCommand, SavedConnection, Snapshot, api, ids,
+};
 use anyhow::Context;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -12,6 +14,7 @@ struct View {
     list: Option<usize>,
     collection: Option<ids::CollectionId>,
     online: bool,
+    connection: ConnectionState,
 }
 enum Event {
     Connected(u64, anyhow::Result<ConnectionKey>),
@@ -21,6 +24,7 @@ enum Event {
     Mutation(u64, ConnectionKey, anyhow::Result<()>),
     Downloads,
     Removed(ConnectionKey, anyhow::Result<()>),
+    ConnectionChecked(u64, ConnectionKey, ConnectionState),
 }
 pub struct Controller {
     rx: mpsc::Receiver<Event>,
@@ -31,6 +35,17 @@ pub struct Controller {
     view: Rc<RefCell<View>>,
     generation: Arc<AtomicU64>,
     download_busy: Arc<AtomicBool>,
+    connection_probe: Option<(u64, ConnectionKey, std::time::Instant, bool)>,
+}
+fn connection_kind(state: ConnectionState) -> ConnectionKind {
+    match state {
+        ConnectionState::Disconnected => ConnectionKind::Disconnected,
+        ConnectionState::Connected => ConnectionKind::Checking,
+        ConnectionState::Public => ConnectionKind::Public,
+        ConnectionState::Lan => ConnectionKind::Lan,
+        ConnectionState::Direct => ConnectionKind::Direct,
+        ConnectionState::StreamingUnavailable => ConnectionKind::Unavailable,
+    }
 }
 pub fn queue_label(t: &Track) -> String {
     if t.artist.is_empty() {
@@ -117,6 +132,7 @@ fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, adapter: 
     }
     ui.set_collector_active(view.selected.is_some());
     ui.set_collector_online(view.online);
+    ui.set_connection_kind(connection_kind(view.connection));
     ui.set_saved_lists(ModelRc::new(VecModel::from(
         std::iter::once(SharedString::from("Select a list"))
             .chain(
@@ -249,6 +265,7 @@ impl Controller {
             list: None,
             collection: None,
             online: false,
+            connection: ConnectionState::Disconnected,
         }));
         let (tx, rx) = mpsc::channel();
         let download_busy = Arc::new(AtomicBool::new(false));
@@ -280,6 +297,7 @@ impl Controller {
                 view.list = None;
                 view.collection = None;
                 view.online = false;
+                view.connection = ConnectionState::Disconnected;
                 ui.set_collection_index(0);
                 ui.set_scanning(false);
                 ui.set_collector_busy(false);
@@ -313,6 +331,7 @@ impl Controller {
                     browse::rebuild(&ui, &mut s, true);
                     ui.set_collector_active(false);
                     ui.set_collector_online(false);
+                    ui.set_connection_kind(ConnectionKind::Disconnected);
                     ui.set_saved_lists(ModelRc::default());
                     ui.set_list_rows(ModelRc::default());
                 }
@@ -846,6 +865,7 @@ impl Controller {
             view,
             generation,
             download_busy,
+            connection_probe: None,
         })
     }
     pub fn poll(&mut self) {
@@ -870,6 +890,7 @@ impl Controller {
                             view.collection = None;
                             view.list = None;
                             view.online = false;
+                            view.connection = ConnectionState::Disconnected;
                             error(&ui, self.adapter.select(Some(key)));
                             sources(&ui, &view);
                             install(&ui, &self.state, &view, &self.adapter);
@@ -900,12 +921,17 @@ impl Controller {
                                 .and_then(|id| snapshot.lists.iter().position(|l| l.list.id == id));
                             view.snapshot = Some(snapshot);
                             view.online = true;
+                            if view.connection == ConnectionState::Disconnected {
+                                view.connection = ConnectionState::Connected;
+                            }
                             install(&ui, &self.state, &view, &self.adapter);
                             render_list(&ui, &view, &self.adapter);
                         }
                         Err(e) => {
                             view.online = false;
+                            view.connection = ConnectionState::Disconnected;
                             ui.set_collector_online(false);
+                            ui.set_connection_kind(ConnectionKind::Disconnected);
                             ui.set_connection_status(
                                 format!("Cached library retained: {e}").into(),
                             );
@@ -931,7 +957,9 @@ impl Controller {
                             sources(&ui, &view);
                             if view.selected == Some(key) {
                                 view.online = false;
+                                view.connection = ConnectionState::Disconnected;
                                 ui.set_collector_online(false);
+                                ui.set_connection_kind(ConnectionKind::Disconnected);
                                 ui.set_connection_status(
                                     "Connection removed; completed downloads retained".into(),
                                 );
@@ -943,6 +971,29 @@ impl Controller {
                     }
                 }
                 Event::Message(message) => ui.set_connection_status(message.into()),
+                Event::ConnectionChecked(v, key, status)
+                    if v == current
+                        && self.view.borrow().selected == Some(key)
+                        && self
+                            .view
+                            .borrow()
+                            .connections
+                            .iter()
+                            .any(|c| c.key == key && !c.removed) =>
+                {
+                    if let Some((probe_v, probe_key, _, pending)) = &mut self.connection_probe
+                        && *probe_v == v
+                        && *probe_key == key
+                    {
+                        *pending = false;
+                    }
+                    ui.set_connection_kind(connection_kind(status));
+                    let online = status != ConnectionState::Disconnected;
+                    let mut view = self.view.borrow_mut();
+                    view.online = online;
+                    view.connection = status;
+                    ui.set_collector_online(online);
+                }
                 Event::Downloads => {
                     let _ = self.download_busy.load(Ordering::Acquire);
                     let mut state = self.state.borrow_mut();
@@ -962,6 +1013,32 @@ impl Controller {
                 _ => {}
             }
         }
+        // Recheck after a source change and periodically so a network change is
+        // reflected without requiring playback or a library refresh.
+        let view = self.view.borrow();
+        if !ui.get_collector_busy()
+            && !ui.get_removing_connection()
+            && let Some(key) = view.selected
+            && view.connections.iter().any(|c| c.key == key && !c.removed)
+        {
+            let v = self.generation.load(Ordering::Acquire);
+            if self
+                .connection_probe
+                .is_none_or(|(old_v, old_key, started, pending)| {
+                    old_v != v
+                        || old_key != key
+                        || (!pending && started.elapsed() >= Duration::from_secs(30))
+                })
+            {
+                self.connection_probe = Some((v, key, std::time::Instant::now(), true));
+                let adapter = self.adapter.clone();
+                let tx = self.tx.clone();
+                std::thread::spawn(move || {
+                    let status = adapter.connection_state(key);
+                    let _ = tx.send(Event::ConnectionChecked(v, key, status));
+                });
+            }
+        }
     }
 }
 fn read_trust(path: &Path) -> anyhow::Result<String> {
@@ -974,4 +1051,95 @@ fn read_trust(path: &Path) -> anyhow::Result<String> {
         anyhow::bail!("Trust file exceeds 64 KiB")
     };
     Ok(String::from_utf8(bytes)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_checks_ignore_obsolete_sources_and_removed_credentials() {
+        i_slint_backend_testing::init_no_event_loop();
+        let data =
+            std::env::temp_dir().join(format!("trash-amp-connection-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data).unwrap();
+        let state = Rc::new(RefCell::new(State {
+            store: Store::open(&data.join("library.sqlite3")).unwrap(),
+            library: Library::default(),
+            resolver: None,
+            artwork: Default::default(),
+            browser: browse::Browser::default(),
+            selected: None,
+            playlist: vec![],
+            queued: vec![],
+            queue_start: 0,
+            player: None,
+            preferences: Preferences::default(),
+        }));
+        let ui = PlayerWindow::new().unwrap();
+        let generation = Arc::new(AtomicU64::new(2));
+        let mut controller = Controller::new(&ui, &state, &data, generation.clone()).unwrap();
+        let key = ConnectionKey {
+            server_id: ids::ServerId::new(),
+            user_id: ids::UserId::new(),
+        };
+        {
+            let mut view = controller.view.borrow_mut();
+            view.connections.push(SavedConnection {
+                key,
+                name: "Test".into(),
+                endpoint: "https://example.invalid".into(),
+                removed: false,
+            });
+            view.selected = Some(key);
+        }
+        // Keep these synthetic event checks from starting a network probe.
+        ui.set_collector_busy(true);
+        controller
+            .tx
+            .send(Event::ConnectionChecked(1, key, ConnectionState::Lan))
+            .unwrap();
+        controller.poll();
+        assert_eq!(ui.get_connection_kind(), ConnectionKind::Disconnected);
+        controller
+            .tx
+            .send(Event::ConnectionChecked(2, key, ConnectionState::Lan))
+            .unwrap();
+        controller.poll();
+        assert_eq!(ui.get_connection_kind(), ConnectionKind::Lan);
+        assert!(ui.get_collector_online());
+        controller
+            .tx
+            .send(Event::ConnectionChecked(2, key, ConnectionState::Direct))
+            .unwrap();
+        controller.poll();
+        assert_eq!(ui.get_connection_kind(), ConnectionKind::Direct);
+        assert!(ui.get_collector_online());
+        ui.invoke_source_changed(0);
+        controller
+            .tx
+            .send(Event::ConnectionChecked(2, key, ConnectionState::Public))
+            .unwrap();
+        controller.poll();
+        assert_eq!(ui.get_connection_kind(), ConnectionKind::Disconnected);
+        assert!(!ui.get_collector_online());
+        {
+            let mut view = controller.view.borrow_mut();
+            view.selected = Some(key);
+            view.connections[0].removed = true;
+        }
+        controller
+            .tx
+            .send(Event::ConnectionChecked(
+                generation.load(Ordering::Acquire),
+                key,
+                ConnectionState::Lan,
+            ))
+            .unwrap();
+        controller.poll();
+        assert_eq!(ui.get_connection_kind(), ConnectionKind::Disconnected);
+        drop(controller);
+        drop(state);
+        std::fs::remove_dir_all(data).unwrap();
+    }
 }

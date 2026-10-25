@@ -14,11 +14,29 @@ audio storage limit or retry/cancel downloads under Downloads. Lists has its own
 page for playback, editing, and list downloads. Done or Escape returns from
 Settings, and Library or Escape returns from Lists. Search (Cmd/Ctrl+F) returns
 to the library from either page. The playback bar remains available on all pages
-and includes a compact status line.
+and includes a compact status line. A small connection icon at the bottom-right
+shows disconnected, public streaming, trusted LAN/private streaming, or direct
+HTTPS internet streaming. Hover,
+click, or focus and press Enter/Space for details; click again or Escape dismisses
+pinned details. Connected servers with an unconfirmed or unavailable streaming
+route have an explicit explanation. The selected server is checked after refresh
+and every 30 seconds on a worker using authenticated metadata and a media HEAD
+request, without downloading or preparing audio. Local folders and removed
+connections show disconnected. Results from previously selected servers are ignored.
+
+The direct-internet icon is enabled after a successful media HEAD through the
+shared client's nonlocal route policy and an authenticated direct-HTTPS
+advertisement. The client prefers reachable private media, then direct HTTPS,
+then explicitly permitted public-origin fallback when no direct endpoint is
+configured. An advertised HTTPS endpoint that fails trust/reachability does not
+fall back to the public control origin. Private includes any reachable trusted
+private route supported by the client; it does not prove physical LAN membership.
+Empty libraries cannot verify streaming until a playable track exists.
 
 Credentials are stored through macOS Keychain. Enrollment supports system HTTPS
-trust and explicit owner PEM/pairing material; catalog and media share that trust
-policy. SQLite snapshots are isolated by server/account, published only after all
+trust and explicit owner PEM/pairing material for control. Private media uses
+authenticated certificate pins; direct internet media uses system HTTPS roots and
+short-lived, target-scoped grants instead of the enrolled control credential. SQLite snapshots are isolated by server/account, published only after all
 pages succeed, and restored immediately. Generation fences reject obsolete
 refresh results. A profile lock prevents concurrent writers. Lists use server
 expansion, typed edit permissions, expected revisions and durable input-bound
@@ -102,3 +120,31 @@ The delivery pins Collector client/server source `14d56ab4cceaf82c09086d56d98748
 The new server and client builds must be installed together; the production NAS
 and work Mac are not changed by this source delivery. Initial private-route
 discovery needs the normal control connection; retained downloads work offline.
+
+
+## Direct HTTPS playback — 2026-10-24
+
+The adapter now pins Collector `c5587138c90f5d460b371cb9e489c8eb28aedb7a`,
+including the shared native client's direct HTTPS media support. Outside a
+reachable private route, streaming and explicit downloads automatically use the
+server-advertised HTTPS media service. No extra URL or listener setting is needed
+in Trash Amp. The server must already have direct media configured and reachable
+with a certificate trusted by the client system. Account identity, queue source
+coordinates, cancellation, immutable range validation and offline storage identity
+remain the same across routes.
+
+The connection indicator distinguishes direct HTTPS from public-origin streaming.
+The shared reader currently exposes only whether the verified route is private;
+for a successful nonlocal HEAD, the adapter reads the bounded authenticated route
+advertisement to distinguish direct HTTPS from permitted public fallback using
+the shared client's selection policy. If that descriptor cannot be read or its
+server identity does not match, the indicator stays unconfirmed. As before, this
+is a periodic capability check for the selected server, independent of cached
+playback or a queue originating from another server.
+
+Real TLS fixtures exercise direct HTTPS FLAC decode and seek, explicit downloads,
+credential removal and retained offline playback. A separate subprocess trusts
+only the fixture's media certificate, leaving OS trust unchanged. The matrix also
+covers private-route preference and rejection of an untrusted advertised media
+endpoint even with public fallback permitted. This is local integration coverage;
+actual external-network listening is not qualified by these fixtures.

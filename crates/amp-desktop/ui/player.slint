@@ -4,7 +4,10 @@ export { BrowserRow }
 import { TrackItem, TrackRow } from "track-item.slint";
 export { TrackRow }
 import { TransportSeek } from "transport-seek.slint";
+import { ConnectionIndicator, ConnectionKind } from "connection-indicator.slint";
+export { ConnectionKind }
 export component PlayerWindow inherits Window {
+    in property <ConnectionKind> connection-kind;
     icon: @image-url("../../../assets/macos/trash-amp.png");
     in property <[string]> sources;
     in-out property <int> source-index;
@@ -449,7 +452,11 @@ export component PlayerWindow inherits Window {
                     height: 3px; background: #303c47;
                     Rectangle { height: 100%; width: parent.width * root.scan-progress; background: #7ca7c9; }
                 }
-                Text { text: root.status; color: #a7b8c6; overflow: elide; height: 14px * root.text-scale; font-size: 11px * root.text-scale; accessible-label: "Playback status"; }
+                HorizontalLayout {
+                    height: 18px * root.text-scale; spacing: 6px;
+                    Text { text: root.status; color: #a7b8c6; overflow: elide; vertical-alignment: center; font-size: 11px * root.text-scale; accessible-label: "Playback status"; horizontal-stretch: 1; }
+                    ConnectionIndicator { kind: root.connection-kind; text-scale: root.text-scale; available-width: parent.width; }
+                }
             }
         }
 

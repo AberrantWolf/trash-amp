@@ -75,6 +75,16 @@ pub struct SavedConnection {
     pub endpoint: String,
     pub removed: bool,
 }
+/// Verified media capability for the selected server, independent of cached audio.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionState {
+    Disconnected,
+    Connected,
+    Public,
+    Lan,
+    Direct,
+    StreamingUnavailable,
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub library: Library,
@@ -263,6 +273,79 @@ impl Adapter {
     }
     pub fn client(&self, key: ConnectionKey) -> Result<EnrolledClient> {
         Ok(EnrolledClient::from_storage(self.secrets.as_ref(), key)?)
+    }
+    /// Run on a worker. Uses the shared client's trust and fallback policy and a
+    /// media HEAD request; no audio is downloaded or prepared by this probe.
+    pub fn connection_state(&self, key: ConnectionKey) -> ConnectionState {
+        let Ok(client) = self.client(key) else {
+            return ConnectionState::Disconnected;
+        };
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        else {
+            return ConnectionState::Disconnected;
+        };
+        if runtime.block_on(client.collections()).is_err() {
+            return ConnectionState::Disconnected;
+        }
+        let Some(snapshot) = self.snapshot(key).ok().flatten() else {
+            return ConnectionState::Connected;
+        };
+        let candidate = snapshot
+            .library
+            .albums
+            .iter()
+            .flat_map(|a| &a.tracks)
+            .filter_map(|track| parse_remote(track).ok())
+            .find_map(|remote| match remote.audio.as_ref().map(|a| &a.state) {
+                Some(api::MusicTrackAvailabilityState::Available {
+                    representation_id,
+                    file_index,
+                    ..
+                }) => Some((remote.item, *representation_id, *file_index)),
+                _ => None,
+            });
+        let Some((item, representation, file)) = candidate else {
+            return ConnectionState::Connected;
+        };
+        match client.media_reader(item, representation, file, MediaCancellation::default()) {
+            Ok(reader) if reader.is_local() => ConnectionState::Lan,
+            Ok(_) => runtime
+                .block_on(async {
+                    // RangeReader exposes only is_local(). The shared client's
+                    // nonlocal policy selects advertised direct HTTPS before public
+                    // fallback, and fails if that direct endpoint cannot be verified.
+                    // Classify only after a successful media HEAD, never from an
+                    // advertisement alone. An unreadable descriptor leaves the label
+                    // unconfirmed rather than guessing which nonlocal route worked.
+                    let mut response = client
+                        .get(client.api_url("api/v1/playback/routes")?)?
+                        .send()
+                        .await?
+                        .error_for_status()?;
+                    let mut bytes = Vec::new();
+                    while let Some(chunk) = response.chunk().await? {
+                        if bytes.len() + chunk.len() > 128 * 1024 {
+                            bail!("Oversized playback descriptor")
+                        }
+                        bytes.extend_from_slice(&chunk);
+                    }
+                    let descriptor: api::LocalPlaybackDescriptor = serde_json::from_slice(&bytes)?;
+                    if descriptor.server_id != key.server_id {
+                        bail!("Playback server identity mismatch")
+                    }
+                    Ok::<_, anyhow::Error>(if descriptor.remote_media.is_some() {
+                        ConnectionState::Direct
+                    } else if descriptor.remote_media_allowed {
+                        ConnectionState::Public
+                    } else {
+                        ConnectionState::Connected
+                    })
+                })
+                .unwrap_or(ConnectionState::Connected),
+            Err(_) => ConnectionState::StreamingUnavailable,
+        }
     }
     pub async fn enroll(
         &self,
@@ -1001,9 +1084,9 @@ impl amp_audio::MediaResolver for Adapter {
                     .unwrap_or_else(|| amp_audio::MediaHint::new(Some(length), None, None)),
             ));
         }
-        // The shared client discovers and pins media-only private routes through
-        // the enrolled control connection. Keep this account/cache key unchanged;
-        // an unavailable LAN route must never become a public media retry.
+        // The shared client prefers pinned private media, then advertised direct
+        // HTTPS with scoped grants. It owns retries and public fallback policy;
+        // the enrolled account and offline-cache identity stay unchanged.
         let client = self.client(remote.key)?;
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

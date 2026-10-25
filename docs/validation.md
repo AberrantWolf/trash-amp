@@ -340,3 +340,61 @@ decoding or device opening is performed on the UI thread.
 Physical USB/Bluetooth removal/reconnect, repeated output changes, differing
 hardware sample rates and sleep/wake still require native-app qualification in
 the extracted final package. The corresponding beta gate remains unchecked.
+
+## Published beta and automatic publication — 2026-10-23
+
+PR #2 merged as `28c2c9062dcfd94e2fab708ba96e6538241aa626`. Main CI passed, and
+`v0.1.0-beta.1` points to that exact commit.
+[Tagged run 39899784445](https://github.com/AberrantWolf/trash-amp/actions/runs/39899784445)
+passed on attempt 2: 63 Rust tests, 15 release-tooling tests, formatting, strict
+Clippy, signing, notarization, stapling, package verification and release asset
+checksums. Attempt 1 failed only when extracted-ticket validation lost its
+CloudKit connection (error 68); initial notarization and stapling had passed.
+
+Apple accepted the final submission `843001b7-ab83-4d61-baa3-ae0e5e126861` with
+status code 0 and no issues. The downloaded ZIP passed local signed verification,
+including the stapled ticket and Gatekeeper's `Notarized Developer ID` result.
+Its SHA-256 is `b0a3fa66b97ded77443f69465a75a043997fa1020d9ebd9dd3a0872a0bdd4145`.
+The workflow initially created a draft; beta.1 was then manually published to
+make its downloads visible. This exposed the missing automated publication step.
+
+Automation correction `1aa5388e8a0841dfe2d8c80586e3dc39fc30f4ce` was checked on
+arm64 macOS 26.6.2 with 28 passing release-tooling tests, ShellCheck, shell syntax,
+workflow YAML parsing and whitespace checks. Publication tests cover new
+prereleases, interrupted drafts, failed uploads/creation, service failures,
+corrupt artifacts and reruns of published releases. Stubbed CLI tests do not
+claim a new live release publication. The real published-beta rerun path was
+also exercised: it returned success without changing the notes or asset hashes.
+
+Ticket tests now cover transient validation failures, retry exhaustion and
+invalid-ticket rejection, including the validation-only path used for extracted
+packages. The updated signed verifier passed against the exact downloaded beta.1
+ZIP without modifying or replacing that archive. Future tag workflows publish
+automatically after all build and package checks; existing published tags and
+their assets are retained.
+
+## Beta.2 HTTPS playback and connection indicator — 2026-10-25
+
+The beta.2 candidate pins Collector's shared client and real-server fixtures to
+`c5587138c90f5d460b371cb9e489c8eb28aedb7a` (Collector beta.6). Streaming and downloads
+prefer automatically trusted private media and otherwise use advertised direct
+HTTPS with scoped grants. The playback-bar connection indicator distinguishes
+private, direct internet, public, disconnected and unavailable/unconfirmed routes.
+It describes periodically checked capability for the selected server, independent
+of cached playback and the immutable source of an already queued track.
+
+Local checks on the final beta.2 candidate pass: formatting, strict locked
+all-target Clippy, **67 Rust tests** and **28 release-tooling tests**. Three tests
+are marked ignored in the parent runner: the hardware-output and live MusicBrainz
+checks remain opt-in, while the HTTPS subprocess fixture is exercised four times
+by its parent integration test. The TLS matrix covers direct HTTPS decode/seek,
+downloads and offline retained playback, private-route preference, and untrusted
+media-certificate refusal with public fallback enabled. Headless Slint checks
+cover icon states, hover/click/keyboard details, obsolete results and connection
+removal. No system certificate store is changed by these fixtures.
+
+The candidate also includes the Double Parked Finder/Dock icon and automatic
+publication after tagged signed-package verification. Release notes retain the
+native/external-network, physical-device, accessibility and separate-Mac acceptance
+limits. GitHub validation and signed publication are recorded separately below
+when completed.

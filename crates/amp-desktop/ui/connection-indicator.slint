@@ -1,0 +1,59 @@
+export enum ConnectionKind { disconnected, checking, public, lan, direct, unavailable }
+
+export component ConnectionIndicator inherits FocusScope {
+    in property <ConnectionKind> kind;
+    in property <float> text-scale: 1;
+    in property <length> available-width: 300px;
+    out property <string> description: kind == ConnectionKind.disconnected ? "Not connected to a server."
+        : kind == ConnectionKind.public ? "Connected · Public streaming\nStreaming uses the public server connection."
+        : kind == ConnectionKind.lan ? "Connected · LAN streaming\nA trusted private network route is available for streaming."
+        : kind == ConnectionKind.direct ? "Connected · Direct internet streaming\nStreaming uses the server’s direct HTTPS media endpoint."
+        : kind == ConnectionKind.unavailable ? "Connected · Streaming unavailable\nStreaming could not be verified through a permitted route. Downloaded audio can still play."
+        : "Connected · Streaming route unconfirmed\nChecking the route, or no streamable track is available to check.";
+    private property <bool> pinned;
+    out property <bool> expanded: pointer.has-hover || root.pinned;
+    width: 24px * text-scale;
+    height: 18px * text-scale;
+    accessible-role: button;
+    accessible-label: "Server connection: " + description;
+    accessible-action-default => { root.pinned = !root.pinned; root.focus(); }
+    key-pressed(event) => {
+        if event.text == " " || event.text == Key.Return { root.pinned = !root.pinned; return accept; }
+        if event.text == Key.Escape { root.pinned = false; return accept; }
+        return reject;
+    }
+    changed has-focus => { if !self.has-focus { root.pinned = false; } }
+    Rectangle {
+        border-radius: 3px;
+        background: pointer.has-hover || root.pinned || root.has-focus ? #303e4a : transparent;
+        border-width: root.has-focus ? 1px : 0px;
+        border-color: #7ca7c9;
+        Image {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: 16px * root.text-scale; height: self.width;
+            source: root.kind == ConnectionKind.disconnected ? @image-url("icons/connection-offline.svg")
+                : root.kind == ConnectionKind.public ? @image-url("icons/connection-public.svg")
+                : root.kind == ConnectionKind.lan ? @image-url("icons/connection-lan.svg")
+                : root.kind == ConnectionKind.direct ? @image-url("icons/connection-direct.svg")
+                : @image-url("icons/connection-unknown.svg");
+        }
+        pointer := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { root.pinned = !root.pinned; root.focus(); }
+        }
+    }
+    if root.expanded: Rectangle {
+        x: root.width - self.width;
+        y: -self.height - 6px;
+        width: min(300px * root.text-scale, root.available-width);
+        height: explanation.preferred-height + 20px;
+        background: #293743;
+        border-color: #536b7e; border-width: 1px; border-radius: 5px;
+        explanation := Text {
+            x: 10px; y: 10px; width: parent.width - 20px;
+            text: root.description; wrap: word-wrap;
+            color: #edf3f8; font-size: 12px * root.text-scale;
+        }
+    }
+}

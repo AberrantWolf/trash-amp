@@ -919,6 +919,74 @@ mod tests {
             }
         }
     }
+    slint::slint! {
+        import { ConnectionIndicator, ConnectionKind } from "ui/connection-indicator.slint";
+        export component ConnectionHarness inherits Window {
+            in property <ConnectionKind> kind;
+            out property <string> description: indicator.description;
+            out property <bool> expanded: indicator.expanded;
+            indicator := ConnectionIndicator { x: parent.width - self.width; y: parent.height - self.height; kind: root.kind; available-width: parent.width; }
+        }
+    }
+    #[test]
+    fn connection_indicator_hover_click_keyboard_and_states() {
+        use slint::{
+            LogicalPosition, LogicalSize,
+            platform::{Key, PointerEventButton, WindowEvent},
+        };
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = ConnectionHarness::new().unwrap();
+        ui.window().set_size(LogicalSize::new(300., 100.));
+        ui.show().unwrap();
+        assert!(ui.get_description().contains("Not connected"));
+        for (kind, label) in [
+            (ConnectionKind::Public, "Public streaming"),
+            (ConnectionKind::Lan, "LAN streaming"),
+            (ConnectionKind::Direct, "Direct internet streaming"),
+            (ConnectionKind::Unavailable, "Streaming unavailable"),
+            (ConnectionKind::Checking, "Streaming route unconfirmed"),
+        ] {
+            ui.set_kind(kind);
+            assert!(ui.get_description().contains(label));
+        }
+        let position = LogicalPosition::new(288., 91.);
+        ui.window()
+            .dispatch_event(WindowEvent::PointerMoved { position });
+        assert!(ui.get_expanded());
+        ui.window().dispatch_event(WindowEvent::PointerMoved {
+            position: LogicalPosition::new(5., 5.),
+        });
+        assert!(!ui.get_expanded());
+        ui.window().dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        ui.window().dispatch_event(WindowEvent::PointerReleased {
+            position,
+            button: PointerEventButton::Left,
+        });
+        ui.window().dispatch_event(WindowEvent::PointerMoved {
+            position: LogicalPosition::new(5., 5.),
+        });
+        assert!(
+            ui.get_expanded(),
+            "Click keeps the explanation open after the pointer leaves"
+        );
+        ui.window().dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Escape.into(),
+        });
+        ui.window().dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Escape.into(),
+        });
+        assert!(!ui.get_expanded());
+        ui.window().dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Return.into(),
+        });
+        ui.window().dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Return.into(),
+        });
+        assert!(ui.get_expanded());
+    }
     #[test]
     fn saved_folder_selector_reopens_offline_and_cancels_pending_scans() {
         use i_slint_backend_testing::ElementHandle;
