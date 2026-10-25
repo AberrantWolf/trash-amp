@@ -2,12 +2,10 @@
 use amp_core::{Album, ItemId, Library, MediaAccess, Track};
 use anyhow::{Context, Result, bail};
 pub use collector_client::{
-    ConnectionKey, ServerUrl, collector_api_types as api, collector_core as ids,
+    ConnectionKey, EnrolledCredential, NativeCredentialStorage, ServerUrl,
+    collector_api_types as api, collector_core as ids,
 };
-use collector_client::{
-    EnrolledClient, EnrolledCredential, MediaCancellation, NativeCredentialStorage, Pairing,
-    PendingEnrollment,
-};
+use collector_client::{EnrolledClient, MediaCancellation, Pairing, PendingEnrollment};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -227,7 +225,9 @@ impl Adapter {
         self.all("connection")
     }
     pub fn selected(&self) -> Result<Option<ConnectionKey>> {
-        self.get("setting", "selected")
+        Ok(self
+            .get::<Option<ConnectionKey>>("setting", "selected")?
+            .flatten())
     }
     pub fn select(&self, key: Option<ConnectionKey>) -> Result<()> {
         self.put("setting", "selected", &key)
@@ -1185,6 +1185,23 @@ mod tests {
             server_id: ids::ServerId::new(),
             user_id: ids::UserId::new(),
         }
+    }
+    #[test]
+    fn cleared_selection_can_be_read_and_restored_after_reopening() {
+        let root = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        let adapter = Adapter::with_credentials(root.path(), secrets.clone()).unwrap();
+        let key = key();
+        assert_eq!(adapter.selected().unwrap(), None);
+        adapter.select(Some(key)).unwrap();
+        assert_eq!(adapter.selected().unwrap(), Some(key));
+        adapter.select(None).unwrap();
+        assert_eq!(adapter.selected().unwrap(), None);
+        drop(adapter);
+        let adapter = Adapter::with_credentials(root.path(), secrets).unwrap();
+        assert_eq!(adapter.selected().unwrap(), None);
+        adapter.select(Some(key)).unwrap();
+        assert_eq!(adapter.selected().unwrap(), Some(key));
     }
     fn track(key: ConnectionKey, data: &[u8]) -> Track {
         let row = api::MusicTrackAvailability {

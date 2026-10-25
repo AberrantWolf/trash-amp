@@ -33,7 +33,7 @@ def main():
         raise SystemExit("Slint license changed; update the bundled license before packaging.")
     skia = next(p for p in metadata["packages"] if p["name"] == "skia-bindings")
     skia_manifest = tomllib.loads(Path(skia["manifest_path"]).read_text())
-    if skia["version"] != "0.99.0" or skia_manifest["package"]["metadata"]["skia"] != "m150-0.98.1":
+    if skia["version"] != "0.153.3" or skia_manifest["package"]["metadata"]["skia"] != "m153-0.101.2":
         raise SystemExit("Skia version changed; update assets/native-licenses before packaging.")
 
     with tempfile.TemporaryDirectory(prefix="trash-amp-notices-") as work:

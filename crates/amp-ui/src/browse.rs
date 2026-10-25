@@ -374,56 +374,15 @@ pub(super) fn resolve_track(s: &State, target: &Target) -> Option<Track> {
         None
     }
 }
-/// The explicit queue can live before playback or in the tail of the active sequence.
-fn remaining_queue(s: &State) -> Vec<Track> {
-    let played = s.player.as_ref().map_or(0, |p| p.snapshot().track + 1);
-    remaining_queue_after(s, played)
-}
-fn remaining_queue_after(s: &State, played: usize) -> Vec<Track> {
-    s.playlist
-        .iter()
-        .skip(s.queue_start.max(played))
-        .chain(&s.queued)
-        .cloned()
-        .collect()
-}
-fn single_track_sequence(s: &State, target: &Target) -> Option<Vec<Track>> {
-    let mut sequence = vec![resolve_track(s, target)?];
-    sequence.extend(remaining_queue(s));
-    Some(sequence)
-}
 fn play_one(ui: &PlayerWindow, s: &mut State, target: &Target) {
-    let Some(sequence) = single_track_sequence(s, target) else {
+    let Some(track) = resolve_track(s, target) else {
         return;
     };
-    if s.player.is_none() {
-        match amp_audio::Player::with_resolver(s.resolver.clone()) {
-            Ok(p) => s.player = Some(p),
-            Err(e) => {
-                ui.set_status(format!("Audio output: {e:#}").into());
-                return;
-            }
-        }
-    }
-    s.playlist = sequence;
-    s.queue_start = 1;
-    s.queued.clear();
-    s.player.as_ref().unwrap().play(s.playlist.clone(), 0);
+    s.playback.play_track(track);
     ui.set_status("Playing track".into());
 }
 pub(super) fn enqueue_track(ui: &PlayerWindow, s: &mut State, track: Track) {
-    if let Some(player) = &s.player {
-        s.playlist.push(track.clone());
-        player.append(vec![track]);
-    } else {
-        s.queued.push(track);
-    }
-    ui.set_queued(ModelRc::new(VecModel::from(
-        remaining_queue(s)
-            .iter()
-            .map(|t| SharedString::from(crate::collector::queue_label(t)))
-            .collect::<Vec<_>>(),
-    )));
+    s.playback.enqueue(track);
     ui.set_status("Added to up next".into());
 }
 fn action(ui: &PlayerWindow, s: &mut State, detail: bool, i: i32, verb: i32) {
@@ -589,30 +548,29 @@ pub(super) fn mode_changed(ui: &PlayerWindow, s: &mut State) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use slint::Model;
-    fn setup(name: &str) -> (PlayerWindow, Rc<RefCell<State>>, PathBuf) {
+    fn setup(name: &str) -> (PlayerWindow, Rc<RefCell<State>>, PathBuf, TestServices) {
         i_slint_backend_testing::init_no_event_loop();
         let ui = PlayerWindow::new().unwrap();
         ui.window().set_size(slint::LogicalSize::new(980.0, 760.0));
         ui.show().unwrap();
         let path =
             std::env::temp_dir().join(format!("trash-browse-{name}-{}.sqlite", std::process::id()));
+        let service = TestServices::new(&path);
         let state = Rc::new(RefCell::new(State {
-            resolver: None,
+            playback: service.playback(),
             artwork: Default::default(),
             browser: Browser::default(),
             library: amp_library::demo_library(),
             selected: None,
-            playlist: vec![],
-            queued: vec![],
-            queue_start: 0,
-            player: None,
-            store: Store::open(&path).unwrap(),
+            catalog: service.catalog(),
+            folders: service.catalog().snapshot().folders,
+            catalog_revision: 0,
+            catalog_replacement: 0,
             preferences: Preferences::default(),
         }));
         rebuild(&ui, &mut state.borrow_mut(), true);
         wire(&ui, &state);
-        (ui, state, path)
+        (ui, state, path, service)
     }
     fn results(ui: &PlayerWindow, s: &mut State, query: &str) {
         s.browser.query = query.into();
@@ -622,7 +580,7 @@ mod tests {
     }
     #[test]
     fn previews_show_all_and_back_restore_search() {
-        let (ui, state, path) = setup("preview");
+        let (ui, state, path, _service) = setup("preview");
         results(&ui, &mut state.borrow_mut(), "movement");
         let more = state
             .borrow()
@@ -654,7 +612,7 @@ mod tests {
     }
     #[test]
     fn track_selection_is_id_based_and_does_not_play_or_enqueue() {
-        let (ui, state, path) = setup("select");
+        let (ui, state, path, _service) = setup("select");
         ui.set_wide(false);
         results(&ui, &mut state.borrow_mut(), "movement");
         let (i, target) = state
@@ -675,16 +633,24 @@ mod tests {
         ui.invoke_browse_action(false, i as i32, 0);
         assert!(!ui.get_show_library());
         assert_eq!(ui.get_selected_track(), 0);
-        assert!(state.borrow().player.is_none());
-        assert!(state.borrow().queued.is_empty());
+        assert!(state.borrow().playback.snapshot().current.is_none());
+        assert!(state.borrow().playback.snapshot().up_next.is_empty());
         assert_eq!(state.borrow().browser.selected_result, Some(target.clone()));
         ui.invoke_back();
         assert!(ui.get_show_library());
         assert_eq!(ui.get_search_text(), "movement");
         ui.invoke_browse_action(false, i as i32, 2);
         assert!(ui.get_show_library());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while state.borrow().playback.snapshot().up_next.is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "enqueue reaches the application worker"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert_eq!(
-            state.borrow().queued[0].id,
+            state.borrow().playback.snapshot().up_next[0].id,
             resolve_track(&state.borrow(), &target).unwrap().id
         );
         let last = {
@@ -715,7 +681,7 @@ mod tests {
     }
     #[test]
     fn artist_navigation_clear_and_metadata_rebuild_keep_details() {
-        let (ui, state, path) = setup("artist");
+        let (ui, state, path, _service) = setup("artist");
         results(&ui, &mut state.borrow_mut(), "fixture");
         ui.invoke_open_artist("Layout fixture".into());
         assert!(ui.get_artist_view());
@@ -749,7 +715,7 @@ mod tests {
     }
     #[test]
     fn stale_query_and_catalog_replies_are_discarded() {
-        let (ui, state, path) = setup("stale");
+        let (ui, state, path, _service) = setup("stale");
         let mut s = state.borrow_mut();
         results(&ui, &mut s, "missing");
         let stale = s.browser.index.search("movement");
@@ -783,7 +749,7 @@ mod tests {
     fn search_input_keeps_transport_keys_and_focus_shortcut_works_on_phone() {
         use slint::platform::{Key, WindowEvent};
         use std::cell::Cell;
-        let (ui, state, path) = setup("focus");
+        let (ui, state, path, _service) = setup("focus");
         let toggles = Rc::new(Cell::new(0));
         let t = toggles.clone();
         ui.on_toggle_play(move || t.set(t.get() + 1));
@@ -830,7 +796,7 @@ mod tests {
     }
     #[test]
     fn pending_pointer_navigation_preserves_source_and_can_be_cancelled() {
-        let (ui, state, path) = setup("pointer");
+        let (ui, state, path, _service) = setup("pointer");
         ui.set_wide(false);
         results(&ui, &mut state.borrow_mut(), "movement");
         let i = state
@@ -855,7 +821,7 @@ mod tests {
         poll(&ui, &mut state.borrow_mut());
         assert!(!ui.get_show_library());
         assert_eq!(state.borrow().browser.selected_result, Some(target));
-        assert!(state.borrow().player.is_none());
+        assert!(state.borrow().playback.snapshot().current.is_none());
         ui.invoke_back();
         ui.invoke_browse_action(false, i as i32, 3);
         ui.set_search_text("changed".into());
@@ -867,7 +833,7 @@ mod tests {
     #[test]
     fn hundred_thousand_results_only_instantiate_visible_rows() {
         use i_slint_backend_testing::ElementHandle;
-        let (ui, state, path) = setup("virtualized");
+        let (ui, state, path, _service) = setup("virtualized");
         {
             let mut s = state.borrow_mut();
             let original = s.library.albums.clone();
@@ -896,33 +862,6 @@ mod tests {
             count > 0 && count < 100,
             "instantiated {count} scrolled rows"
         );
-        drop(state);
-        let _ = std::fs::remove_file(path);
-    }
-    #[test]
-    fn explicit_queue_excludes_automatic_album_tail() {
-        let (ui, state, path) = setup("queue");
-        let mut s = state.borrow_mut();
-        let album = s.library.albums[0].tracks.clone();
-        s.playlist = album.clone();
-        s.queue_start = album.len();
-        let explicit = s.library.albums[1].tracks[0].clone();
-        s.playlist.push(explicit.clone());
-        s.queued.push(explicit.clone());
-        let remaining = remaining_queue(&s);
-        assert_eq!(remaining.len(), 2);
-        assert!(remaining.iter().all(|t| t.id == explicit.id));
-        let target = Target::Track {
-            album: s.library.albums[2].id.clone(),
-            track: s.library.albums[2].tracks[3].id.clone(),
-        };
-        let sequence = single_track_sequence(&s, &target).unwrap();
-        assert_eq!(sequence.len(), 3);
-        assert_eq!(sequence[0].id, resolve_track(&s, &target).unwrap().id);
-        assert_eq!(sequence[1].id, explicit.id);
-        assert_eq!(remaining_queue_after(&s, s.playlist.len()).len(), 1);
-        assert!(ui.get_queued().row_count() == 0);
-        drop(s);
         drop(state);
         let _ = std::fs::remove_file(path);
     }

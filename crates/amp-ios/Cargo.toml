@@ -1,0 +1,28 @@
+[package]
+name = "trash-amp-ios"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+amp-ui.workspace = true
+objc2 = "0.6"
+block2 = "0.6"
+objc2-ui-kit = { version = "0.3.2", default-features = false, features = ["std", "UIApplication", "block2"] }
+amp-collector.workspace = true
+# The SDK's rustls native-root loader treats iOS as Unix and cannot load its
+# trust store. Select Apple TLS for this host, including user-installed roots.
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+serde_json.workspace = true
+security-framework = "3.7"
+security-framework-sys = "2.15"
+core-foundation = "0.10"
+objc2-media-player = { version = "0.3.2", default-features = false, features = ["std", "MPNowPlayingInfoCenter"] }
+amp-app.workspace = true
+amp-media.workspace = true
+anyhow.workspace = true
+slint.workspace = true
+souvlaki.workspace = true
+objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["std", "AVAudioSession", "AVAudioSessionTypes"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSPathUtilities", "NSDictionary", "NSValue", "NSObject", "NSURL"] }
+dispatch2 = "0.3"

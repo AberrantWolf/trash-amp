@@ -24,6 +24,13 @@ The bundle uses an ad-hoc development signature by default. Developer ID signing
 and notarized release packaging are described in the [release guide](docs/macos-release.md).
 Bundling requires Python 3 and the Xcode command-line tools in addition to Rust.
 
+## iOS development
+
+An initial iPhone/iPad host shares the Slint UI with desktop. It is a development
+bootstrap; background playback and device qualification remain unfinished.
+See [iOS development](docs/ios-development.md) for simulator builds, signing and
+remaining work.
+
 ## Run
 
 ```sh

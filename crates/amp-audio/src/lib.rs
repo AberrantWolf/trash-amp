@@ -39,6 +39,7 @@ struct Frame {
 }
 #[derive(Default)]
 struct Shared {
+    clock_writer: AtomicBool,
     playing: AtomicBool,
     generation: AtomicU64,
     track: AtomicUsize,
@@ -47,7 +48,32 @@ struct Shared {
     underruns: AtomicU64,
     shutdown: AtomicBool,
     sample_rate: AtomicU32,
+    sequence: AtomicU64,
     output_state: AtomicUsize,
+}
+/// The render callback never waits. A decoder-side edit can briefly silence a
+/// callback while it captures the audible position and installs a new generation.
+struct ClockGuard<'a>(&'a AtomicBool);
+impl<'a> ClockGuard<'a> {
+    fn try_lock(writer: &'a AtomicBool) -> Option<Self> {
+        writer
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .ok()
+            .map(|_| Self(writer))
+    }
+    fn lock(writer: &'a AtomicBool) -> Self {
+        loop {
+            if let Some(guard) = Self::try_lock(writer) {
+                return guard;
+            }
+            thread::yield_now();
+        }
+    }
+}
+impl Drop for ClockGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 /// Availability of the current system-default output. Recovery never starts audio on its own.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -64,7 +90,10 @@ pub enum PlayerEvent {
     PlaybackError(String),
 }
 
+#[derive(Clone, Debug, Default)]
 pub struct Snapshot {
+    /// The latest sequence replacement applied by the decoder worker.
+    pub sequence: u64,
     pub output: OutputState,
     pub playing: bool,
     pub track: usize,
@@ -72,8 +101,16 @@ pub struct Snapshot {
     pub level: f32,
     pub underruns: u64,
 }
+/// Queue policy runs on the decoder worker against its audible position, after
+/// earlier transport commands. None preserves that position; Some starts anew.
+pub type QueueEdit = Box<dyn FnOnce(usize) -> (Vec<Track>, Option<usize>) + Send>;
+pub struct QueueUpdate {
+    pub tracks: Vec<Track>,
+    pub clock: Snapshot,
+}
 enum Command {
-    Replace(Vec<Track>, usize),
+    Edit(QueueEdit, u64, mpsc::Sender<Vec<Track>>),
+    Replace(Vec<Track>, usize, u64),
     Seek(f64),
     Toggle,
     SetPlaying(bool),
@@ -90,6 +127,7 @@ pub trait MediaResolver: Send + Sync {
 pub struct Player {
     resolver: Option<Arc<dyn MediaResolver>>,
     commands: mpsc::Sender<Command>,
+    next_sequence: AtomicU64,
     shared: Arc<Shared>,
     events: mpsc::Receiver<PlayerEvent>,
 }
@@ -120,17 +158,22 @@ impl Player {
             Self {
                 resolver,
                 commands,
+                next_sequence: AtomicU64::new(0),
                 shared,
                 events,
             },
             worker,
         ))
     }
-    pub fn play(&self, tracks: Vec<Track>, start: usize) {
+    pub fn play(&self, tracks: Vec<Track>, start: usize) -> u64 {
         if let Some(resolver) = &self.resolver {
             resolver.cancel();
         }
-        let _ = self.commands.send(Command::Replace(tracks, start));
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let _ = self
+            .commands
+            .send(Command::Replace(tracks, start, sequence));
+        sequence
     }
     pub fn toggle(&self) {
         let _ = self.commands.send(Command::Toggle);
@@ -167,8 +210,26 @@ impl Player {
     pub fn truncate(&self, len: usize) {
         let _ = self.commands.send(Command::Truncate(len));
     }
+    pub fn edit_queue(&self, edit: QueueEdit) -> Result<QueueUpdate> {
+        if let Some(resolver) = &self.resolver {
+            resolver.cancel();
+        }
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1;
+        let (tx, rx) = mpsc::channel();
+        self.commands
+            .send(Command::Edit(edit, sequence, tx))
+            .map_err(|_| anyhow::anyhow!("Audio worker stopped during queue edit"))?;
+        let tracks = rx
+            .recv()
+            .context("Audio worker stopped during queue edit")?;
+        Ok(QueueUpdate {
+            tracks,
+            clock: self.snapshot(),
+        })
+    }
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
+            sequence: self.shared.sequence.load(Ordering::Acquire),
             output: match self.shared.output_state.load(Ordering::Acquire) {
                 1 => OutputState::Ready,
                 2 => OutputState::Unavailable,

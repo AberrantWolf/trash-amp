@@ -1,5 +1,6 @@
 //! Slint presentation adapter. Every operation runs on a worker; browsing and playback have separate lifetimes.
 use super::*;
+use amp_app::catalog::{ExternalCatalog, Generation};
 use amp_collector::{
     Adapter, ConnectionKey, ConnectionState, ListCommand, SavedConnection, Snapshot, api, ids,
 };
@@ -16,10 +17,68 @@ struct View {
     online: bool,
     connection: ConnectionState,
 }
+struct Connected {
+    key: ConnectionKey,
+    connections: Vec<SavedConnection>,
+    snapshot: Option<Snapshot>,
+}
+fn publish_catalog(
+    adapter: &Arc<Adapter>,
+    catalog: &Catalog,
+    version: u64,
+    key: ConnectionKey,
+    snapshot: Option<&Snapshot>,
+) -> anyhow::Result<bool> {
+    let source = format!("{}/{}", key.server_id, key.user_id);
+    let data = ExternalCatalog {
+        source,
+        library: snapshot.map(|s| s.library.clone()).unwrap_or_default(),
+        artwork: snapshot.map(|s| s.artwork.clone()).unwrap_or_default(),
+    };
+    catalog
+        .complete_external(version, data, selection_commit(adapter.clone(), Some(key)))
+        .recv()
+        .context("Catalog worker stopped")?
+}
+fn selection_commit(
+    adapter: Arc<Adapter>,
+    key: Option<ConnectionKey>,
+) -> amp_app::catalog::SelectionCommit {
+    Arc::new(move || {
+        let previous = adapter.selected()?;
+        adapter.select(key)?;
+        let adapter = adapter.clone();
+        Ok(Box::new(move || adapter.select(previous)))
+    })
+}
+fn open_source(
+    adapter: Arc<Adapter>,
+    tx: mpsc::Sender<Event>,
+    generation: Generation,
+    version: u64,
+    key: ConnectionKey,
+    catalog: Catalog,
+    online: bool,
+) {
+    std::thread::spawn(move || {
+        let result = adapter.snapshot(key).and_then(|snapshot| {
+            if !publish_catalog(&adapter, &catalog, version, key, snapshot.as_ref())? {
+                anyhow::bail!("Catalog operation cancelled");
+            }
+            Ok(snapshot)
+        });
+        let _ = tx.send(Event::Cached(version, key, result));
+        if online {
+            refresh(adapter, tx, generation, version, key, catalog);
+        }
+    });
+}
 enum Event {
-    Connected(u64, anyhow::Result<ConnectionKey>),
+    Connected(u64, anyhow::Result<Connected>),
+    Cached(u64, ConnectionKey, anyhow::Result<Option<Snapshot>>),
     Refreshed(u64, ConnectionKey, anyhow::Result<Snapshot>),
     Approval(u64, String),
+    OpenFailed(u64, String),
     Message(String),
     Mutation(u64, ConnectionKey, anyhow::Result<()>),
     Downloads,
@@ -33,9 +92,10 @@ pub struct Controller {
     state: Rc<RefCell<State>>,
     adapter: Arc<Adapter>,
     view: Rc<RefCell<View>>,
-    generation: Arc<AtomicU64>,
+    generation: Generation,
     download_busy: Arc<AtomicBool>,
     connection_probe: Option<(u64, ConnectionKey, std::time::Instant, bool)>,
+    open_url: crate::UrlOpener,
 }
 fn connection_kind(state: ConnectionState) -> ConnectionKind {
     match state {
@@ -54,15 +114,15 @@ pub fn queue_label(t: &Track) -> String {
         format!("{} · {}", t.title, t.artist)
     }
 }
+fn connection_error(ui: &PlayerWindow, message: String) {
+    ui.set_connection_status(message.clone().into());
+    ui.set_error_title("Connection failed".into());
+    ui.set_error_message(message.into());
+}
 fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?)
-}
-fn error(ui: &PlayerWindow, result: anyhow::Result<()>) {
-    if let Err(e) = result {
-        ui.set_connection_status(e.to_string().into())
-    }
 }
 fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, adapter: &Adapter) {
     let mut s = state.borrow_mut();
@@ -232,14 +292,20 @@ fn sources(ui: &PlayerWindow, view: &View) {
 fn refresh(
     adapter: Arc<Adapter>,
     tx: mpsc::Sender<Event>,
-    generation: Arc<AtomicU64>,
+    generation: Generation,
     v: u64,
     key: ConnectionKey,
+    catalog: Catalog,
 ) {
     std::thread::spawn(move || {
-        let result = (|| {
-            runtime()?.block_on(adapter.refresh(key, &|| generation.load(Ordering::Acquire) != v))
-        })();
+        let result =
+            (|| runtime()?.block_on(adapter.refresh(key, &|| generation.current() != v)))();
+        let result = result.and_then(|snapshot| {
+            if !publish_catalog(&adapter, &catalog, v, key, Some(&snapshot))? {
+                anyhow::bail!("Catalog operation cancelled");
+            }
+            Ok(snapshot)
+        });
         let _ = tx.send(Event::Refreshed(v, key, result));
     });
 }
@@ -247,12 +313,19 @@ impl Controller {
     pub fn new(
         ui: &PlayerWindow,
         state: &Rc<RefCell<State>>,
-        data: &Path,
-        generation: Arc<AtomicU64>,
+        adapter: Arc<Adapter>,
+        generation: Generation,
+        open_url: crate::UrlOpener,
     ) -> anyhow::Result<Self> {
-        let adapter = Adapter::open(&data.join("collector"))?;
-        state.borrow_mut().resolver = Some(adapter.clone());
-        let selected = adapter.selected()?;
+        state.borrow().playback.set_resolver(adapter.clone());
+        let catalog = state.borrow().catalog.clone();
+        let local_adapter = adapter.clone();
+        catalog.on_local_selection(selection_commit(local_adapter, None));
+        let selected = if state.borrow().library.id == "demo" {
+            None
+        } else {
+            adapter.selected()?
+        };
         let connections = adapter.connections()?;
         let snapshot = selected
             .map(|key| adapter.snapshot(key))
@@ -270,7 +343,15 @@ impl Controller {
         let (tx, rx) = mpsc::channel();
         let download_busy = Arc::new(AtomicBool::new(false));
         sources(ui, &view.borrow());
-        if selected.is_some() {
+        if let Some(key) = selected {
+            let version = generation.advance();
+            publish_catalog(
+                &adapter,
+                &catalog,
+                version,
+                key,
+                view.borrow().snapshot.as_ref(),
+            )?;
             install(ui, state, &view.borrow(), &adapter);
         }
         ui.set_download_budget(
@@ -287,7 +368,7 @@ impl Controller {
             let tx = tx.clone();
             ui.on_source_changed(move |i| {
                 let Some(ui) = weak.upgrade() else { return };
-                let v = g.fetch_add(1, Ordering::AcqRel) + 1;
+                let v = g.advance();
                 let mut view = view.borrow_mut();
                 view.selected = if i > 0 {
                     view.connections.get(i as usize - 1).map(|c| c.key)
@@ -301,9 +382,8 @@ impl Controller {
                 ui.set_collection_index(0);
                 ui.set_scanning(false);
                 ui.set_collector_busy(false);
-                error(&ui, a.select(view.selected));
                 if let Some(key) = view.selected {
-                    view.snapshot = a.snapshot(key).ok().flatten();
+                    view.snapshot = None;
                     install(&ui, &state, &view, &a);
                     ui.set_server_url(
                         view.connections
@@ -313,22 +393,23 @@ impl Controller {
                             .unwrap_or_default()
                             .into(),
                     );
-                    if view.connections.iter().any(|c| c.key == key && !c.removed) {
-                        ui.set_collector_busy(true);
-                        refresh(a.clone(), tx.clone(), g.clone(), v, key);
-                    }
+                    let online = view.connections.iter().any(|c| c.key == key && !c.removed);
+                    ui.set_collector_busy(online);
+                    open_source(
+                        a.clone(),
+                        tx.clone(),
+                        g.clone(),
+                        v,
+                        key,
+                        state.borrow().catalog.clone(),
+                        online,
+                    );
                 } else {
                     view.snapshot = None;
                     let mut s = state.borrow_mut();
-                    s.library = s.store.library().ok().flatten().unwrap_or_default();
-                    s.artwork.clear();
+                    s.catalog.restore_local();
                     s.selected = None;
-                    if let Err(e) = folder_choices(&ui, &s) {
-                        ui.set_status(format!("Cannot list saved folders: {e}").into());
-                    }
-                    sort_albums(&ui, &mut s);
                     albums(&ui, &s);
-                    browse::rebuild(&ui, &mut s, true);
                     ui.set_collector_active(false);
                     ui.set_collector_online(false);
                     ui.set_connection_kind(ConnectionKind::Disconnected);
@@ -342,12 +423,13 @@ impl Controller {
             let tx = tx.clone();
             let g = generation.clone();
             let weak = ui.as_weak();
+            let catalog = catalog.clone();
             ui.on_connect_server(move || {
                 let Some(ui) = weak.upgrade() else { return };
                 let url = match ui.get_server_url().parse() {
                     Ok(url) => url,
                     Err(e) => {
-                        ui.set_connection_status(format!("Invalid URL: {e}").into());
+                        connection_error(&ui, format!("Invalid URL: {e}"));
                         return;
                     }
                 };
@@ -357,36 +439,73 @@ impl Controller {
                     match read_trust(Path::new(ui.get_certificate_path().as_str())) {
                         Ok(s) => Some(s),
                         Err(e) => {
-                            ui.set_connection_status(e.to_string().into());
+                            connection_error(&ui, format!("Could not read the trust file: {e:#}"));
                             return;
                         }
                     }
                 };
                 ui.set_collector_busy(true);
-                let v = g.fetch_add(1, Ordering::AcqRel) + 1;
+                ui.set_connection_status("Connecting to server…".into());
+                let v = g.advance();
                 let a = a.clone();
                 let tx = tx.clone();
                 let g = g.clone();
+                let catalog = catalog.clone();
                 std::thread::spawn(move || {
                     let result = (|| {
                         runtime()?.block_on(a.enroll(
                             url,
                             trust,
-                            &|| g.load(Ordering::Acquire) != v,
+                            &|| g.current() != v,
                             &mut |url| {
                                 let _ = tx.send(Event::Approval(v, url));
                             },
                         ))
                     })();
+                    let result = result.and_then(|key| {
+                        let snapshot = a.snapshot(key)?;
+                        if !publish_catalog(&a, &catalog, v, key, snapshot.as_ref())? {
+                            anyhow::bail!("Catalog operation cancelled");
+                        }
+                        Ok(Connected {
+                            key,
+                            snapshot,
+                            connections: a.connections()?,
+                        })
+                    });
+                    let key = result.as_ref().ok().map(|ready| ready.key);
                     let _ = tx.send(Event::Connected(v, result));
+                    if let Some(key) = key {
+                        refresh(a, tx, g, v, key, catalog);
+                    }
                 });
             });
         }
         {
             let g = generation.clone();
             let weak = ui.as_weak();
+            let catalog = catalog.clone();
+            let view = view.clone();
+            let a = adapter.clone();
+            let tx = tx.clone();
+            let state = state.clone();
             ui.on_cancel_connect(move || {
-                g.fetch_add(1, Ordering::AcqRel);
+                let v = g.advance();
+                if let Some(key) = view.borrow().selected {
+                    open_source(
+                        a.clone(),
+                        tx.clone(),
+                        g.clone(),
+                        v,
+                        key,
+                        catalog.clone(),
+                        false,
+                    );
+                } else if state.borrow().library.id == "demo" {
+                    catalog.show_transient(state.borrow().library.clone());
+                } else {
+                    catalog.restore_local();
+                }
                 if let Some(ui) = weak.upgrade() {
                     ui.set_collector_busy(false);
                     ui.set_connection_status("Operation cancelled".into());
@@ -399,11 +518,12 @@ impl Controller {
             let g = generation.clone();
             let view = view.clone();
             let weak = ui.as_weak();
+            let catalog = catalog.clone();
             ui.on_refresh_server(move || {
                 if let (Some(key), Some(ui)) = (view.borrow().selected, weak.upgrade()) {
-                    let v = g.fetch_add(1, Ordering::AcqRel) + 1;
+                    let v = g.advance();
                     ui.set_collector_busy(true);
-                    refresh(a.clone(), tx.clone(), g.clone(), v, key);
+                    refresh(a.clone(), tx.clone(), g.clone(), v, key, catalog.clone());
                 }
             });
         }
@@ -471,7 +591,9 @@ impl Controller {
                 )));
                 ui.set_album_source_index(i);
                 if i > 0 {
-                    ui.set_album_ambiguous(false)
+                    ui.set_album_ambiguous(false);
+                    s.playback
+                        .set_default_album(Some((s.library.albums[index].tracks.clone(), false)));
                 }
             });
         }
@@ -541,20 +663,7 @@ impl Controller {
                     ui.set_connection_status("No playable tracks in this list".into());
                     return;
                 }
-                let mut s = state.borrow_mut();
-                if s.player.is_none() {
-                    match amp_audio::Player::with_resolver(s.resolver.clone()) {
-                        Ok(p) => s.player = Some(p),
-                        Err(e) => {
-                            ui.set_connection_status(e.to_string().into());
-                            return;
-                        }
-                    }
-                }
-                s.playlist = tracks;
-                s.queued.clear();
-                s.queue_start = s.playlist.len();
-                s.player.as_ref().unwrap().play(s.playlist.clone(), 0);
+                state.borrow().playback.play_list(tracks);
                 ui.set_connection_status(
                     format!("Playing list · {excluded} unavailable entries excluded").into(),
                 );
@@ -567,17 +676,28 @@ impl Controller {
             let weak = ui.as_weak();
             let tx = tx.clone();
             let g = generation.clone();
+            let catalog = catalog.clone();
             ui.on_list_command(move |verb| {
                 let Some(ui) = weak.upgrade() else { return };
                 if verb == 8 || verb == 9 {
                     if let Some(key) = view.borrow().selected {
                         if verb == 9 {
-                            error(&ui, a.discard_commands(key));
+                            let a = a.clone();
+                            let tx = tx.clone();
+                            catalog.persist(Box::new(move || {
+                                let result = a.discard_commands(key);
+                                if let Err(error) = &result {
+                                    let _ = tx.send(Event::Message(error.to_string()));
+                                }
+                                result
+                            }));
                         } else {
                             let pending = a.pending_commands(key).unwrap_or_default();
                             let a = a.clone();
                             let tx = tx.clone();
-                            let v = g.load(Ordering::Acquire);
+                            let v = g.current();
+                            let catalog = catalog.clone();
+                            let generation = g.clone();
                             std::thread::spawn(move || {
                                 let result = (|| -> anyhow::Result<()> {
                                     let rt = runtime()?;
@@ -586,7 +706,11 @@ impl Controller {
                                     }
                                     Ok(())
                                 })();
+                                let refresh_after = result.is_ok();
                                 let _ = tx.send(Event::Mutation(v, key, result));
+                                if refresh_after {
+                                    refresh(a, tx, generation, v, key, catalog);
+                                }
                             });
                         }
                     }
@@ -694,13 +818,19 @@ impl Controller {
                         let a = a.clone();
                         let tx = tx.clone();
                         let key = command.key;
-                        let v = g.load(Ordering::Acquire);
+                        let v = g.current();
+                        let generation = g.clone();
+                        let catalog = catalog.clone();
                         std::thread::spawn(move || {
                             let result = (|| -> anyhow::Result<()> {
                                 runtime()?.block_on(a.submit(command))?;
                                 Ok(())
                             })();
+                            let refresh_after = result.is_ok();
                             let _ = tx.send(Event::Mutation(v, key, result));
+                            if refresh_after {
+                                refresh(a, tx, generation, v, key, catalog);
+                            }
                         });
                     }
                 }
@@ -709,18 +839,30 @@ impl Controller {
         {
             let a = adapter.clone();
             let weak = ui.as_weak();
+            let tx = tx.clone();
+            let catalog = catalog.clone();
             ui.on_save_budget(move || {
-                if let Some(ui) = weak.upgrade() {
-                    error(
-                        &ui,
-                        (|| {
-                            let gib = ui.get_download_budget().parse::<f64>()?;
-                            if !gib.is_finite() || gib <= 0. || gib > 1048576. {
-                                anyhow::bail!("Enter a positive GiB budget")
-                            };
-                            a.set_budget((gib * 1024. * 1024. * 1024.) as u64)
-                        })(),
-                    );
+                let Some(ui) = weak.upgrade() else { return };
+                let bytes = (|| -> anyhow::Result<u64> {
+                    let gib = ui.get_download_budget().parse::<f64>()?;
+                    if !gib.is_finite() || gib <= 0.0 || gib > 1048576.0 {
+                        anyhow::bail!("Enter a positive GiB budget");
+                    }
+                    Ok((gib * 1024.0 * 1024.0 * 1024.0) as u64)
+                })();
+                match bytes {
+                    Err(error) => ui.set_connection_status(error.to_string().into()),
+                    Ok(bytes) => {
+                        let a = a.clone();
+                        let tx = tx.clone();
+                        catalog.persist(Box::new(move || {
+                            let result = a.set_budget(bytes);
+                            if let Err(error) = &result {
+                                let _ = tx.send(Event::Message(error.to_string()));
+                            }
+                            result
+                        }));
+                    }
                 }
             });
         }
@@ -831,8 +973,9 @@ impl Controller {
                 adapter.clone(),
                 tx.clone(),
                 generation.clone(),
-                generation.load(Ordering::Acquire),
+                generation.current(),
                 key,
+                catalog.clone(),
             );
         }
         let pending = adapter
@@ -866,44 +1009,65 @@ impl Controller {
             generation,
             download_busy,
             connection_probe: None,
+            open_url,
         })
     }
     pub fn poll(&mut self) {
         let Some(ui) = self.ui.upgrade() else { return };
         while let Ok(event) = self.rx.try_recv() {
-            let current = self.generation.load(Ordering::Acquire);
+            let current = self.generation.current();
             match event {
                 Event::Approval(v, url) if v == current => {
                     ui.set_connection_status(
                         format!("Approve Trash Amp in your browser: {url}").into(),
                     );
-                    let _ = std::process::Command::new("open").arg(url).spawn();
+                    let tx = self.tx.clone();
+                    (self.open_url)(
+                        &url.clone(),
+                        Box::new(move |result| {
+                            if let Err(error) = result {
+                                let _ = tx.send(Event::OpenFailed(v, format!(
+                                "Could not open the approval page: {error}\n\nOpen this address in your browser to approve Trash Amp, or cancel and retry:\n{url}"
+                            )));
+                            }
+                        }),
+                    );
                 }
+                Event::OpenFailed(v, message) if v == current => connection_error(&ui, message),
                 Event::Connected(v, result) if v == current => {
                     ui.set_collector_busy(false);
                     match result {
-                        Ok(key) => {
+                        Ok(ready) => {
                             let mut view = self.view.borrow_mut();
-                            view.connections = self.adapter.connections().unwrap_or_default();
-                            view.selected = Some(key);
-                            view.snapshot = self.adapter.snapshot(key).ok().flatten();
+                            view.connections = ready.connections;
+                            view.selected = Some(ready.key);
+                            view.snapshot = ready.snapshot;
                             view.collection = None;
                             view.list = None;
                             view.online = false;
                             view.connection = ConnectionState::Disconnected;
-                            error(&ui, self.adapter.select(Some(key)));
                             sources(&ui, &view);
                             install(&ui, &self.state, &view, &self.adapter);
                             ui.set_collector_busy(true);
-                            refresh(
-                                self.adapter.clone(),
-                                self.tx.clone(),
-                                self.generation.clone(),
-                                v,
-                                key,
-                            );
                         }
-                        Err(e) => ui.set_connection_status(e.to_string().into()),
+                        Err(e) => {
+                            connection_error(&ui, format!("Could not connect to Collector: {e:#}"))
+                        }
+                    }
+                }
+                Event::Cached(v, key, result)
+                    if v == current && self.view.borrow().selected == Some(key) =>
+                {
+                    match result {
+                        Ok(snapshot) => {
+                            let mut view = self.view.borrow_mut();
+                            view.snapshot = snapshot;
+                            install(&ui, &self.state, &view, &self.adapter);
+                        }
+                        Err(error) => connection_error(
+                            &ui,
+                            format!("Could not open the Collector library: {error:#}"),
+                        ),
                     }
                 }
                 Event::Refreshed(v, key, result)
@@ -932,15 +1096,20 @@ impl Controller {
                             view.connection = ConnectionState::Disconnected;
                             ui.set_collector_online(false);
                             ui.set_connection_kind(ConnectionKind::Disconnected);
-                            ui.set_connection_status(
-                                format!("Cached library retained: {e}").into(),
+                            connection_error(
+                                &ui,
+                                format!(
+                                    "Could not refresh the Collector library: {e:#}\n\nYour cached library is still available."
+                                ),
                             );
                         }
                     }
                 }
-                Event::Mutation(v, key, result) if v == current => {
-                    ui.set_collector_busy(false);
-                    match result{Ok(())=>{ui.set_collector_busy(true);refresh(self.adapter.clone(),self.tx.clone(),self.generation.clone(),v,key)},Err(e)=>ui.set_connection_status(format!("List change unresolved: {e}. Refresh and retry the original command.").into())}
+                Event::Mutation(v, _key, result) if v == current => {
+                    ui.set_collector_busy(result.is_ok());
+                    if let Err(error) = result {
+                        ui.set_connection_status(format!("List change unresolved: {error}. Refresh and retry the original command.").into());
+                    }
                 }
                 Event::Removed(key, result) => {
                     ui.set_removing_connection(false);
@@ -1021,7 +1190,7 @@ impl Controller {
             && let Some(key) = view.selected
             && view.connections.iter().any(|c| c.key == key && !c.removed)
         {
-            let v = self.generation.load(Ordering::Acquire);
+            let v = self.generation.current();
             if self
                 .connection_probe
                 .is_none_or(|(old_v, old_key, started, pending)| {
@@ -1058,27 +1227,117 @@ mod tests {
     use super::*;
 
     #[test]
+    fn connection_failures_and_browser_failures_show_modal_errors() {
+        i_slint_backend_testing::init_no_event_loop();
+        let data = std::env::temp_dir().join(format!("trash-amp-errors-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data).unwrap();
+        let services = TestServices::new(&data.join("library.sqlite3"));
+        let state = Rc::new(RefCell::new(State {
+            catalog: services.catalog(),
+            folders: services.catalog().snapshot().folders,
+            catalog_revision: 0,
+            catalog_replacement: 0,
+            library: Library::default(),
+            playback: services.playback(),
+            artwork: Default::default(),
+            browser: browse::Browser::default(),
+            selected: None,
+            preferences: Preferences::default(),
+        }));
+        let ui = PlayerWindow::new().unwrap();
+        let generation = services.catalog().generation();
+        let mut controller = Controller::new(
+            &ui,
+            &state,
+            Adapter::open(&data.join("collector")).unwrap(),
+            generation.clone(),
+            |_, completed| completed(Err("Browser unavailable".into())),
+        )
+        .unwrap();
+        ui.set_server_url("invalid URL".into());
+        ui.invoke_connect_server();
+        assert!(ui.get_error_message().contains("Invalid URL"));
+        assert!(!ui.get_collector_busy());
+        ui.set_error_message("".into());
+        ui.set_server_url("https://example.invalid".into());
+        ui.set_certificate_path("/nonexistent/trust-file".into());
+        ui.invoke_connect_server();
+        assert!(ui.get_error_message().contains("trust file"));
+        ui.set_error_message("".into());
+        let v = generation.advance();
+        ui.set_collector_busy(true);
+        controller
+            .tx
+            .send(Event::Connected(
+                v,
+                Err(anyhow::anyhow!("Required entitlement missing")
+                    .context("Secure storage failed")),
+            ))
+            .unwrap();
+        controller.poll();
+        assert!(!ui.get_collector_busy());
+        assert!(
+            ui.get_error_message()
+                .contains("Secure storage failed: Required entitlement missing")
+        );
+        assert_eq!(ui.get_connection_status(), ui.get_error_message());
+        ui.set_error_message("".into());
+        controller
+            .tx
+            .send(Event::Connected(
+                v - 1,
+                Err(anyhow::anyhow!("obsolete failure")),
+            ))
+            .unwrap();
+        controller.poll();
+        assert!(ui.get_error_message().is_empty());
+        controller
+            .tx
+            .send(Event::Approval(v, "https://example.invalid/approve".into()))
+            .unwrap();
+        controller.poll();
+        assert!(ui.get_error_message().contains("Browser unavailable"));
+        assert!(
+            ui.get_error_message()
+                .contains("https://example.invalid/approve")
+        );
+        drop(controller);
+        drop(state);
+        drop(services);
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
+    #[test]
     fn connection_checks_ignore_obsolete_sources_and_removed_credentials() {
         i_slint_backend_testing::init_no_event_loop();
         let data =
             std::env::temp_dir().join(format!("trash-amp-connection-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&data).unwrap();
+        let service = TestServices::new(&data.join("library.sqlite3"));
         let state = Rc::new(RefCell::new(State {
-            store: Store::open(&data.join("library.sqlite3")).unwrap(),
+            catalog: service.catalog(),
+            folders: service.catalog().snapshot().folders,
+            catalog_revision: 0,
+            catalog_replacement: 0,
             library: Library::default(),
-            resolver: None,
+            playback: service.playback(),
             artwork: Default::default(),
             browser: browse::Browser::default(),
             selected: None,
-            playlist: vec![],
-            queued: vec![],
-            queue_start: 0,
-            player: None,
             preferences: Preferences::default(),
         }));
         let ui = PlayerWindow::new().unwrap();
-        let generation = Arc::new(AtomicU64::new(2));
-        let mut controller = Controller::new(&ui, &state, &data, generation.clone()).unwrap();
+        let generation = service.catalog().generation();
+        generation.advance();
+        generation.advance();
+        let mut controller = Controller::new(
+            &ui,
+            &state,
+            Adapter::open(&data.join("collector")).unwrap(),
+            generation.clone(),
+            |_, done| done(Ok(())),
+        )
+        .unwrap();
         let key = ConnectionKey {
             server_id: ids::ServerId::new(),
             user_id: ids::UserId::new(),
@@ -1131,7 +1390,7 @@ mod tests {
         controller
             .tx
             .send(Event::ConnectionChecked(
-                generation.load(Ordering::Acquire),
+                generation.current(),
                 key,
                 ConnectionState::Lan,
             ))

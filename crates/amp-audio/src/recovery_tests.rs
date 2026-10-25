@@ -361,14 +361,19 @@ fn clearing_the_queue_while_disconnected_never_replays_buffered_audio() {
     let (_dir, track) = tests::fixture(44_100, 1_000);
     let harness = Harness::new(Some(Device::new("first", 44_100)));
     let old = harness.session(0);
-    harness.player.play(vec![track.clone()], 0);
+    let initial = harness.player.play(vec![track.clone()], 0);
+    wait(|| harness.player.snapshot().sequence == initial);
     old.wait_frames(1_000);
     old.render(20);
     harness.device(None);
     old.health.failed.store(true, Ordering::Release);
     wait(|| harness.player.snapshot().output == OutputState::Unavailable);
-    harness.player.play(vec![], 0);
-    wait(|| harness.player.snapshot().seconds == 0.0);
+    let cleared = harness.player.play(vec![], 0);
+    assert!(cleared > initial);
+    wait(|| {
+        let snapshot = harness.player.snapshot();
+        snapshot.sequence == cleared && snapshot.seconds == 0.0
+    });
     harness.device(Some(Device::new("second", 44_100)));
     let new = harness.session(1);
     assert!(!harness.player.snapshot().playing);
@@ -438,4 +443,62 @@ fn dropping_the_player_does_not_wait_for_a_blocked_device_open() {
             .iter()
             .all(|session| !session.alive.load(Ordering::Acquire))
     );
+}
+
+#[test]
+fn queue_edit_uses_audible_position_after_pending_transport_commands() {
+    let (_dir, track) = tests::fixture(44_100, 44_100);
+    let harness = Harness::new(None);
+    let tracks = vec![track.clone(); 4];
+    harness.player.play(tracks.clone(), 0);
+    harness.player.next();
+    harness.player.next();
+    let update = harness
+        .player
+        .edit_queue(Box::new(move |index| {
+            assert_eq!(index, 2, "edit must follow both Next commands");
+            let mut tracks = tracks;
+            tracks.truncate(index + 1);
+            (tracks, None)
+        }))
+        .unwrap();
+    assert_eq!(update.tracks.len(), 3);
+    assert_eq!(update.clock.track, 2);
+    assert!(update.clock.playing);
+    assert_eq!(update.clock.sequence, 2);
+}
+
+#[test]
+fn render_never_advances_the_audible_clock_during_a_queue_edit() {
+    let (_dir, track) = tests::fixture(44_100, 44_100);
+    let mut harness = Harness::new(Some(Device::new("first", 44_100)));
+    let session = harness.session(0);
+    harness.player.play(vec![track.clone(); 4], 0);
+    session.wait_frames(1_000);
+    session.render(37);
+    let before = harness.player.snapshot();
+    let (entered, waiting) = mpsc::channel();
+    let (release, gate) = mpsc::channel();
+    thread::scope(|scope| {
+        let player = &mut harness.player;
+        let edit = scope.spawn(move || {
+            player.edit_queue(Box::new(move |index| {
+                entered.send(index).unwrap();
+                gate.recv_timeout(Duration::from_secs(2)).unwrap();
+                (vec![track; index + 1], None)
+            }))
+        });
+        let index = waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        let samples = session.render(1_000);
+        let during_track = session.shared.track.load(Ordering::Relaxed);
+        let during_seconds = session.shared.position.load(Ordering::Relaxed) as f64
+            / f64::from(session.shared.sample_rate.load(Ordering::Acquire));
+        release.send(()).unwrap();
+        let update = edit.join().unwrap().unwrap();
+        assert_eq!(index, before.track);
+        assert!(samples.iter().all(|sample| *sample == 0.0));
+        assert_eq!(during_track, before.track);
+        assert_eq!(during_seconds, before.seconds);
+        assert_eq!(update.clock.seconds, before.seconds);
+    });
 }

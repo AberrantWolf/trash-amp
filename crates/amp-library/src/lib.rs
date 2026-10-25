@@ -17,6 +17,7 @@ use std::{
 use walkdir::WalkDir;
 
 pub struct Store(Connection);
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SavedFolder {
     pub id: String,
     pub root: String,
@@ -75,17 +76,35 @@ impl Store {
         self.put("active_folder", &id)?;
         Ok(library)
     }
+    /// Restore the prior selection after a canceled catalog operation.
+    pub fn restore_folder_selection(&self, id: Option<&str>) -> Result<()> {
+        if let Some(id) = id {
+            self.select_folder(id)?;
+        } else {
+            self.0
+                .execute("DELETE FROM state WHERE key='active_folder'", [])?;
+        }
+        Ok(())
+    }
     pub fn save_library(&self, library: &Library) -> Result<()> {
-        // Empty startup catalogs and demo fixtures are not folder libraries.
+        self.write_library(library, true)
+    }
+    /// Refresh a cached catalog without changing the selected folder.
+    pub fn save_library_snapshot(&self, library: &Library) -> Result<()> {
+        self.write_library(library, false)
+    }
+    fn write_library(&self, library: &Library, select: bool) -> Result<()> {
         if library.root.is_empty() || library.id == "demo" {
             return Ok(());
         }
         let tx = self.0.unchecked_transaction()?;
         tx.execute("INSERT INTO folder_libraries(id,root,value) VALUES (?1,?2,?3) ON CONFLICT(id) DO UPDATE SET root=excluded.root,value=excluded.value",
             params![library.id, library.root, serde_json::to_string(library)?])?;
-        tx.execute("INSERT INTO state(key,value) VALUES ('active_folder',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            [serde_json::to_string(&library.id)?])?;
-        tx.execute("DELETE FROM state WHERE key='library'", [])?;
+        if select {
+            tx.execute("INSERT INTO state(key,value) VALUES ('active_folder',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [serde_json::to_string(&library.id)?])?;
+            tx.execute("DELETE FROM state WHERE key='library'", [])?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -666,6 +685,31 @@ pub fn demo_library() -> Library {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn refreshing_an_inactive_catalog_does_not_select_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("cache.sqlite3")).unwrap();
+        let mut a = Library {
+            id: "a".into(),
+            root: "/offline/a".into(),
+            ..Default::default()
+        };
+        let b = Library {
+            id: "b".into(),
+            root: "/offline/b".into(),
+            ..Default::default()
+        };
+        store.save_library(&a).unwrap();
+        store.save_library(&b).unwrap();
+        a.warnings.push("updated snapshot".into());
+        store.save_library_snapshot(&a).unwrap();
+        assert_eq!(store.library().unwrap().unwrap().id, "b");
+        assert_eq!(
+            store.library_by_id("a").unwrap().unwrap().warnings,
+            ["updated snapshot"]
+        );
+    }
+
     #[test]
     fn progress_counts_all_files_and_finishes_monotonically() {
         let dir = tempfile::tempdir().unwrap();

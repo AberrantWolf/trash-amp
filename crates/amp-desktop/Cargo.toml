@@ -3,27 +3,18 @@ name = "trash-amp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-build = "build.rs"
+
 [dependencies]
-amp-core.workspace = true
 amp-collector.workspace = true
-amp-library.workspace = true
-amp-audio.workspace = true
+amp-ui.workspace = true
+amp-app.workspace = true
+amp-media.workspace = true
 anyhow.workspace = true
-serde_json.workspace = true
-tokio = { version = "1", features = ["rt", "time"] }
-uuid = { version = "1", features = ["v4"] }
-rand = "0.9"
-slint = { version = "=1.17.1", default-features = false, features = ["std", "backend-winit", "renderer-skia", "accessibility", "compat-1-2", "raw-window-handle-06"] }
+slint.workspace = true
+souvlaki.workspace = true
 rfd = "0.17"
 directories = "6"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-souvlaki = "0.8"
-[build-dependencies]
-slint-build = "=1.17.1"
-
-[dev-dependencies]
-i-slint-backend-testing = "=1.17.1"
+webbrowser = "1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"

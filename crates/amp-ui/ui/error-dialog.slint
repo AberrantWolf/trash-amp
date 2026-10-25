@@ -1,0 +1,45 @@
+import { Button, ScrollView } from "std-widgets.slint";
+
+// Embedded modal works on hosts with a single native window as well as desktop.
+export component ErrorDialog inherits Rectangle {
+    in property <string> title;
+    in property <string> message;
+    callback dismissed();
+    public function take-focus() { modal-focus.focus(); }
+    background: #0009;
+    TouchArea { } // Consume pointer input outside the dialog.
+    modal-focus := FocusScope {
+        width: parent.width; height: parent.height;
+        key-pressed(event) => {
+            if event.text == Key.Escape || event.text == Key.Return {
+                root.dismissed();
+            }
+            return accept;
+        }
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(480px, parent.width - 32px);
+            height: min(parent.height - 32px, heading.preferred-height + body.preferred-height + ok.preferred-height + 72px);
+            background: #29323b;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: #556573;
+            accessible-role: region;
+            accessible-label: root.title;
+            VerticalLayout {
+                padding: 20px; spacing: 12px;
+                heading := Text { text: root.title; color: #edf3f8; font-weight: 700; wrap: word-wrap; }
+                ScrollView {
+                    content-height: max(self.visible-height, body.preferred-height);
+                    body := Text {
+                        width: parent.width;
+                        text: root.message; color: #dce5ed; wrap: word-wrap;
+                        accessible-live-region: assertive;
+                    }
+                }
+                ok := Button { text: "OK"; accessible-label: "Dismiss error"; clicked => { root.dismissed(); } }
+            }
+        }
+    }
+}

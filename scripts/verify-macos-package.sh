@@ -20,7 +20,7 @@ test -x "$binary"
 test -f "$work/READ-ME.md"
 test -s "$app/Contents/Resources/licenses/THIRD_PARTY_LICENSES.html"
 test -s "$app/Contents/Resources/licenses/SLINT-LICENSE.md"
-test -s "$app/Contents/Resources/licenses/native-licenses/skia-0.99.0/SOURCES.txt"
+test -s "$app/Contents/Resources/licenses/native-licenses/skia-0.153.3/SOURCES.txt"
 test "$(lipo -archs "$binary")" = arm64
 plutil -lint "$app/Contents/Info.plist"
 codesign --verify --strict "$app"

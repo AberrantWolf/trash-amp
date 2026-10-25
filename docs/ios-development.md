@@ -1,0 +1,172 @@
+# iOS development
+
+The `ios` branch starts an iPhone/iPad host over the existing Rust and Slint UI.
+This is a development bootstrap, not an iOS release. Collector streaming and
+managed downloads are the initial media sources. External folder access is not
+implemented, so this host hides the folder picker.
+
+## Code boundaries
+
+- `amp-ui` owns the shared `.slint` files, presentation models, navigation and
+  catalog presentation wiring. Its `AppConfig` accepts playback and catalog handles,
+  storage and native capabilities from a launcher. It contains no OS selection logic.
+- `trash-amp` remains the desktop executable. Its launcher supplies the desktop
+  data directory, `rfd` folder picker and native media-control window handle.
+- `trash-amp-ios` supplies Application Support storage, `AVAudioSession` music
+  configuration and Souvlaki media controls. The application worker configures
+  and activates the audio session on playback requests. Native metadata updates
+  use Apple's main dispatch queue, independently of Slint timers.
+- Domain values, catalog search, decoding, Collector transport and persistence
+  remain in their existing crates.
+
+`amp-app` now owns playback orchestration outside Slint: the sequence, explicit
+queue, transport, engine events and Now Playing publication. Native callbacks
+send commands directly to this service. `amp-media` coalesces native updates and
+keeps media-control objects on their installation thread. See
+[application service](application-service.md) for ownership and validation.
+
+The catalog worker now accepts scan and metadata completion and persists results
+without a UI tick. Collector completion chains and selection commits also run
+off the presentation loop. Navigation and provider view projection remain in
+Slint. A native background execution policy and hardware validation are still
+required; this does not establish verified iOS background playback by itself.
+
+The shared layout accounts for window safe-area insets and the virtual keyboard.
+Settings and Lists scroll views permit drag panning. These changes use geometry
+and capabilities rather than OS names. Existing hover/double-click interactions
+still need a touch and accessibility pass.
+
+## Local builds
+
+Use the pinned Rust toolchain and a full Xcode installation with iOS SDKs:
+
+```sh
+rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+cargo check -p trash-amp-ios --target aarch64-apple-ios-sim
+./scripts/bundle-ios.sh --simulator
+```
+
+The simulator bundle is written to
+`target/aarch64-apple-ios-sim/debug/Trash Amp.app`. It is signed ad hoc and needs no
+Apple account. With an available simulator:
+
+```sh
+xcrun simctl list devices available
+xcrun simctl boot DEVICE_UDID
+xcrun simctl bootstatus DEVICE_UDID -b
+xcrun simctl install DEVICE_UDID 'target/aarch64-apple-ios-sim/debug/Trash Amp.app'
+xcrun simctl launch DEVICE_UDID org.aberrantwolf.TrashAmp.iOS --demo
+```
+
+Omit `--demo` to connect to Collector through Settings / Servers. A publicly
+trusted HTTPS server is the simplest first connection. Importing private trust
+material through the iOS document picker remains unfinished.
+
+`--device` builds an unsigned device bundle. `--release` selects an optimized
+build. The script targets Apple Silicon simulators and ARM64 devices, with a
+provisional iOS 15 deployment minimum. This minimum is not a tested support claim.
+
+For device signing, install XcodeGen, then generate the project:
+
+```sh
+cd assets/ios
+xcodegen generate
+open TrashAmp.xcodeproj
+```
+
+Select your development team in Xcode's Signing & Capabilities panel and choose
+your connected device. Account login, provisioning, device trust and Developer
+Mode may require your interaction. The project invokes the same Cargo build
+script; it does not introduce a second UI. Archive/TestFlight qualification,
+app icons and release numbering remain future work.
+
+Slint 1.18.1 provides `SlintWindowSceneDelegate`. The bundle manifest opts into
+its UIKit scene lifecycle, as required for SDK 27 builds on iOS 27. Keep the
+manifest and backend version aligned. Simulator launch is verified below;
+signed device launch still needs qualification.
+
+The iOS host supplies Collector credential storage with
+`AfterFirstUnlockThisDeviceOnly` accessibility. It upgrades existing items in
+place during foreground startup. Credentials remain available for subsequent
+streamed tracks while the phone is locked after its first unlock. The shared UI
+receives the configured adapter from its launcher.
+
+The host also supplements native Now Playing updates with an explicit playback
+rate: 1 while playing and 0 while paused. Clearing playback removes the metadata.
+This uses the existing coalesced main-queue dispatcher.
+
+## Validation on 2026-10-25
+
+All 97 active workspace tests pass. Seven new concurrency regressions cover
+engine advancement between application polls, batched transport commands,
+audio-callback exclusion during queue edits, and cancellation during local or
+external selection persistence. Another regression verifies that a cleared
+Collector selection survives reopening. Workspace and iOS-target Clippy pass
+with warnings denied. The 28 release-tooling tests pass.
+
+The simulator and unsigned device bundles build with Slint 1.18.1. The simulator
+bundle passes ad-hoc signature verification. Its scene manifest matches the
+compiled `SlintWindowSceneDelegate`. Native iOS code supplies the explicit
+Now Playing playback rate and Keychain accessibility policy. Third-party notices
+regenerate successfully for the upgraded Slint/Skia dependencies. The rebuilt
+macOS launcher renders the shared UI at 390 × 844 and exits cleanly.
+
+Xcode first-launch setup completed and updated CoreSimulator to 1174.9.2.
+The iOS 27.0 and 27.1 simulator runtimes are installed.
+Trash Amp installs and launches on the iPhone 18 Pro simulator running iOS 27.0.
+The native screen and accessibility tree show the shared library UI, Settings,
+source selection and playback controls. Connection failures show an embedded
+modal and block the underlying controls until dismissed. This verifies startup through the scene
+lifecycle. No administrator or Apple account authentication was requested.
+
+In Xcode 27.1, open the simulator viewer through **Xcode → Open Developer Tool →
+Device Hub**. The former standalone Simulator app is absent from this installation.
+Install runtimes in **Xcode → Settings → Components** if `simctl list runtimes`
+is empty. The first `simctl` call may run `xcodebuild -runFirstLaunch`; allow the
+component installation to finish before retrying it.
+
+Signed device launch, locked-screen track transitions and Now Playing behavior
+remain unverified. Collector enrollment and library loading are verified below.
+
+## Collector connection integration
+
+Simulator Keychain access requires an application identifier and access group.
+`amp-ios/build.rs` embeds `assets/ios/Simulator.entitlements` in the executable's
+`__TEXT,__entitlements` section, matching Xcode's simulator linker behavior. The
+bundle keeps a plain ad-hoc signature. Do not pass the iOS entitlements to macOS
+`codesign --entitlements`: macOS rejects those restricted entitlements on an
+ad-hoc executable. Device builds use their normal Xcode signing entitlements.
+
+The iOS host enables Reqwest's native TLS backend, which validates HTTPS with
+Apple's trust store. The SDK's Rustls native-root loader otherwise treats iOS as
+Unix and looks for certificate files instead of using the system trust store.
+Private pairing still supplies its explicit trust anchors with built-in roots
+disabled. Certificate and hostname verification remain enabled.
+
+The host also opens enrollment approval URLs with `UIApplication`. The shared UI
+receives an asynchronous URL-opening capability and displays a modal if opening
+fails. It no longer runs the macOS `open` command. Enrollment against
+`https://collector.awkwardexplorer.com` completes after browser approval in the
+simulator. The enrolled account connects, refreshes its catalog and displays album
+artwork. Account approval remains a user action. Regression tests cover invalid URLs,
+unreadable trust files, asynchronous connection failures, stale completions,
+browser-opening failures, modal input blocking and keyboard dismissal.
+
+## Remaining work
+
+1. Qualify the independent playback and catalog workers under iOS background
+   execution rules. The foreground UI still polls snapshots for visual updates;
+   it no longer drives catalog completion or persistence.
+2. Reconcile CPAL interruption recovery with player intent and route-loss policy.
+   Test screen lock, calls, Siri, headphone removal, Bluetooth and output changes
+   on hardware. Define audio-session deactivation when playback ends.
+3. Add document selection and security-scoped access for external media and
+   private trust files. Keep opaque grants in the host/provider adapter, not in
+   shared domain types or UI callbacks that assume a durable filesystem path.
+4. Define download suspension/resumption and network-cost policy. Exclude
+   reconstructible audio/artwork from backups. Validate Keychain accessibility
+   while locked, disk pressure, credential removal and offline playback.
+5. Qualify touch input, VoiceOver, text sizing, keyboard avoidance, rotation and
+   iPad multitasking. Add mobile-specific tests where they exercise behavior.
+6. Establish simulator/device CI, supported OS versions, scene lifecycle validation,
+   signed archives, notices, privacy metadata and distribution assets.

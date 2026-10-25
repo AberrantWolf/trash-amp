@@ -1,5 +1,5 @@
 //! Output devices and stream callbacks. All device operations run on the audio worker.
-use super::{Frame, Shared};
+use super::{ClockGuard, Frame, Shared};
 use anyhow::{Context, Result, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{
@@ -112,6 +112,10 @@ pub(super) fn render<T: cpal::SizedSample + cpal::FromSample<f32>>(
     health: &Health,
 ) {
     health.callbacks.fetch_add(1, Ordering::Relaxed);
+    let Some(_clock) = ClockGuard::try_lock(&shared.clock_writer) else {
+        data.fill(T::from_sample(0.0));
+        return;
+    };
     let generation = shared.generation.load(Ordering::Acquire);
     while consumer
         .peek()

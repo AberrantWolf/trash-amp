@@ -98,10 +98,29 @@ pub(super) fn run<B: Backend>(
             break;
         }
         while let Ok(command) = rx.try_recv() {
+            // Fence the audible clock through policy evaluation and generation
+            // installation. The device callback uses a single nonblocking CAS.
+            let _clock = ClockGuard::lock(&shared.clock_writer);
             let mut requested_frame = 0;
             let mut reset = true;
+            let mut replaced = None;
+            let mut edited = None;
             match command {
-                Command::Replace(t, start) => {
+                Command::Edit(edit, sequence, reply) => {
+                    let audible = shared.track.load(Ordering::Relaxed);
+                    let (updated, start) = edit(audible);
+                    index = start.unwrap_or(audible);
+                    if start.is_none() {
+                        requested_frame = shared.position.load(Ordering::Relaxed);
+                    } else {
+                        shared.playing.store(true, Ordering::Relaxed);
+                    }
+                    tracks = updated;
+                    replaced = Some(sequence);
+                    edited = Some(reply);
+                }
+                Command::Replace(t, start, sequence) => {
+                    replaced = Some(sequence);
                     if t.is_empty() {
                         tracks.clear();
                         index = 0;
@@ -233,6 +252,12 @@ pub(super) fn run<B: Backend>(
                 if exhausted {
                     shared.playing.store(false, Ordering::Relaxed);
                 }
+            }
+            if let Some(sequence) = replaced {
+                shared.sequence.store(sequence, Ordering::Release);
+            }
+            if let Some(reply) = edited {
+                let _ = reply.send(tracks.clone());
             }
         }
         let Some(current) = output.as_mut() else {

@@ -1,3 +1,5 @@
 /target
 .DS_Store
 __pycache__/
+
+/assets/ios/TrashAmp.xcodeproj/
