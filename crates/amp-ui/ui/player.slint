@@ -249,7 +249,7 @@ export component PlayerWindow inherits Window {
                             Text { text: "Appearance"; color: Theme.text; vertical-alignment: center; }
                             ComboBox { model: ["Light", "Dark"]; current-index: root.dark-mode ? 1 : 0;
                                 accessible-label: "Color mode";
-                                selected(i) => { root.dark-mode = i == 1; root.preferences-changed(); } }
+                                selected(_) => { root.dark-mode = self.current-index == 1; root.preferences-changed(); } }
                         }
                         CheckBox { text: "OLED black backgrounds"; checked <=> root.oled-mode;
                             toggled => { root.preferences-changed(); } }

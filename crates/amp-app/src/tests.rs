@@ -439,3 +439,149 @@ fn queue_edits_follow_transport_commands_in_the_same_application_batch() {
         ["one", "two", "queued-current"]
     );
 }
+
+#[test]
+fn native_album_artwork_updates_and_follows_background_queue_transitions() {
+    use std::collections::BTreeMap;
+    let (service, fake) = setup();
+    let p = service.playback();
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let output = received.clone();
+    p.observe_now_playing(Some(Arc::new(move |state| {
+        output.lock().unwrap().push(state);
+    })));
+    let album = |name: &str, song: &str| Album {
+        id: ItemId {
+            library: "test".into(),
+            provider: "test".into(),
+            item: name.into(),
+        },
+        title: name.into(),
+        artist: "Artist".into(),
+        tracks: vec![track(song)],
+        source_label: String::new(),
+    };
+    let library = Arc::new(Library {
+        id: "test".into(),
+        albums: vec![album("First album", "one"), album("No cover", "two")],
+        ..Default::default()
+    });
+    p.refresh_catalog_metadata(library.clone(), Arc::default());
+    p.play_list(vec![track("one"), track("two")]);
+    settle(&p);
+    assert!(
+        received
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .album
+            .as_ref()
+            .unwrap()
+            .artwork_path
+            .is_none()
+    );
+    // Artwork arriving for an already playing track must republish, even if
+    // playback time and the track's own descriptive fields haven't changed.
+    p.refresh_catalog_metadata(
+        library,
+        Arc::new(BTreeMap::from([(
+            "First album".into(),
+            "/cache/cover-without-extension".into(),
+        )])),
+    );
+    settle(&p);
+    {
+        let received = received.lock().unwrap();
+        let info = received.last().unwrap().album.as_ref().unwrap();
+        assert_eq!(info.title, "First album");
+        assert_eq!(
+            info.artwork_path.as_deref(),
+            Some("/cache/cover-without-extension")
+        );
+    }
+    // Changing the browsing source must preserve metadata for the audible queue.
+    p.refresh_catalog_metadata(Arc::new(Library::default()), Arc::default());
+    settle(&p);
+    assert_eq!(
+        received
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .album
+            .as_ref()
+            .unwrap()
+            .title,
+        "First album"
+    );
+    fake.lock().unwrap().clock.track = 1;
+    settle(&p);
+    {
+        let received = received.lock().unwrap();
+        let state = received.last().unwrap();
+        assert_eq!(state.track.as_ref().unwrap().id.item, "two");
+        let info = state.album.as_ref().unwrap();
+        assert_eq!(info.title, "No cover");
+        assert!(info.artwork_path.is_none());
+    }
+    // Unknown tracks must not inherit the previous album's cover or title.
+    p.play_track(track("unknown"));
+    settle(&p);
+    assert!(received.lock().unwrap().last().unwrap().album.is_none());
+}
+
+#[test]
+fn lock_screen_seeks_keep_track_and_album_metadata_in_every_publication() {
+    let (service, _) = setup();
+    let p = service.playback();
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let output = received.clone();
+    p.refresh_catalog_metadata(
+        Arc::new(Library {
+            albums: vec![Album {
+                id: ItemId {
+                    library: "test".into(),
+                    provider: "test".into(),
+                    item: "album".into(),
+                },
+                title: "Album".into(),
+                artist: "Artist".into(),
+                tracks: vec![track("one")],
+                source_label: String::new(),
+            }],
+            ..Default::default()
+        }),
+        Arc::new(BTreeMap::from([("album".into(), "/cover".into())])),
+    );
+    p.play_track(track("one"));
+    settle(&p);
+    p.observe_now_playing(Some(Arc::new(move |state| {
+        output.lock().unwrap().push(state)
+    })));
+    settle(&p);
+    for playing in [true, false] {
+        p.transport(if playing {
+            Transport::Play
+        } else {
+            Transport::Pause
+        });
+        settle(&p);
+        for seconds in [52.0, 8.0, 0.0, 99.0] {
+            p.transport(Transport::Seek(seconds));
+            let snapshot = settle(&p);
+            assert_eq!(snapshot.current.unwrap().id.item, "one");
+            assert_eq!(snapshot.seconds, seconds);
+            let received = received.lock().unwrap();
+            let last = received.last().unwrap();
+            assert_eq!(last.seconds, seconds);
+            assert_eq!(last.playing, playing);
+        }
+    }
+    for state in received.lock().unwrap().iter() {
+        assert_eq!(state.track.as_ref().unwrap().title, "one");
+        let album = state.album.as_ref().unwrap();
+        assert_eq!(album.title, "Album");
+        assert_eq!(album.artwork_path.as_deref(), Some("/cover"));
+    }
+}

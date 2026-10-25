@@ -789,6 +789,55 @@ mod tests {
         assert!(ui.get_surfaces().iter().all(|c| c != black));
     }
     #[test]
+    fn appearance_selection_saves_light_and_dark_in_both_directions() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::platform::{Key, PointerEventButton, WindowEvent};
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(390., 844.));
+        ui.set_settings(true);
+        let saved = Rc::new(RefCell::new(Vec::new()));
+        let values = saved.clone();
+        let weak = ui.as_weak();
+        ui.on_preferences_changed(move || {
+            values
+                .borrow_mut()
+                .push(weak.upgrade().unwrap().get_dark_mode());
+        });
+        ui.show().unwrap();
+        let combo = ElementHandle::find_by_accessible_label(&ui, "Color mode")
+            .next()
+            .unwrap();
+        for (key, expected) in [
+            (Key::UpArrow, false),
+            (Key::DownArrow, true),
+            (Key::UpArrow, false),
+            (Key::DownArrow, true),
+        ] {
+            let position = slint::LogicalPosition::new(
+                combo.absolute_position().x + combo.size().width / 2.,
+                combo.absolute_position().y + combo.size().height / 2.,
+            );
+            ui.window().dispatch_event(WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Left,
+            });
+            ui.window().dispatch_event(WindowEvent::PointerReleased {
+                position,
+                button: PointerEventButton::Left,
+            });
+            for text in [slint::SharedString::from(key), Key::Return.into()] {
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyReleased { text });
+            }
+            assert_eq!(ui.get_dark_mode(), expected);
+            assert_eq!(saved.borrow().last(), Some(&expected));
+        }
+        assert_eq!(*saved.borrow(), vec![false, true, false, true]);
+    }
+    #[test]
     fn appearance_checkbox_keeps_pointer_and_accessibility_behavior() {
         use i_slint_backend_testing::ElementHandle;
         use slint::platform::{PointerEventButton, WindowEvent};

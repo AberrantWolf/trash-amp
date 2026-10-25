@@ -1,12 +1,19 @@
 //! iOS launch services. UIKit/file-provider integration belongs in this crate.
 use amp_collector::NativeCredentialStorage;
 use anyhow::{Context, anyhow};
+use objc2::{AnyThread, rc::Retained};
 use objc2_avf_audio::{AVAudioSession, AVAudioSessionCategoryPlayback};
-use objc2_foundation::{NSMutableDictionary, NSNumber};
+use objc2_foundation::{NSMutableDictionary, NSNumber, NSString};
 use objc2_foundation::{
     NSSearchPathDirectory, NSSearchPathDomainMask, NSSearchPathForDirectoriesInDomains,
 };
+use objc2_media_player::{
+    MPMediaItemArtwork, MPMediaItemPropertyAlbumTitle, MPMediaItemPropertyArtist,
+    MPMediaItemPropertyArtwork, MPMediaItemPropertyPlaybackDuration, MPMediaItemPropertyTitle,
+    MPNowPlayingInfoPropertyElapsedPlaybackTime,
+};
 use objc2_media_player::{MPNowPlayingInfoCenter, MPNowPlayingInfoPropertyPlaybackRate};
+use objc2_ui_kit::UIImage;
 use std::{path::PathBuf, sync::Arc};
 
 fn open_url(url: &str, completed: amp_ui::UrlOpened) {
@@ -41,20 +48,68 @@ fn open_url(url: &str, completed: amp_ui::UrlOpened) {
     }
 }
 
-fn update_playback_rate(state: &amp_app::NowPlaying) {
-    // SAFETY: MediaSession calls this on the main queue, after Souvlaki has
-    // replaced its metadata. iOS extrapolates elapsed time using this rate;
-    // MPNowPlayingInfoCenter.playbackState only controls the macOS clock.
-    unsafe {
-        let center = MPNowPlayingInfoCenter::defaultCenter();
-        if state.track.is_none() {
-            center.setNowPlayingInfo(None);
-            return;
+#[derive(Default)]
+struct NativeMetadata {
+    artwork_path: Option<String>,
+    artwork: Option<Retained<MPMediaItemArtwork>>,
+}
+impl NativeMetadata {
+    fn update(&mut self, state: &amp_app::NowPlaying) {
+        let path = state
+            .album
+            .as_ref()
+            .and_then(|album| album.artwork_path.as_ref());
+        if self.artwork_path.as_ref() != path {
+            self.artwork_path = path.cloned();
+            // Decode cached provider artwork once per album. Missing/invalid files
+            // simply omit artwork; never hand them to Souvlaki's unchecked file reader.
+            self.artwork = path.and_then(|path| UIImage::imageWithContentsOfFile(&NSString::from_str(path)))
+            .map(|image| {
+                let size = unsafe { image.size() };
+                let handler = block2::RcBlock::new(move |_: objc2_core_foundation::CGSize| {
+                    Retained::as_ptr(&image) as *mut UIImage
+                });
+                // SAFETY: The copied block retains its UIImage and always returns
+                // that valid image. This hook runs on the main dispatch queue.
+                unsafe { objc2::msg_send![MPMediaItemArtwork::alloc(), initWithBoundsSize: size, requestHandler: &*handler] }
+            });
         }
-        if let Some(info) = center.nowPlayingInfo() {
-            let info = NSMutableDictionary::dictionaryWithDictionary(&info);
-            let rate = NSNumber::new_f64(if state.playing { 1.0 } else { 0.0 });
-            info.insert(MPNowPlayingInfoPropertyPlaybackRate, &*rate);
+        // SAFETY: MediaSession dispatches this hook on the main queue. Build the
+        // complete state before publishing: separate metadata/progress/artwork
+        // writes expose incomplete states to lock-screen scrubbing animations.
+        unsafe {
+            let center = MPNowPlayingInfoCenter::defaultCenter();
+            let Some(track) = &state.track else {
+                center.setNowPlayingInfo(None);
+                return;
+            };
+            let info = NSMutableDictionary::<NSString, objc2::runtime::AnyObject>::new();
+            info.insert(MPMediaItemPropertyTitle, &*NSString::from_str(&track.title));
+            info.insert(
+                MPMediaItemPropertyArtist,
+                &*NSString::from_str(&track.artist),
+            );
+            if let Some(album) = &state.album {
+                info.insert(
+                    MPMediaItemPropertyAlbumTitle,
+                    &*NSString::from_str(&album.title),
+                );
+            }
+            info.insert(
+                MPMediaItemPropertyPlaybackDuration,
+                &*NSNumber::new_f64(track.duration_seconds.max(0.0)),
+            );
+            info.insert(
+                MPNowPlayingInfoPropertyElapsedPlaybackTime,
+                &*NSNumber::new_f64(state.seconds.max(0.0)),
+            );
+            info.insert(
+                MPNowPlayingInfoPropertyPlaybackRate,
+                &*NSNumber::new_f64(if state.playing { 1.0 } else { 0.0 }),
+            );
+            if let Some(artwork) = &self.artwork {
+                info.insert(MPMediaItemPropertyArtwork, &**artwork);
+            }
             center.setNowPlayingInfo(Some(&info));
         }
     }
@@ -64,7 +119,8 @@ fn media_controls(
     _window: &slint::Window,
     playback: amp_app::Playback,
 ) -> Result<amp_ui::MediaSessionGuard, String> {
-    amp_media::MediaSession::install_with_update(
+    let metadata = std::cell::RefCell::new(NativeMetadata::default());
+    amp_media::MediaSession::install_with_native_metadata(
         souvlaki::PlatformConfig {
             dbus_name: "trash_amp",
             display_name: "Trash Amp",
@@ -72,7 +128,7 @@ fn media_controls(
         },
         playback,
         Arc::new(|task| dispatch2::DispatchQueue::main().exec_async(task)),
-        Box::new(update_playback_rate),
+        Box::new(move |state| metadata.borrow_mut().update(state)),
     )
     .map(|session| Box::new(session) as amp_ui::MediaSessionGuard)
 }

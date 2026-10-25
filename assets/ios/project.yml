@@ -24,4 +24,8 @@ targets:
     postCompileScripts:
       - name: Build Rust application
         script: '"$SRCROOT/../../scripts/bundle-ios.sh" --xcode'
+        # The Rust executable must be an explicit output so Xcode signs it again
+        # after the always-running script replaces the previously signed binary.
+        outputFiles:
+          - '$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)'
         basedOnDependencyAnalysis: false

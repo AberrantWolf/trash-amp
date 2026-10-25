@@ -6,6 +6,7 @@ use amp_audio::{MediaResolver, OutputState, Player, PlayerEvent};
 use amp_core::{Album, Library, Track};
 use anyhow::{Result, bail};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, RwLock, mpsc},
     thread,
     time::Duration,
@@ -40,8 +41,16 @@ pub struct Snapshot {
     pub notice: Option<Notice>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NowPlayingAlbum {
+    pub title: String,
+    /// Provider-cached local artwork; native hosts must tolerate missing files.
+    pub artwork_path: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct NowPlaying {
+    pub album: Option<Arc<NowPlayingAlbum>>,
     pub track: Option<Track>,
     pub playing: bool,
     pub seconds: f64,
@@ -116,7 +125,7 @@ enum Command {
     Enqueue(Track),
     ClearQueue,
     Metadata(Album),
-    CatalogMetadata(Arc<Library>),
+    CatalogMetadata(Arc<Library>, Arc<BTreeMap<String, String>>),
     Transport(Transport),
     Observer(Option<NowPlayingObserver>),
     Shutdown,
@@ -160,9 +169,13 @@ impl Playback {
     pub fn update_metadata(&self, album: Album) {
         self.send(Command::Metadata(album));
     }
-    /// Refresh names in the existing sequence/queue without changing media or order.
-    pub fn refresh_catalog_metadata(&self, library: Arc<Library>) {
-        self.send(Command::CatalogMetadata(library));
+    /// Refresh names and native album context without changing media or queue order.
+    pub fn refresh_catalog_metadata(
+        &self,
+        library: Arc<Library>,
+        artwork: Arc<BTreeMap<String, String>>,
+    ) {
+        self.send(Command::CatalogMetadata(library, artwork));
     }
     pub fn transport(&self, command: Transport) {
         self.send(Command::Transport(command));
@@ -254,10 +267,27 @@ struct Worker {
     notice: Option<Notice>,
     observer: Option<NowPlayingObserver>,
     last_media: Option<MediaIdentity>,
+    albums: BTreeMap<TrackKey, Arc<NowPlayingAlbum>>,
     up_next: Arc<[Track]>,
     queue_dirty: bool,
 }
-type MediaIdentity = Option<(amp_core::ItemId, String, String, u64, bool, u64)>;
+type TrackKey = (String, String, String);
+fn track_key(track: &Track) -> TrackKey {
+    (
+        track.id.library.clone(),
+        track.id.provider.clone(),
+        track.id.item.clone(),
+    )
+}
+type MediaIdentity = Option<(
+    amp_core::ItemId,
+    String,
+    String,
+    u64,
+    bool,
+    u64,
+    Option<Arc<NowPlayingAlbum>>,
+)>;
 impl Worker {
     fn new(
         prepare: PreparePlayback,
@@ -277,6 +307,7 @@ impl Worker {
             notice: None,
             observer: None,
             last_media: None,
+            albums: BTreeMap::new(),
             up_next: Arc::from([]),
             queue_dirty: true,
         }
@@ -372,6 +403,11 @@ impl Worker {
                 Ok(())
             }
             Command::Metadata(album) => {
+                for track in &album.tracks {
+                    if let Some(info) = self.albums.get_mut(&track_key(track)) {
+                        Arc::make_mut(info).title.clone_from(&album.title);
+                    }
+                }
                 self.queue.metadata(&album);
                 if let Some((tracks, _)) = &mut self.default_album {
                     for track in tracks {
@@ -384,7 +420,27 @@ impl Worker {
                 self.queue_dirty = true;
                 Ok(())
             }
-            Command::CatalogMetadata(library) => {
+            Command::CatalogMetadata(library, artwork) => {
+                // Keep album context for queued tracks when the user browses another
+                // source, without retaining every previously visited catalog.
+                let retained = self
+                    .queue
+                    .sequence
+                    .iter()
+                    .chain(&self.queue.pending)
+                    .chain(self.default_album.iter().flat_map(|(tracks, _)| tracks))
+                    .map(track_key)
+                    .collect::<BTreeSet<_>>();
+                self.albums.retain(|key, _| retained.contains(key));
+                for album in &library.albums {
+                    let info = Arc::new(NowPlayingAlbum {
+                        title: album.title.clone(),
+                        artwork_path: artwork.get(&album.id.item).cloned(),
+                    });
+                    for track in &album.tracks {
+                        self.albums.insert(track_key(track), info.clone());
+                    }
+                }
                 let names = library
                     .albums
                     .iter()
@@ -592,6 +648,10 @@ impl Worker {
             notice: self.notice.clone(),
         };
         *self.published.write().unwrap() = snapshot;
+        let album = current
+            .as_ref()
+            .and_then(|track| self.albums.get(&track_key(track)))
+            .cloned();
         let identity = current.as_ref().map(|track| {
             (
                 track.id.clone(),
@@ -600,6 +660,7 @@ impl Worker {
                 track.duration_seconds.to_bits(),
                 self.clock.playing,
                 self.clock.seconds.max(0.0) as u64,
+                album.clone(),
             )
         });
         if let Some(observer) = &self.observer
@@ -607,6 +668,7 @@ impl Worker {
         {
             self.last_media = Some(identity);
             observer(NowPlaying {
+                album,
                 track: current,
                 playing: self.clock.playing,
                 seconds: self.clock.seconds,

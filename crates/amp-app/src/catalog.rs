@@ -356,9 +356,9 @@ impl Worker {
             self.playback.set_default_album(None);
         }
         self.state.library = Arc::new(library);
-        self.playback
-            .refresh_catalog_metadata(self.state.library.clone());
         self.state.artwork = Arc::new(artwork);
+        self.playback
+            .refresh_catalog_metadata(self.state.library.clone(), self.state.artwork.clone());
         self.state.source = source;
         self.state.library_revision += 1;
         self.state.replacement_revision += 1;

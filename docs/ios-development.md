@@ -97,10 +97,16 @@ Mode may require your interaction. The project invokes the same Cargo build
 script; it does not introduce a second UI. Archive/TestFlight qualification,
 app icons and release numbering remain future work.
 
+The Rust build phase declares `$(TARGET_BUILD_DIR)/$(EXECUTABLE_PATH)` as an
+output. Keep this declaration: the script replaces the executable on every
+build, and Xcode must re-sign the bundle afterward. Without the output dependency,
+an incremental build can reuse the previous signing step and leave an unsigned
+executable inside the app.
+
 Slint 1.18.1 provides `SlintWindowSceneDelegate`. The bundle manifest opts into
 its UIKit scene lifecycle, as required for SDK 27 builds on iOS 27. Keep the
-manifest and backend version aligned. Simulator launch is verified below;
-signed device launch still needs qualification.
+manifest and backend version aligned. Simulator and signed device launch are
+verified below.
 
 The iOS host supplies Collector credential storage with
 `AfterFirstUnlockThisDeviceOnly` accessibility. It upgrades existing items in
@@ -108,9 +114,17 @@ place during foreground startup. Credentials remain available for subsequent
 streamed tracks while the phone is locked after its first unlock. The shared UI
 receives the configured adapter from its launcher.
 
-The host also supplements native Now Playing updates with an explicit playback
-rate: 1 while playing and 0 while paused. Clearing playback removes the metadata.
-This uses the existing coalesced main-queue dispatcher.
+The playback worker supplies album titles and cached artwork paths to native Now
+Playing updates, retaining album context for queued tracks when the browsing
+source changes. The iOS host decodes cached artwork once when its path changes and
+keeps the native artwork on subsequent progress updates. Missing or invalid files
+omit the cover. The host also supplies an explicit playback rate: 1 while playing
+and 0 while paused. Text, duration, elapsed time, rate and artwork are published
+together in one native dictionary update, so a seek does not first expose metadata
+without its progress or artwork. Souvlaki handles remote commands without writing
+intermediate metadata on iOS. Clearing playback removes the metadata. This uses
+the existing coalesced main-queue dispatcher and does not depend on foreground UI
+polling.
 
 ## Validation on 2026-10-25
 
@@ -142,8 +156,20 @@ Install runtimes in **Xcode → Settings → Components** if `simctl list runtim
 is empty. The first `simctl` call may run `xcodebuild -runFirstLaunch`; allow the
 component installation to finish before retrying it.
 
-Signed device launch, locked-screen track transitions and Now Playing behavior
-remain unverified. Collector enrollment and library loading are verified below.
+Signed development builds now install and launch on a physical iPhone. Repeated
+incremental builds pass signature verification. Hardware testing confirms playback
+continues while locked, and the user confirms lock-screen scrubbing remains stable
+after publishing complete Now Playing updates atomically. Artwork is wired into
+native updates; visual hardware confirmation and locked-screen track transitions
+still need qualification. Collector enrollment and library loading are verified
+below.
+
+The 23 UI tests include repeated Light/Dark selection in both directions, checking
+the preference callback receives the selected mode. The 25 application tests and
+three media-adapter tests cover artwork arrival, background queue transitions,
+retaining queued album context across source changes, seeks retaining metadata,
+and bypassing intermediate backend metadata writes on iOS. Application/media and
+iOS-target Clippy checks pass with warnings denied.
 
 ## Collector connection integration
 

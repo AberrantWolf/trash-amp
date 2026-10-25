@@ -27,7 +27,23 @@ thread_local! {
 pub type NativeUpdate = Box<dyn Fn(&NowPlaying)>;
 struct SessionControls {
     controls: MediaControls,
-    native_update: NativeUpdate,
+    publisher: MetadataPublisher,
+}
+
+enum MetadataPublisher {
+    Supplement(NativeUpdate),
+    Native(NativeUpdate),
+}
+impl MetadataPublisher {
+    fn publish(&self, state: &NowPlaying, backend: impl FnOnce()) {
+        match self {
+            Self::Supplement(callback) => {
+                backend();
+                callback(state);
+            }
+            Self::Native(callback) => callback(state),
+        }
+    }
 }
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
@@ -54,6 +70,34 @@ impl MediaSession {
         dispatch: MainDispatch,
         native_update: NativeUpdate,
     ) -> Result<Self, String> {
+        Self::install_with_publisher(
+            config,
+            playback,
+            dispatch,
+            MetadataPublisher::Supplement(native_update),
+        )
+    }
+    /// Let the host publish a complete native state atomically. Souvlaki still
+    /// handles remote commands, but does not write intermediate metadata states.
+    pub fn install_with_native_metadata(
+        config: PlatformConfig,
+        playback: Playback,
+        dispatch: MainDispatch,
+        publish: NativeUpdate,
+    ) -> Result<Self, String> {
+        Self::install_with_publisher(
+            config,
+            playback,
+            dispatch,
+            MetadataPublisher::Native(publish),
+        )
+    }
+    fn install_with_publisher(
+        config: PlatformConfig,
+        playback: Playback,
+        dispatch: MainDispatch,
+        publisher: MetadataPublisher,
+    ) -> Result<Self, String> {
         let mut controls = MediaControls::new(config).map_err(|e| format!("{e:?}"))?;
         let commands = playback.clone();
         controls
@@ -69,7 +113,7 @@ impl MediaSession {
                 id,
                 SessionControls {
                     controls,
-                    native_update,
+                    publisher,
                 },
             )
         });
@@ -78,8 +122,9 @@ impl MediaSession {
             Arc::new(move |state| {
                 SESSIONS.with(|sessions| {
                     if let Some(controls) = sessions.borrow_mut().get_mut(&id) {
-                        update(&mut controls.controls, state.clone());
-                        (controls.native_update)(&state);
+                        controls.publisher.publish(&state, || {
+                            update(&mut controls.controls, state.clone());
+                        });
                     }
                 });
             }),
@@ -97,11 +142,14 @@ impl Drop for MediaSession {
         self.playback.observe_now_playing(None);
         SESSIONS.with(|sessions| {
             if let Some(mut controls) = sessions.borrow_mut().remove(&self.id) {
-                let _ = controls.controls.set_playback(MediaPlayback::Stopped);
-                (controls.native_update)(&NowPlaying {
+                let state = NowPlaying {
+                    album: None,
                     track: None,
                     playing: false,
                     seconds: 0.0,
+                };
+                controls.publisher.publish(&state, || {
+                    update(&mut controls.controls, state.clone());
                 });
             }
         });
@@ -131,6 +179,7 @@ fn update(controls: &mut MediaControls, state: NowPlaying) {
         return;
     };
     let _ = controls.set_metadata(MediaMetadata {
+        album: state.album.as_ref().map(|album| album.title.as_str()),
         title: Some(&track.title),
         artist: Some(&track.artist),
         duration: Some(duration(track.duration_seconds)),
@@ -190,6 +239,46 @@ impl Publisher {
 mod tests {
     use super::*;
     #[test]
+    fn native_publisher_bypasses_intermediate_backend_writes() {
+        let received = Rc::new(RefCell::new(Vec::new()));
+        let output = received.clone();
+        let publisher = MetadataPublisher::Native(Box::new(move |state| {
+            output.borrow_mut().push(state.seconds);
+        }));
+        for seconds in [0.0, 52.0, 8.0] {
+            publisher.publish(
+                &NowPlaying {
+                    album: None,
+                    track: None,
+                    playing: true,
+                    seconds,
+                },
+                || panic!("native publication must not write a partial backend state"),
+            );
+        }
+        assert_eq!(*received.borrow(), vec![0.0, 52.0, 8.0]);
+    }
+
+    #[test]
+    fn supplemental_publisher_runs_after_backend_metadata() {
+        let order = Rc::new(RefCell::new(Vec::new()));
+        let output = order.clone();
+        let publisher = MetadataPublisher::Supplement(Box::new(move |_| {
+            output.borrow_mut().push("supplement");
+        }));
+        publisher.publish(
+            &NowPlaying {
+                album: None,
+                track: None,
+                playing: false,
+                seconds: 0.0,
+            },
+            || order.borrow_mut().push("backend"),
+        );
+        assert_eq!(*order.borrow(), vec!["backend", "supplement"]);
+    }
+
+    #[test]
     fn suspended_dispatch_keeps_one_task_and_the_latest_state() {
         let tasks = Arc::new(Mutex::new(Vec::<MainTask>::new()));
         let queued = tasks.clone();
@@ -201,6 +290,7 @@ mod tests {
         );
         for seconds in 0..1000 {
             publisher.publish(NowPlaying {
+                album: None,
                 track: None,
                 playing: true,
                 seconds: seconds as f64,
@@ -211,6 +301,7 @@ mod tests {
         task();
         assert_eq!(*received.lock().unwrap(), vec![999.0]);
         publisher.publish(NowPlaying {
+            album: None,
             track: None,
             playing: false,
             seconds: 1000.0,
