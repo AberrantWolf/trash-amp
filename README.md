@@ -2,11 +2,11 @@
 
 An album-focused Rust music player. The first development target is macOS, with a Slint UI over independent library and audio crates.
 
-The current testing release is **0.1.0-beta.2**, for Apple Silicon Macs on macOS 15
+The current testing release is **0.1.0-beta.3**, for Apple Silicon Macs on macOS 15
 or newer. Download it from [Releases](https://github.com/AberrantWolf/trash-amp/releases).
 Beta acceptance testing is in progress.
 See the [beta checklist](docs/release-gates.md),
-[release notes](docs/releases/0.1.0-beta.2.md), and
+[release notes](docs/releases/0.1.0-beta.3.md), and
 [release guide](docs/macos-release.md) for qualification, packaging and the GitHub
 automated prerelease workflow.
 

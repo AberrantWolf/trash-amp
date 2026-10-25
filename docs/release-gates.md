@@ -1,6 +1,6 @@
 # macOS beta release checklist
 
-Target: **0.1.0-beta.2**, Apple Silicon (arm64), macOS 15 or newer.
+Target: **0.1.0-beta.3**, Apple Silicon (arm64), macOS 15 or newer.
 This is a preparation checklist, not a declaration that the beta is qualified.
 Builds and automatic prerelease publication follow [the release guide](macos-release.md).
 Record validation results, hardware, macOS version and the exact tested commit in
@@ -38,7 +38,7 @@ support beyond the evidence recorded below.
 - [ ] Run real redumper/BIN and CUE boundary comparisons before qualifying those paths, or explicitly label them experimental in the final release notes. Keep raw mixed-mode/multisession, HTOA controls and unapplied de-emphasis limits visible.
 - [ ] Check keyboard-only navigation, focus, VoiceOver labels, text scaling and reduced motion throughout browsing, transport, settings and lists. Verify media keys and Now Playing from the packaged app.
 - [ ] Measure optimized large-library scrolling/search, UI responsiveness, memory, idle/playing CPU and hidden-window energy with real libraries and the 2,000-album demo. Record hardware and window dimensions; address hangs or unbounded growth.
-- [ ] Review [beta release notes](releases/0.1.0-beta.2.md) against native acceptance evidence, document remaining known issues and Collector compatibility, and verify the issue-reporting instructions.
+- [ ] Review [beta release notes](releases/0.1.0-beta.3.md) against native acceptance evidence, document remaining known issues and Collector compatibility, and verify the issue-reporting instructions.
 - [ ] Download the published ZIP, verify its checksum, and complete the separate-Mac smoke test: Finder launch, version/Slint attribution, folders/restart, local audio, Collector enrollment/streaming/download/offline playback and media keys.
 
 ## Later work

@@ -1,6 +1,6 @@
 # Preparing a macOS prerelease
 
-The current testing release is `v0.1.0-beta.2`, Apple Silicon only, with macOS 15 as
+The current testing release is `v0.1.0-beta.3`, Apple Silicon only, with macOS 15 as
 its minimum deployment target. Rust is pinned by `rust-toolchain.toml` and Cargo
 dependencies by the committed lockfile. Hosted Git dependencies require no
 sibling checkouts. Pushing an alpha or beta tag automatically publishes a
@@ -29,7 +29,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ./scripts/package-macos.sh
-./scripts/verify-macos-package.sh target/dist/trash-amp-0.1.0-beta.2-macos-arm64.zip
+./scripts/verify-macos-package.sh target/dist/trash-amp-0.1.0-beta.3-macos-arm64.zip
 ```
 
 Python 3.12 or newer, Xcode command-line tools, and network access are required.
@@ -68,8 +68,8 @@ Then run:
 export MACOS_SIGN_IDENTITY='Developer ID Application: Ben Harper (6DNZ4UX59T)'
 export MACOS_SIGNING_TEAM_ID=6DNZ4UX59T
 export MACOS_NOTARY_PROFILE=developer-id-notary
-RELEASE_TAG=v0.1.0-beta.2 ./scripts/package-macos.sh --signed
-./scripts/verify-macos-package.sh --signed target/dist/trash-amp-0.1.0-beta.2-macos-arm64.zip
+RELEASE_TAG=v0.1.0-beta.3 ./scripts/package-macos.sh --signed
+./scripts/verify-macos-package.sh --signed target/dist/trash-amp-0.1.0-beta.3-macos-arm64.zip
 ```
 
 `MACOS_SIGNING_KEYCHAIN` optionally selects a non-default keychain for both
@@ -162,11 +162,11 @@ can dispatch a signed candidate from a branch before the changes are merged.
 
 Once the reviewed version/lockfile/notes changes are on main and Actions passes,
 push the new version's tag. For example, after updating the workspace version,
-lockfile and notes to `0.1.0-beta.2`:
+lockfile and notes to `0.1.0-beta.3`:
 
 ```sh
-git tag -a v0.1.0-beta.2 -m 'Trash Amp 0.1.0 beta 2'
-git push origin v0.1.0-beta.2
+git tag -a v0.1.0-beta.3 -m 'Trash Amp 0.1.0 beta 3'
+git push origin v0.1.0-beta.3
 ```
 
 No separate Publish click or local `gh release edit` command is required.

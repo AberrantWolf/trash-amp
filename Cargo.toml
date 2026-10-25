@@ -4,7 +4,7 @@ members = ["crates/amp-core", "crates/amp-library", "crates/amp-audio", "crates/
 default-members = ["crates/amp-desktop"]
 
 [workspace.package]
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 edition = "2024"
 license = "MIT"
 
