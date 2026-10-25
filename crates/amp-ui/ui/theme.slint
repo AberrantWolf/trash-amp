@@ -1,0 +1,17 @@
+// Warm neutrals and restrained amber drawn from the Trash Amp headphones icon.
+export global Theme {
+    in-out property <bool> dark: true;
+    in-out property <bool> oled: false;
+    out property <color> canvas: dark ? (oled ? #000000 : #242321) : #f7f6f2;
+    out property <color> surface: dark ? (oled ? #000000 : #2c2b28) : #eeede8;
+    out property <color> raised: dark ? (oled ? #000000 : #33312e) : #ffffff;
+    out property <color> transport: dark ? (oled ? #000000 : #1d1c1a) : #e7e5de;
+    out property <color> text: dark ? #f2f0e9 : #2b2925;
+    out property <color> muted: dark ? #bcb7ac : #686258;
+    out property <color> accent: dark ? #eeb35f : #9a550d;
+    out property <color> link: dark ? #e7be86 : #88500f;
+    out property <color> selection: dark ? #51412c : #ead4b3;
+    out property <color> hover: dark ? #39352e : #e4dfd5;
+    out property <color> border: dark ? #655e52 : #aaa294;
+    out property <color> divider: dark ? #49443b : #d1cbbf;
+}

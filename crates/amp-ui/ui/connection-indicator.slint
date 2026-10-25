@@ -1,3 +1,4 @@
+import { Theme } from "theme.slint";
 export enum ConnectionKind { disconnected, checking, public, lan, direct, unavailable }
 
 export component ConnectionIndicator inherits FocusScope {
@@ -25,9 +26,9 @@ export component ConnectionIndicator inherits FocusScope {
     changed has-focus => { if !self.has-focus { root.pinned = false; } }
     Rectangle {
         border-radius: 3px;
-        background: pointer.has-hover || root.pinned || root.has-focus ? #303e4a : transparent;
+        background: pointer.has-hover || root.pinned || root.has-focus ? Theme.hover : transparent;
         border-width: root.has-focus ? 1px : 0px;
-        border-color: #7ca7c9;
+        border-color: Theme.accent;
         Image {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
@@ -48,12 +49,12 @@ export component ConnectionIndicator inherits FocusScope {
         y: -self.height - 6px;
         width: min(300px * root.text-scale, root.available-width);
         height: explanation.preferred-height + 20px;
-        background: #293743;
-        border-color: #536b7e; border-width: 1px; border-radius: 5px;
+        background: Theme.surface;
+        border-color: Theme.border; border-width: 1px; border-radius: 5px;
         explanation := Text {
             x: 10px; y: 10px; width: parent.width - 20px;
             text: root.description; wrap: word-wrap;
-            color: #edf3f8; font-size: 12px * root.text-scale;
+            color: Theme.text; font-size: 12px * root.text-scale;
         }
     }
 }

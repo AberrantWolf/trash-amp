@@ -36,6 +36,23 @@ Settings and Lists scroll views permit drag panning. These changes use geometry
 and capabilities rather than OS names. Existing hover/double-click interactions
 still need a touch and accessibility pass.
 
+## Appearance
+
+Settings → General offers Light and Dark appearance plus an independent
+OLED black backgrounds toggle. Choices persist across restarts. OLED applies
+only in Dark mode, replacing the shared canvas, panel, dialog and transport
+backgrounds with pure black; focus, selection and interactive states remain
+visible. Existing profiles default to Dark with OLED off.
+
+The shared UI pins Slint's Fluent widget style on both iOS and desktop so
+buttons, menus, text fields and scrollbars have the same appearance. The shared
+palette uses warm charcoal, soft ivory and restrained amber from
+the headphones icon. Standard menus and text fields follow the selected color
+scheme; transport buttons, sliders and checkboxes use the shared accent.
+For reproducible visual checks, use `--color-mode light` or `--color-mode dark`
+and optionally `--oled` with the existing `--snapshot` and `--size` arguments.
+These command-line overrides do not save preferences.
+
 ## Local builds
 
 Use the pinned Rust toolchain and a full Xcode installation with iOS SDKs:

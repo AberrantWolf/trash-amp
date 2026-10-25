@@ -1,4 +1,7 @@
-import { Button, ScrollView, ListView, Slider, CheckBox, AboutSlint, ComboBox, LineEdit } from "std-widgets.slint";
+import { Slider, CheckBox } from "themed-controls.slint";
+import { TransportButton } from "transport-button.slint";
+import { Theme } from "theme.slint";
+import { Palette, Button, ScrollView, ListView, AboutSlint, ComboBox, LineEdit } from "std-widgets.slint";
 import { BrowserItem, BrowserRow } from "browser-item.slint";
 export { BrowserRow }
 import { TrackItem, TrackRow } from "track-item.slint";
@@ -49,7 +52,7 @@ export component PlayerWindow inherits Window {
     title: "Trash Amp";
     in property <string> application-version;
     preferred-width: 980px; preferred-height: 680px; min-width: 330px; min-height: 230px; max-width: 10000px; max-height: 10000px;
-    background: #20262d;
+    background: Theme.canvas;
     default-font-family: "Helvetica Neue";
     default-font-size: 14px * root.text-scale;
     in-out property <float> text-scale: 1;
@@ -92,6 +95,10 @@ export component PlayerWindow inherits Window {
     in-out property <int> selected-track: -1;
     in property <int> selected-album: -1;
     in property <int> active-track: -1;
+    in-out property <bool> dark-mode <=> Theme.dark;
+    in-out property <bool> oled-mode <=> Theme.oled;
+    init => { Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light; }
+    changed dark-mode => { Palette.color-scheme = root.dark-mode ? ColorScheme.dark : ColorScheme.light; }
     in-out property <bool> reduced-motion;
     in-out property <bool> prefer-raw: true;
     in-out property <bool> automatic-metadata: true;
@@ -150,7 +157,7 @@ export component PlayerWindow inherits Window {
             if root.wide: ComboBox { model: root.sources; current-index <=> root.source-index; accessible-label: "Music source"; horizontal-stretch: 1; selected(i) => { root.source-changed(self.current-index); } }
             if root.wide && root.collector-active && !root.settings: ComboBox { model: root.collections; current-index <=> root.collection-index; accessible-label: "Music collection"; horizontal-stretch: 1; selected(i) => { root.collection-changed(self.current-index); } }
             if root.wide && root.collector-active && !root.settings: Button { text: "Refresh"; enabled: !root.collector-busy; clicked => { root.refresh-server(); } }
-            if !root.wide: Text { text: root.settings ? "Settings" : root.lists-open ? "Lists" : "trash amp"; color: #dce5ed; font-weight: 700; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+            if !root.wide: Text { text: root.settings ? "Settings" : root.lists-open ? "Lists" : "trash amp"; color: Theme.text; font-weight: 700; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
             if root.can-open-folder: Button { text: "Open folder"; clicked => { root.open-folder(); } }
             Button { text: root.lists-open ? "Library" : "Lists"; enabled: root.collector-active || root.lists-open; clicked => { root.settings = false; root.lists-open = !root.lists-open; keyboard.focus(); } }
             Button { text: root.settings ? "Done" : "Settings"; clicked => { root.lists-open = false; root.settings = !root.settings; keyboard.focus(); } }
@@ -172,7 +179,7 @@ export component PlayerWindow inherits Window {
                 clicked => { root.refresh-folder(); } }
         }
         if root.lists-open: Rectangle {
-            background: #283039; border-radius: 6px;
+            background: Theme.surface; border-radius: 6px;
             collector-scroll := ScrollView {
                 mouse-drag-pan-enabled: true;
                 width: 100%; height: 100%;
@@ -181,8 +188,8 @@ export component PlayerWindow inherits Window {
                 collector-content := VerticalLayout {
                 width: collector-scroll.viewport-width; height: collector-scroll.viewport-height;
                 padding: 12px; spacing: 8px;
-                Text { text: "Lists"; color: #edf3f8; font-size: 20px * root.text-scale; font-weight: 600; }
-                Text { text: root.connection-status; color: #a9bac9; wrap: word-wrap; }
+                Text { text: "Lists"; color: Theme.text; font-size: 20px * root.text-scale; font-weight: 600; }
+                Text { text: root.connection-status; color: Theme.muted; wrap: word-wrap; }
                 HorizontalLayout {
                     ComboBox { model: root.saved-lists; current-index <=> root.list-index; selected(i) => { root.list-selected(self.current-index); } }
                     Button { text: "Play"; enabled: root.list-index > 0; clicked => { root.play-list(false); } }
@@ -218,7 +225,7 @@ export component PlayerWindow inherits Window {
             }
         }
         if root.settings: Rectangle {
-            background: #303942; border-radius: 8px;
+            background: Theme.raised; border-radius: 8px;
             settings-scroll := ScrollView {
                 mouse-drag-pan-enabled: true;
                 width: 100%; height: 100%;
@@ -228,7 +235,7 @@ export component PlayerWindow inherits Window {
                     width: settings-scroll.visible-width;
                     height: settings-scroll.viewport-height;
                     padding: 12px; spacing: 12px;
-                    Text { text: "Settings"; color: #edf3f8; font-size: 20px * root.text-scale; font-weight: 600; }
+                    Text { text: "Settings"; color: Theme.text; font-size: 20px * root.text-scale; font-weight: 600; }
                     HorizontalLayout {
                         spacing: 6px;
                         Button { text: "General"; enabled: root.settings-tab != 0; clicked => { root.settings-tab = 0; } }
@@ -237,6 +244,16 @@ export component PlayerWindow inherits Window {
                     }
                     if root.settings-tab == 0: VerticalLayout {
                         spacing: 12px;
+                        HorizontalLayout {
+                            spacing: 12px;
+                            Text { text: "Appearance"; color: Theme.text; vertical-alignment: center; }
+                            ComboBox { model: ["Light", "Dark"]; current-index: root.dark-mode ? 1 : 0;
+                                accessible-label: "Color mode";
+                                selected(i) => { root.dark-mode = i == 1; root.preferences-changed(); } }
+                        }
+                        CheckBox { text: "OLED black backgrounds"; checked <=> root.oled-mode;
+                            toggled => { root.preferences-changed(); } }
+                        Text { text: "Use pure black backgrounds in dark mode."; color: Theme.muted; wrap: word-wrap; }
                         CheckBox { text: "Prefer redumper raw dumps"; checked <=> root.prefer-raw;
                             toggled => { root.preferences-changed(); } }
                         CheckBox { text: "Automatic metadata from MusicBrainz"; checked <=> root.automatic-metadata;
@@ -245,14 +262,14 @@ export component PlayerWindow inherits Window {
                             toggled => { root.preferences-changed(); } }
                         Button { text: "Load 2,000-album layout demo"; clicked => { root.demo(); root.settings = false; } }
                         HorizontalLayout {
-                            Text { text: "Text size"; color: #dce5ed; }
+                            Text { text: "Text size"; color: Theme.text; }
                             Slider { minimum: 1; maximum: 1.6; value: root.text-scale;
                                 changed(v) => { root.text-scale = v; root.preferences-changed(); } }
                         }
                     }
                     if root.settings-tab == 1: VerticalLayout {
                         spacing: 10px;
-                        Text { text: "Servers"; color: #edf3f8; font-weight: 600; }
+                        Text { text: "Servers"; color: Theme.text; font-weight: 600; }
                         ComboBox { model: root.sources; current-index <=> root.source-index; accessible-label: "Server to manage"; selected(i) => { root.source-changed(self.current-index); } }
                         LineEdit { text <=> root.server-url; placeholder-text: "https://collector.example:8443"; accessible-label: "Collector server URL"; }
                         HorizontalLayout {
@@ -260,13 +277,13 @@ export component PlayerWindow inherits Window {
                             Button { text: "Cancel"; enabled: root.collector-busy; clicked => { root.cancel-connect(); } }
                         }
                         LineEdit { text <=> root.certificate-path; placeholder-text: "Optional owner-provided PEM or pairing JSON path"; accessible-label: "Owner-provided trust file"; }
-                        Text { text: root.connection-status; color: #dce5ed; wrap: word-wrap; }
+                        Text { text: root.connection-status; color: Theme.text; wrap: word-wrap; }
                         Button { text: root.removing-connection ? "Removing connection…" : "Remove connection"; enabled: root.collector-active && !root.collector-busy && !root.removing-connection; clicked => { root.remove-server(); } }
                     }
                     if root.settings-tab == 2: VerticalLayout {
                         spacing: 10px;
-                        Text { text: "Downloads"; color: #edf3f8; font-weight: 600; }
-                        Text { text: "Audio storage limit (GiB)"; color: #a9bac9; }
+                        Text { text: "Downloads"; color: Theme.text; font-weight: 600; }
+                        Text { text: "Audio storage limit (GiB)"; color: Theme.muted; }
                         HorizontalLayout {
                             LineEdit { text <=> root.download-budget; placeholder-text: "Audio budget (GiB)"; accessible-label: "Download budget in GiB"; }
                             Button { text: "Set GiB limit"; clicked => { root.save-budget(); } }
@@ -275,14 +292,14 @@ export component PlayerWindow inherits Window {
                             Button { text: "Retry downloads"; clicked => { root.download-action(4); } }
                             Button { text: "Cancel downloads"; clicked => { root.download-action(5); } }
                         }
-                        Text { text: root.connection-status; color: #a9bac9; wrap: word-wrap; }
+                        Text { text: root.connection-status; color: Theme.muted; wrap: word-wrap; }
                     }
                     Rectangle { min-height: 12px; vertical-stretch: 1; }
                     if root.settings-tab == 0: HorizontalLayout {
                         alignment: center;
                         AboutSlint { width: 240px; height: 112px; }
                     }
-                    if root.settings-tab == 0: Text { text: "Trash Amp " + root.application-version; color: #a9bac9; horizontal-alignment: center; }
+                    if root.settings-tab == 0: Text { text: "Trash Amp " + root.application-version; color: Theme.muted; horizontal-alignment: center; }
                 }
             }
         }
@@ -295,7 +312,7 @@ export component PlayerWindow inherits Window {
                 max-width: root.wide ? root.desktop-library-width : 10000px;
                 min-width: root.wide ? root.desktop-library-width : 0px;
                 horizontal-stretch: root.wide ? 0 : 1;
-                background: #283039; border-radius: 6px;
+                background: Theme.surface; border-radius: 6px;
                 HorizontalLayout {
                     x: 8px; y: 8px; width: parent.width - 16px; height: 32px;
                     ComboBox { model: ["Albums", "Artists"]; current-index <=> root.sort-order; selected(_) => { root.sort-changed(); } }
@@ -345,7 +362,7 @@ export component PlayerWindow inherits Window {
                     if (event.text == Key.RightArrow) { root.library-width = min(root.viewport-width * 0.45 / (root.text-scale * 1px), root.library-width + 20); return accept; }
                     return reject;
                 }
-                Rectangle { x: 7px; width: 2px; height: 100%; background: resize.has-hover || resize.pressed ? #7ca7c9 : #394650; }
+                Rectangle { x: 7px; width: 2px; height: 100%; background: resize.has-hover || resize.pressed ? Theme.accent : Theme.divider; }
                 resize := TouchArea {
                     mouse-cursor: ew-resize;
                     moved => {
@@ -365,16 +382,16 @@ export component PlayerWindow inherits Window {
                 }
                 HorizontalLayout {
                     Image { source: root.album-art; width: 64px; height: 64px; image-fit: contain; }
-                    Text { text: root.album-title; color: #f0f3f7; font-size: 27px * root.text-scale; font-weight: 600; wrap: word-wrap; }
+                    Text { text: root.album-title; color: Theme.text; font-size: 27px * root.text-scale; font-weight: 600; wrap: word-wrap; }
                 }
-                if root.artist-view: Text { text: root.album-artist; color: #a9bac9; wrap: word-wrap; }
+                if root.artist-view: Text { text: root.album-artist; color: Theme.muted; wrap: word-wrap; }
                 if !root.artist-view: artist-link := FocusScope {
                     enabled: root.tracks.length > 0;
                     height: 24px * root.text-scale;
                     accessible-role: button; accessible-label: "Artist: " + root.album-artist;
                     accessible-action-default => { root.open-artist(root.album-artist); }
                     key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.open-artist(root.album-artist); return accept; } return reject; }
-                    Text { x: 0px; y: 0px; width: 100%; height: 100%; horizontal-alignment: left; text: root.album-artist; color: #a8c9e2; overflow: elide; font-weight: artist-link.has-focus || artist-click.has-hover ? 600 : 400; }
+                    Text { x: 0px; y: 0px; width: 100%; height: 100%; horizontal-alignment: left; text: root.album-artist; color: Theme.link; overflow: elide; font-weight: artist-link.has-focus || artist-click.has-hover ? 600 : 400; }
                     artist-click := TouchArea { clicked => { root.open-artist(root.album-artist); keyboard.focus(); } }
                 }
                 if root.artist-view: ListView {
@@ -409,8 +426,8 @@ export component PlayerWindow inherits Window {
                             return reject;
                         }
                         accessible-action-default => { root.show-queue = i == 1; }
-                        Text { text: label; color: root.show-queue == (i == 1) ? #edf3f8 : #93acbf; horizontal-alignment: center; vertical-alignment: center; }
-                        Rectangle { y: parent.height - 2px; height: 2px; width: 100%; background: root.show-queue == (i == 1) ? #7ca7c9 : #303c47; }
+                        Text { text: label; color: root.show-queue == (i == 1) ? Theme.text : Theme.muted; horizontal-alignment: center; vertical-alignment: center; }
+                        Rectangle { y: parent.height - 2px; height: 2px; width: 100%; background: root.show-queue == (i == 1) ? Theme.accent : Theme.hover; }
                         TouchArea { clicked => { root.show-queue = i == 1; tab.focus(); } }
                     }
                 }
@@ -430,49 +447,49 @@ export component PlayerWindow inherits Window {
                     Button { text: "Clear up next"; clicked => { root.clear-queue(); } }
                     ListView {
                         min-height: 0px; preferred-height: 0px; vertical-stretch: 1;
-                        for title in root.queued: Text { text: title; color: #dce5ed; height: 34px; overflow: elide; }
+                        for title in root.queued: Text { text: title; color: Theme.text; height: 34px; overflow: elide; }
                     }
                 }
             }
         }
         Rectangle {
             height: 104px * root.text-scale;
-            background: #151d24; border-radius: 9px;
+            background: Theme.transport; border-radius: 9px;
             VerticalLayout {
                 padding: 8px; spacing: 4px;
                 HorizontalLayout {
                     spacing: 10px;
-                    Button { icon: @image-url("icons/previous.svg"); accessible-label: "Previous track"; width: 40px; clicked => { root.previous(); } }
-                    Button {
+                    TransportButton { icon: @image-url("icons/previous.svg"); accessible-label: "Previous track"; width: 40px; clicked => { root.previous(); } }
+                    TransportButton {
                         width: 48px; height: 40px;
-                        primary: true; colorize-icon: true; icon-size: 24px;
+                        primary: true;
                         icon: root.playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");
                         accessible-label: root.playing ? "Pause" : "Play";
                         clicked => { root.toggle-play(); }
                     }
-                    Button { icon: @image-url("icons/next.svg"); accessible-label: "Next track"; width: 40px; clicked => { root.next(); } }
+                    TransportButton { icon: @image-url("icons/next.svg"); accessible-label: "Next track"; width: 40px; clicked => { root.next(); } }
                     VerticalLayout {
-                        Text { text: root.now-title; color: #edf3f8; overflow: elide; font-weight: 600; }
-                        Text { text: root.now-artist; color: #93acbf; overflow: elide; font-size: 12px * root.text-scale; }
+                        Text { text: root.now-title; color: Theme.text; overflow: elide; font-weight: 600; }
+                        Text { text: root.now-artist; color: Theme.muted; overflow: elide; font-size: 12px * root.text-scale; }
                     }
                     if root.wide: Rectangle {
-                        width: 68px; background: #293845;
-                        Rectangle { y: parent.height * (1 - root.level); height: parent.height * root.level; width: parent.width; background: #7ca7c9; }
+                        width: 68px; background: Theme.divider;
+                        Rectangle { y: parent.height * (1 - root.level); height: parent.height * root.level; width: parent.width; background: Theme.accent; }
                     }
                 }
                 HorizontalLayout {
                     spacing: 8px;
-                    Text { text: root.elapsed; color: #97adbe; width: 40px; vertical-alignment: center; }
+                    Text { text: root.elapsed; color: Theme.muted; width: 40px; vertical-alignment: center; }
                     playhead := TransportSeek { position <=> root.progress; seek(v) => { root.seek(v); } }
-                    Text { text: root.duration; color: #97adbe; width: 40px; vertical-alignment: center; }
+                    Text { text: root.duration; color: Theme.muted; width: 40px; vertical-alignment: center; }
                 }
                 if root.scanning: Rectangle {
-                    height: 3px; background: #303c47;
-                    Rectangle { height: 100%; width: parent.width * root.scan-progress; background: #7ca7c9; }
+                    height: 3px; background: Theme.hover;
+                    Rectangle { height: 100%; width: parent.width * root.scan-progress; background: Theme.accent; }
                 }
                 HorizontalLayout {
                     height: 18px * root.text-scale; spacing: 6px;
-                    Text { text: root.status; color: #a7b8c6; overflow: elide; vertical-alignment: center; font-size: 11px * root.text-scale; accessible-label: "Playback status"; horizontal-stretch: 1; }
+                    Text { text: root.status; color: Theme.muted; overflow: elide; vertical-alignment: center; font-size: 11px * root.text-scale; accessible-label: "Playback status"; horizontal-stretch: 1; }
                     ConnectionIndicator { kind: root.connection-kind; text-scale: root.text-scale; available-width: parent.width; }
                 }
             }

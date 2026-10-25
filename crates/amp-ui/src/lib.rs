@@ -4,7 +4,7 @@ use amp_app::PlaybackService;
 use amp_app::catalog::CatalogService;
 use amp_app::catalog::{Catalog, Source as CatalogSource};
 use amp_app::{Playback, Transport};
-use amp_core::{DumpPreference, Library, Preferences, Track};
+use amp_core::{ColorMode, DumpPreference, Library, Preferences, Track};
 #[cfg(test)]
 use amp_library::Store;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
@@ -384,6 +384,8 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     }
     ui.set_application_version(env!("CARGO_PKG_VERSION").into());
     ui.set_sort_order(i32::from(preferences.browse_artists));
+    ui.set_dark_mode(preferences.color_mode == ColorMode::Dark);
+    ui.set_oled_mode(preferences.oled_mode);
     ui.set_reduced_motion(preferences.reduced_motion);
     ui.set_prefer_raw(preferences.dump_preference == DumpPreference::Redumper);
     ui.set_automatic_metadata(preferences.automatic_metadata);
@@ -521,6 +523,12 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
         ui.on_preferences_changed(move || {
             if let Some(ui) = weak.upgrade() {
                 let mut s = state.borrow_mut();
+                s.preferences.color_mode = if ui.get_dark_mode() {
+                    ColorMode::Dark
+                } else {
+                    ColorMode::Light
+                };
+                s.preferences.oled_mode = ui.get_oled_mode();
                 s.preferences.text_scale = ui.get_text_scale();
                 s.preferences.reduced_motion = ui.get_reduced_motion();
                 s.preferences.automatic_metadata = ui.get_automatic_metadata();
@@ -600,6 +608,16 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
         ui.set_settings_tab(1);
         ui.set_settings(true);
         ui.invoke_connect_server();
+    }
+    if let Some(mode) = args
+        .iter()
+        .position(|a| a == "--color-mode")
+        .and_then(|i| args.get(i + 1))
+    {
+        ui.set_dark_mode(mode != "light");
+    }
+    if args.iter().any(|a| a == "--oled") {
+        ui.set_oled_mode(true);
     }
     if args.iter().any(|a| a == "--settings") {
         ui.set_settings(true);
@@ -737,6 +755,66 @@ mod tests {
             out property <bool> expanded: indicator.expanded;
             indicator := ConnectionIndicator { x: parent.width - self.width; y: parent.height - self.height; kind: root.kind; available-width: parent.width; }
         }
+    }
+    slint::slint! {
+        import { Theme } from "ui/theme.slint";
+        import { Palette } from "std-widgets.slint";
+        export component AppearanceHarness inherits Window {
+            in-out property <bool> dark <=> Theme.dark;
+            in-out property <bool> oled <=> Theme.oled;
+            out property <[color]> surfaces: [Theme.canvas, Theme.surface, Theme.raised, Theme.transport];
+            out property <color> text: Theme.text;
+            out property <color> selection: Theme.selection;
+        }
+    }
+    #[test]
+    fn oled_only_blacks_dark_surfaces_and_preserves_content_states() {
+        use slint::Model;
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = AppearanceHarness::new().unwrap();
+        let black = slint::Color::from_rgb_u8(0, 0, 0);
+        let dark_text = ui.get_text();
+        let dark_selection = ui.get_selection();
+        assert!(ui.get_surfaces().iter().all(|c| c != black));
+        ui.set_oled(true);
+        assert!(ui.get_surfaces().iter().all(|c| c == black));
+        assert_eq!(ui.get_text(), dark_text);
+        assert_eq!(ui.get_selection(), dark_selection);
+        ui.set_dark(false);
+        let light = ui.get_surfaces().iter().collect::<Vec<_>>();
+        assert!(light.iter().all(|c| *c != black));
+        ui.set_oled(false);
+        assert_eq!(light, ui.get_surfaces().iter().collect::<Vec<_>>());
+        ui.set_dark(true);
+        assert!(ui.get_surfaces().iter().all(|c| c != black));
+    }
+    #[test]
+    fn appearance_checkbox_keeps_pointer_and_accessibility_behavior() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::platform::{PointerEventButton, WindowEvent};
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(390., 844.));
+        ui.set_settings(true);
+        ui.show().unwrap();
+        let checkbox = ElementHandle::find_by_accessible_label(&ui, "OLED black backgrounds")
+            .next()
+            .unwrap();
+        let position = slint::LogicalPosition::new(
+            checkbox.absolute_position().x + 9.,
+            checkbox.absolute_position().y + checkbox.size().height / 2.,
+        );
+        ui.window().dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        ui.window().dispatch_event(WindowEvent::PointerReleased {
+            position,
+            button: PointerEventButton::Left,
+        });
+        assert!(ui.get_oled_mode());
+        checkbox.invoke_accessible_default_action();
+        assert!(!ui.get_oled_mode());
     }
     #[test]
     fn error_modal_blocks_transport_and_dismisses_with_keyboard() {

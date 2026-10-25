@@ -1,0 +1,70 @@
+import { Slider as StandardSlider } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+// Keep the standard slider's input, keyboard and accessibility behavior while
+// drawing its visible parts with the same palette as the rest of the player.
+export component Slider inherits Rectangle {
+    in property <float> minimum <=> input.minimum;
+    in property <float> maximum <=> input.maximum;
+    in property <float> step <=> input.step;
+    in-out property <float> value <=> input.value;
+    callback changed <=> input.changed;
+    callback released <=> input.released;
+    min-height: 24px; min-width: 40px;
+    horizontal-stretch: 1; vertical-stretch: 0;
+    forward-focus: input;
+    private property <float> fraction: maximum > minimum ? clamp((value - minimum) / (maximum - minimum), 0, 1) : 0;
+    Rectangle {
+        x: 10px; y: (parent.height - self.height) / 2;
+        width: max(0px, parent.width - 20px); height: 4px;
+        border-radius: 2px; background: Theme.divider;
+        Rectangle { width: parent.width * root.fraction; height: 100%; border-radius: 2px; background: Theme.accent; }
+    }
+    Rectangle {
+        x: root.fraction * max(0px, parent.width - 20px);
+        y: (parent.height - self.height) / 2;
+        width: 20px; height: 20px; border-radius: 10px;
+        background: Theme.accent;
+        border-width: input.has-focus ? 3px : 1px;
+        border-color: input.has-focus ? Theme.text : Theme.border;
+    }
+    input := StandardSlider { width: 100%; height: 100%; opacity: 0; }
+}
+
+export component CheckBox inherits Rectangle {
+    in property <string> text;
+    in-out property <bool> checked;
+    callback toggled();
+    accessible-role: checkbox;
+    accessible-label: root.text;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-action-default => { root.checked = !root.checked; root.toggled(); }
+    min-height: max(24px, label.preferred-height);
+    min-width: label.preferred-width + 30px;
+    horizontal-stretch: 1; vertical-stretch: 0;
+    forward-focus: focus;
+    Rectangle {
+        x: 0px; y: (parent.height - self.height) / 2;
+        width: 18px; height: 18px; border-radius: 3px;
+        background: root.checked ? Theme.accent : Theme.raised;
+        border-width: focus.has-focus ? 2px : 1px;
+        border-color: focus.has-focus ? Theme.text : Theme.border;
+        Text { text: root.checked ? "✓" : ""; color: Theme.dark ? #242321 : #ffffff;
+            width: 100%; height: 100%; horizontal-alignment: center; vertical-alignment: center; font-weight: 700; }
+    }
+    label := Text { x: 28px; width: parent.width - self.x; height: 100%; text: root.text; color: Theme.text; vertical-alignment: center; }
+    focus := FocusScope {
+        x: 0px; y: 0px; width: 100%; height: 100%;
+        key-pressed(event) => {
+            if event.text == " " || event.text == Key.Return {
+                root.checked = !root.checked; root.toggled(); return accept;
+            }
+            return reject;
+        }
+    }
+    TouchArea {
+        x: 0px; y: 0px; width: 100%; height: 100%;
+        clicked => { focus.focus(); root.checked = !root.checked; root.toggled(); }
+    }
+}

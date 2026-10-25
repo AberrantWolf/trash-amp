@@ -1,3 +1,4 @@
+import { Theme } from "theme.slint";
 import { Button, ScrollView } from "std-widgets.slint";
 
 // Embedded modal works on hosts with a single native window as well as desktop.
@@ -21,20 +22,20 @@ export component ErrorDialog inherits Rectangle {
             y: (parent.height - self.height) / 2;
             width: min(480px, parent.width - 32px);
             height: min(parent.height - 32px, heading.preferred-height + body.preferred-height + ok.preferred-height + 72px);
-            background: #29323b;
+            background: Theme.raised;
             border-radius: 10px;
             border-width: 1px;
-            border-color: #556573;
+            border-color: Theme.border;
             accessible-role: region;
             accessible-label: root.title;
             VerticalLayout {
                 padding: 20px; spacing: 12px;
-                heading := Text { text: root.title; color: #edf3f8; font-weight: 700; wrap: word-wrap; }
+                heading := Text { text: root.title; color: Theme.text; font-weight: 700; wrap: word-wrap; }
                 ScrollView {
                     content-height: max(self.visible-height, body.preferred-height);
                     body := Text {
                         width: parent.width;
-                        text: root.message; color: #dce5ed; wrap: word-wrap;
+                        text: root.message; color: Theme.text; wrap: word-wrap;
                         accessible-live-region: assertive;
                     }
                 }

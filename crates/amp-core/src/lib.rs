@@ -75,6 +75,13 @@ pub enum DumpPreference {
     BinCue,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColorMode {
+    Light,
+    #[default]
+    Dark,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Preferences {
     #[serde(default, alias = "sort_by_artist")]
@@ -83,6 +90,10 @@ pub struct Preferences {
     pub automatic_metadata: bool,
     pub reduced_motion: bool,
     pub text_scale: f32,
+    #[serde(default)]
+    pub color_mode: ColorMode,
+    #[serde(default)]
+    pub oled_mode: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -92,6 +103,8 @@ impl Default for Preferences {
             automatic_metadata: true,
             reduced_motion: false,
             text_scale: 1.0,
+            color_mode: ColorMode::Dark,
+            oled_mode: false,
         }
     }
 }
@@ -132,6 +145,24 @@ impl UpNext {
 #[cfg(test)]
 mod preference_tests {
     use super::*;
+    #[test]
+    fn appearance_defaults_for_legacy_preferences_and_round_trips() {
+        let mut old = serde_json::to_value(Preferences::default()).unwrap();
+        old.as_object_mut().unwrap().remove("color_mode");
+        old.as_object_mut().unwrap().remove("oled_mode");
+        let mut prefs: Preferences = serde_json::from_value(old).unwrap();
+        assert_eq!(prefs.color_mode, ColorMode::Dark);
+        assert!(!prefs.oled_mode);
+        for mode in [ColorMode::Light, ColorMode::Dark] {
+            prefs.color_mode = mode;
+            prefs.oled_mode = true;
+            let restored: Preferences =
+                serde_json::from_slice(&serde_json::to_vec(&prefs).unwrap()).unwrap();
+            assert_eq!(restored.color_mode, mode);
+            assert!(restored.oled_mode);
+        }
+    }
+
     #[test]
     fn legacy_sort_preference_becomes_artist_browsing() {
         let mut old = serde_json::to_value(Preferences::default()).unwrap();
