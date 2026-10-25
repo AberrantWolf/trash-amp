@@ -430,3 +430,39 @@ The release contains direct HTTPS playback/downloads, the connection indicator,
 the new app icon and automatic publication. Separate-Mac installation/upgrade,
 physical-device and actual external-network native playback acceptance remain
 open; publication does not complete those beta gates.
+
+## Published beta.3 — 2026-10-25
+
+The iOS branch was fast-forwarded into main, including the shared UI/application
+services, appearance fixes, native album artwork and atomic iOS Now Playing
+publication. The icon change is committed as `a386732`. Release preparation is
+`cb474cef3b5d2547f085f4f3a7c2a976a3ceb42c`, the exact target of
+`v0.1.0-beta.3`.
+
+- [Main run 40188349377](https://github.com/AberrantWolf/trash-amp/actions/runs/40188349377)
+  passed formatting, 28 release-tooling tests, strict locked all-target Clippy,
+  105 Rust tests (three opt-in/subprocess tests marked ignored), packaging and
+  extracted-package verification.
+- [Tagged run 40190068986](https://github.com/AberrantWolf/trash-amp/actions/runs/40190068986)
+  repeated those checks, then passed Developer ID/Hardened Runtime signing,
+  notarization, stapling, extracted-ticket/Gatekeeper verification and automatic
+  prerelease publication. Apple accepted submission
+  `49c14864-8e71-4c77-ba45-c0d258353a75`. A temporary Apple ticket-service network
+  failure was handled by the existing validation retry; no CI rerun was needed.
+- The [published beta.3](https://github.com/AberrantWolf/trash-amp/releases/tag/v0.1.0-beta.3)
+  includes the Apple Silicon ZIP and SHA-256 asset. An independent download on
+  this Mac passed checksum, metadata/notices, architecture/dynamic-dependency,
+  Developer ID signature, Hardened Runtime, timestamp, stapled-ticket and
+  Gatekeeper checks. Gatekeeper reported `Notarized Developer ID`; the extracted
+  binary's `--help` invocation succeeded.
+- Downloaded ZIP SHA-256:
+  `f46f2db4e8d3556630fe54f32c0b1d32df4767d503a8feb6939079cf1dd4dd8b`.
+- Local checks also passed 105 Rust tests, 28 release-tooling tests, strict Clippy
+  and package verification. The optimized desktop binary rendered the 2,000-album
+  demo in Dark mode and Settings in Light mode at 1200 × 800, displayed beta.3
+  and Slint attribution, and exited cleanly using an isolated temporary profile.
+
+This is a macOS 15+ Apple Silicon testing release. iPhone source-tree development
+work does not add an iOS download or establish TestFlight qualification. The
+separate-Mac installation/upgrade, physical-device, accessibility and broader
+native playback acceptance gates remain open.
