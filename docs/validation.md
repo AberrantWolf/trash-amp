@@ -398,3 +398,35 @@ publication after tagged signed-package verification. Release notes retain the
 native/external-network, physical-device, accessibility and separate-Mac acceptance
 limits. GitHub validation and signed publication are recorded separately below
 when completed.
+
+## Published beta.2 — 2026-10-25
+
+[PR #3](https://github.com/AberrantWolf/trash-amp/pull/3) merged as
+`0aa96d25c76f00c4fc918c728e8bf9ab1cbb5844`. The signed ED25519
+`v0.1.0-beta.2` tag verifies locally and points to that exact commit. Its tree
+matches the locally validated and green PR candidate `5d2e21e`.
+
+- [PR run 40147137401](https://github.com/AberrantWolf/trash-amp/actions/runs/40147137401)
+  passed formatting, 28 release-tooling tests, strict Clippy, 67 Rust tests,
+  packaging and extracted-package verification.
+- [Main run 40148082866](https://github.com/AberrantWolf/trash-amp/actions/runs/40148082866)
+  passed on the merged source.
+- [Tagged run 40148089210](https://github.com/AberrantWolf/trash-amp/actions/runs/40148089210)
+  passed all checks, Developer ID/Hardened Runtime signing, notarization,
+  stapling, extracted-package verification and automatic prerelease publication.
+  No failed build or rerun was needed for the beta.2 candidate.
+- Apple accepted submission `9b8ab401-a67b-4ce1-8050-641f50ab9005` with status
+  code 0 and no issues.
+- The [published beta.2](https://github.com/AberrantWolf/trash-amp/releases/tag/v0.1.0-beta.2)
+  is visible as a prerelease, with the Apple Silicon ZIP and SHA-256 asset.
+  An independent download on this Mac passed checksum, bundle metadata/notices,
+  architecture/dynamic-dependency, Developer ID signature, Hardened Runtime,
+  timestamp, stapled-ticket and Gatekeeper checks. Gatekeeper reported
+  `Notarized Developer ID`. The packaged binary's `--help` invocation succeeded.
+- Downloaded ZIP SHA-256:
+  `17a3a0a541c39409e34cd485d94d666250990a9337564a71d9b0cd189d54b6cb`.
+
+The release contains direct HTTPS playback/downloads, the connection indicator,
+the new app icon and automatic publication. Separate-Mac installation/upgrade,
+physical-device and actual external-network native playback acceptance remain
+open; publication does not complete those beta gates.
