@@ -201,8 +201,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ambient-authority"
+version = "0.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9d4ee0d472d1cd2e28c97dfa124b3d8d992e10eb0a035f33f5d12e3a177ba3b"
+
+[[package]]
 name = "amp-audio"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "amp-core",
  "anyhow",
@@ -217,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "amp-collector"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "amp-audio",
  "amp-core",
@@ -226,6 +232,7 @@ dependencies = [
  "chrono",
  "collector-app",
  "collector-client",
+ "collector-media",
  "collector-providers",
  "collector-server",
  "collector-store",
@@ -246,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "amp-core"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -255,7 +262,7 @@ dependencies = [
 
 [[package]]
 name = "amp-library"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "amp-core",
  "anyhow",
@@ -1149,6 +1156,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "cap-primitives"
+version = "3.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e0bf07d379916947be6c4a07f43684153d710a2896c31f9e97781362895596c"
+dependencies = [
+ "ambient-authority",
+ "fs-set-times",
+ "io-extras",
+ "io-lifetimes 2.0.4",
+ "ipnet",
+ "maybe-owned",
+ "rustix 1.1.4",
+ "rustix-linux-procfs",
+ "windows-sys 0.52.0",
+ "winx",
+]
+
+[[package]]
+name = "cap-std"
+version = "3.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a59e59fa26472d29680ece6a9f8ee8b0551a719a33df2f5240bde065ecbddfd7"
+dependencies = [
+ "cap-primitives",
+ "io-extras",
+ "io-lifetimes 2.0.4",
+ "rustix 1.1.4",
+]
+
+[[package]]
 name = "cc"
 version = "1.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1350,8 +1387,8 @@ dependencies = [
 
 [[package]]
 name = "collector-api-types"
-version = "0.1.0-beta.3"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=14d56ab4cceaf82c09086d56d987484bab46d618#14d56ab4cceaf82c09086d56d987484bab46d618"
+version = "0.1.0-beta.6"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=c5587138c90f5d460b371cb9e489c8eb28aedb7a#c5587138c90f5d460b371cb9e489c8eb28aedb7a"
 dependencies = [
  "chrono",
  "collector-core",
@@ -1361,8 +1398,8 @@ dependencies = [
 
 [[package]]
 name = "collector-app"
-version = "0.1.0-beta.3"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=14d56ab4cceaf82c09086d56d987484bab46d618#14d56ab4cceaf82c09086d56d987484bab46d618"
+version = "0.1.0-beta.6"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=c5587138c90f5d460b371cb9e489c8eb28aedb7a#c5587138c90f5d460b371cb9e489c8eb28aedb7a"
 dependencies = [
  "chrono",
  "collector-api-types",
@@ -1376,14 +1413,15 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "unicode-normalization",
+ "url",
  "utoipa",
  "uuid",
 ]
 
 [[package]]
 name = "collector-client"
-version = "0.1.0-beta.3"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=14d56ab4cceaf82c09086d56d987484bab46d618#14d56ab4cceaf82c09086d56d987484bab46d618"
+version = "0.1.0-beta.6"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=c5587138c90f5d460b371cb9e489c8eb28aedb7a#c5587138c90f5d460b371cb9e489c8eb28aedb7a"
 dependencies = [
  "chrono",
  "collector-api-types",
@@ -1402,8 +1440,8 @@ dependencies = [
 
 [[package]]
 name = "collector-core"
-version = "0.1.0-beta.3"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=14d56ab4cceaf82c09086d56d987484bab46d618#14d56ab4cceaf82c09086d56d987484bab46d618"
+version = "0.1.0-beta.6"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=c5587138c90f5d460b371cb9e489c8eb28aedb7a#c5587138c90f5d460b371cb9e489c8eb28aedb7a"
 dependencies = [
  "chrono",
  "hex",
@@ -1417,9 +1455,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "collector-media"
+version = "0.1.0-beta.6"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=c5587138c90f5d460b371cb9e489c8eb28aedb7a#c5587138c90f5d460b371cb9e489c8eb28aedb7a"
+dependencies = [
+ "anyhow",
+ "axum",
+ "cap-std",
+ "clap",
+ "collector-api-types",
+ "collector-core",
+ "futures-util",
+ "hex",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-io-timeout",
+]
+
+[[package]]
 name = "collector-modules"
-version = "0.1.0-beta.3"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=14d56ab4cceaf82c09086d56d987484bab46d618#14d56ab4cceaf82c09086d56d987484bab46d618"
+version = "0.1.0-beta.6"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=c5587138c90f5d460b371cb9e489c8eb28aedb7a#c5587138c90f5d460b371cb9e489c8eb28aedb7a"
 dependencies = [
  "collector-core",
  "junk-libs-accuraterip",
@@ -1436,8 +1498,8 @@ dependencies = [
 
 [[package]]
 name = "collector-providers"
-version = "0.1.0-beta.3"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=14d56ab4cceaf82c09086d56d987484bab46d618#14d56ab4cceaf82c09086d56d987484bab46d618"
+version = "0.1.0-beta.6"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=c5587138c90f5d460b371cb9e489c8eb28aedb7a#c5587138c90f5d460b371cb9e489c8eb28aedb7a"
 dependencies = [
  "collector-app",
  "collector-core",
@@ -1460,8 +1522,8 @@ dependencies = [
 
 [[package]]
 name = "collector-server"
-version = "0.1.0-beta.3"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=14d56ab4cceaf82c09086d56d987484bab46d618#14d56ab4cceaf82c09086d56d987484bab46d618"
+version = "0.1.0-beta.6"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=c5587138c90f5d460b371cb9e489c8eb28aedb7a#c5587138c90f5d460b371cb9e489c8eb28aedb7a"
 dependencies = [
  "anyhow",
  "axum",
@@ -1472,6 +1534,7 @@ dependencies = [
  "collector-app",
  "collector-client",
  "collector-core",
+ "collector-media",
  "collector-modules",
  "collector-providers",
  "collector-store",
@@ -1502,8 +1565,8 @@ dependencies = [
 
 [[package]]
 name = "collector-store"
-version = "0.1.0-beta.3"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=14d56ab4cceaf82c09086d56d987484bab46d618#14d56ab4cceaf82c09086d56d987484bab46d618"
+version = "0.1.0-beta.6"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=c5587138c90f5d460b371cb9e489c8eb28aedb7a#c5587138c90f5d460b371cb9e489c8eb28aedb7a"
 dependencies = [
  "argon2",
  "chrono",
@@ -2476,6 +2539,17 @@ checksum = "b5c95b673b8f6f7235229ae11c5642d81b04c2e64c1e2fb417bc0cf73ca45f29"
 dependencies = [
  "autocfg",
  "tokio",
+]
+
+[[package]]
+name = "fs-set-times"
+version = "0.20.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94e7099f6313ecacbe1256e8ff9d617b75d1bcb16a6fddef94866d225a01a14a"
+dependencies = [
+ "io-lifetimes 2.0.4",
+ "rustix 1.1.4",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3626,6 +3700,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "io-extras"
+version = "0.18.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2285ddfe3054097ef4b2fe909ef8c3bcd1ea52a8f0d274416caebeef39f04a65"
+dependencies = [
+ "io-lifetimes 2.0.4",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "io-lifetimes"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3635,6 +3719,12 @@ dependencies = [
  "libc",
  "windows-sys 0.48.0",
 ]
+
+[[package]]
+name = "io-lifetimes"
+version = "2.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06432fb54d3be7964ecd3649233cddf80db2832f47fec34c01f65b3d9d774983"
 
 [[package]]
 name = "ipnet"
@@ -4197,6 +4287,12 @@ name = "matchit"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
+name = "maybe-owned"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "maybe-rayon"
@@ -6185,6 +6281,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustix-linux-procfs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fc84bf7e9aa16c4f2c758f27412dc9841341e16aa682d9c7ac308fe3ee12056"
+dependencies = [
+ "once_cell",
+ "rustix 1.1.4",
+]
+
+[[package]]
 name = "rustls"
 version = "0.23.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7467,6 +7573,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-io-timeout"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bd86198d9ee903fedd2f9a2e72014287c0d9167e4ae43b5853007205dda1b76"
+dependencies = [
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "tokio-macros"
 version = "2.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7714,7 +7830,7 @@ dependencies = [
 
 [[package]]
 name = "trash-amp"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 dependencies = [
  "amp-audio",
  "amp-collector",
@@ -7778,7 +7894,7 @@ version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af4e37e9ea4401fc841ff54b9ddfc9be1079b1e89434c1a6a865dd68980f7e9f"
 dependencies = [
- "io-lifetimes",
+ "io-lifetimes 1.0.11",
  "libc",
  "libudev-sys",
  "pkg-config",
@@ -8865,6 +8981,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "winx"
+version = "0.36.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f3fd376f71958b862e7afb20cfe5a22830e1963462f3a17f49d82a6c1d1f42d"
+dependencies = [
+ "bitflags 2.13.1",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

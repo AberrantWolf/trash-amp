@@ -1,6 +1,6 @@
 //! Real TLS listener, archive publication, native authorization and FLAC pipeline.
 #[cfg(test)]
-use amp_collector::{Adapter, ListCommand, api};
+use amp_collector::{Adapter, ConnectionState, ListCommand, api};
 use amp_collector::{ConnectionKey, ids::*};
 use collector_app::{AuthenticatedPrincipal, CommandContext, CredentialKind};
 use collector_client::{
@@ -43,12 +43,23 @@ fn command() -> CommandContext {
 }
 pub struct Fixture {
     _root: tempfile::TempDir,
-    _local: collector_server::local_playback::Runtime,
+    _local: Option<collector_server::local_playback::Runtime>,
+    _remote: Option<RemoteFixture>,
     _state: collector_server::AppState,
     pub pairing: Pairing,
     pub owner: Principal,
     stop: axum_server::Handle<std::net::SocketAddr>,
     task: tokio::task::JoinHandle<()>,
+}
+struct RemoteFixture {
+    _authority: collector_server::remote_media::Runtime,
+    task: tokio::task::JoinHandle<()>,
+    certificate: String,
+}
+impl Drop for RemoteFixture {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -58,6 +69,18 @@ impl Drop for Fixture {
 }
 impl Fixture {
     pub async fn new(item_id: ItemId, label: &str) -> Self {
+        Self::with_media_policy(item_id, label, true, false).await
+    }
+    async fn with_media_policy(item_id: ItemId, label: &str, local: bool, public: bool) -> Self {
+        Self::with_routes(item_id, label, local, public, false).await
+    }
+    async fn with_routes(
+        item_id: ItemId,
+        label: &str,
+        local: bool,
+        public: bool,
+        remote: bool,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(
             collector_store::Store::open(root.path().join("archive"), root.path().join("state"))
@@ -257,12 +280,63 @@ impl Fixture {
         state.service.run_next_job("fixture-flac").unwrap();
         let stop = axum_server::Handle::new();
         let handle = stop.clone();
-        let local =
-            collector_server::local_playback::start(&mut state, "127.0.0.1:0".parse().unwrap())
+        let local = if local {
+            Some(
+                collector_server::local_playback::start(&mut state, "127.0.0.1:0".parse().unwrap())
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        state.direct_media = public;
+        state.remote_media_allowed = public;
+        let remote = if remote {
+            let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+            let certificate = cert.cert.pem();
+            let tls = axum_server::tls_rustls::RustlsConfig::from_pem(
+                certificate.clone().into_bytes(),
+                cert.key_pair.serialize_pem().into_bytes(),
+            )
+            .await
+            .unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let config = collector_server::remote_media::Configuration {
+                base_url: format!(
+                    "https://localhost:{}/",
+                    listener.local_addr().unwrap().port()
+                ),
+                socket: root.path().join("authority/socket"),
+            };
+            state.remote_media = Some(Arc::new(config.clone()));
+            let authority = collector_server::remote_media::start(state.clone(), &config)
                 .await
                 .unwrap();
-        state.direct_media = false;
-        state.remote_media_allowed = false;
+            let key = std::fs::read_to_string(config.socket.parent().unwrap().join("service-key"))
+                .unwrap();
+            let media = collector_media::MediaState::new(
+                &root.path().join("archive"),
+                &config.socket,
+                key,
+                vec![],
+            )
+            .unwrap();
+            let task = tokio::spawn(async move {
+                axum_server::from_tcp_rustls(listener, tls)
+                    .unwrap()
+                    .serve(collector_media::router(media).into_make_service())
+                    .await
+                    .unwrap();
+            });
+            Some(RemoteFixture {
+                _authority: authority,
+                task,
+                certificate,
+            })
+        } else {
+            None
+        };
         let app = collector_server::router(state.clone());
         let task = tokio::spawn(async move {
             axum_server::from_tcp_rustls(listener, config)
@@ -275,6 +349,7 @@ impl Fixture {
         Self {
             _root: root,
             _local: local,
+            _remote: remote,
             _state: state,
             pairing,
             owner,
@@ -411,6 +486,13 @@ async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
     let adapter = Adapter::with_credentials(cache.path(), secrets.clone()).unwrap();
     let a = adapter.refresh(one, &|| false).await.unwrap();
     let b = adapter.refresh(two, &|| false).await.unwrap();
+    let probe = adapter.clone();
+    assert_eq!(
+        tokio::task::spawn_blocking(move || probe.connection_state(one))
+            .await
+            .unwrap(),
+        ConnectionState::Lan
+    );
     assert!(Adapter::with_credentials(cache.path(), secrets.clone()).is_err());
     assert!(adapter.refresh(one, &|| true).await.is_err());
     assert_eq!(adapter.snapshot(one).unwrap().unwrap().updated, a.updated);
@@ -499,6 +581,13 @@ async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
     first.stop.shutdown();
     second.stop.shutdown();
     secrets.remove(one).unwrap();
+    let probe = adapter.clone();
+    assert_eq!(
+        tokio::task::spawn_blocking(move || probe.connection_state(one))
+            .await
+            .unwrap(),
+        ConnectionState::Disconnected
+    );
     assert_ne!(first.owner.user_id, second.owner.user_id);
     let a = adapter.clone();
     tokio::task::spawn_blocking(move || {
@@ -661,4 +750,182 @@ async fn purchased_originals_reach_the_real_audio_output_callback() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connection_indicator_respects_public_streaming_policy() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    for (public, expected) in [
+        (true, ConnectionState::Public),
+        (false, ConnectionState::StreamingUnavailable),
+    ] {
+        let fixture =
+            Fixture::with_media_policy(ItemId::new(), "Connection probe", false, public).await;
+        let secrets = Arc::new(Secrets::default());
+        let key = fixture.enroll(&secrets).await;
+        let cache = tempfile::tempdir().unwrap();
+        let adapter = Adapter::with_credentials(cache.path(), secrets.clone()).unwrap();
+        adapter
+            .save_connection(
+                &secrets.load(key).unwrap().unwrap(),
+                fixture.pairing.endpoints[0].url.to_string(),
+            )
+            .unwrap();
+        adapter.refresh(key, &|| false).await.unwrap();
+        let probe = adapter.clone();
+        assert_eq!(
+            tokio::task::spawn_blocking(move || probe.connection_state(key))
+                .await
+                .unwrap(),
+            expected
+        );
+        assert!(adapter.downloads().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_dir(cache.path().join("audio"))
+                .unwrap()
+                .count(),
+            0
+        );
+        adapter.remove(key).unwrap();
+        assert_eq!(
+            tokio::task::spawn_blocking(move || adapter.connection_state(key))
+                .await
+                .unwrap(),
+            ConnectionState::Disconnected
+        );
+    }
+}
+
+// System HTTPS roots are configured only for the child process, never the OS
+// trust store or the other tests in this process.
+#[test]
+#[ignore = "invoked by direct_https_stream_seek_download_and_offline_with_route_indicator"]
+fn direct_https_adapter_fixture() {
+    use amp_audio::MediaResolver;
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let root = std::path::PathBuf::from(std::env::var("TRASH_AMP_HTTPS_FIXTURE").unwrap());
+    let credential: EnrolledCredential =
+        serde_json::from_slice(&std::fs::read(root.join("credential.json")).unwrap()).unwrap();
+    let key = ConnectionKey {
+        server_id: credential.server_id,
+        user_id: credential.user_id.unwrap(),
+    };
+    let secrets = Arc::new(Secrets::default());
+    secrets.save(&credential).unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let adapter = Adapter::with_credentials(cache.path(), secrets.clone()).unwrap();
+    adapter
+        .save_connection(&credential, credential.pairing.endpoints[0].url.to_string())
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let snapshot = runtime.block_on(adapter.refresh(key, &|| false)).unwrap();
+    let expected = match std::env::var("TRASH_AMP_HTTPS_EXPECTED").unwrap().as_str() {
+        "lan" => ConnectionState::Lan,
+        "direct" => ConnectionState::Direct,
+        "unavailable" => ConnectionState::StreamingUnavailable,
+        _ => panic!("invalid fixture mode"),
+    };
+    assert_eq!(adapter.connection_state(key), expected);
+    assert!(adapter.downloads().unwrap().is_empty());
+    assert_eq!(
+        std::fs::read_dir(cache.path().join("audio"))
+            .unwrap()
+            .count(),
+        0
+    );
+    let track = snapshot.library.albums[0].tracks[0].clone();
+    if expected == ConnectionState::StreamingUnavailable {
+        // Even when public fallback is enabled, a bad advertised HTTPS route
+        // must fail closed rather than sending music through the control origin.
+        assert!(adapter.resolve(&track).is_err());
+        adapter.schedule(std::slice::from_ref(&track)).unwrap();
+        assert!(adapter.download(track).is_err());
+        return;
+    }
+    let mut decoder =
+        junk_libs_audio::AudioDecoder::open(adapter.resolve(&track).unwrap()).unwrap();
+    let mut frames = 0;
+    while let Some(chunk) = decoder.read_frames(1024).unwrap() {
+        frames += chunk.frame_count();
+    }
+    assert_eq!(frames, 176400);
+    decoder
+        .seek_exact(junk_libs_audio::FramePosition(44100))
+        .unwrap();
+    assert!(decoder.read_frames(1024).unwrap().is_some());
+    adapter.schedule(std::slice::from_ref(&track)).unwrap();
+    adapter.download(track.clone()).unwrap();
+    assert_eq!(adapter.downloads().unwrap()[0].status, "complete");
+    adapter.remove(key).unwrap();
+    assert_eq!(adapter.connection_state(key), ConnectionState::Disconnected);
+    let mut decoder =
+        junk_libs_audio::AudioDecoder::open(adapter.resolve(&track).unwrap()).unwrap();
+    decoder
+        .seek_exact(junk_libs_audio::FramePosition(44100))
+        .unwrap();
+    assert!(decoder.read_frames(1024).unwrap().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn direct_https_stream_seek_download_and_offline_with_route_indicator() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    for local in [false, true] {
+        let fixture = Fixture::with_routes(ItemId::new(), "HTTPS album", local, true, true).await;
+        let secrets = Secrets::default();
+        let key = fixture.enroll(&secrets).await;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("credential.json"),
+            serde_json::to_vec(&secrets.load(key).unwrap().unwrap()).unwrap(),
+        )
+        .unwrap();
+        let trust = root.path().join("media-ca.pem");
+        let empty = root.path().join("empty-roots");
+        std::fs::create_dir(&empty).unwrap();
+        std::fs::write(&trust, &fixture._remote.as_ref().unwrap().certificate).unwrap();
+        for trusted in [true, false] {
+            let expected = if local {
+                "lan"
+            } else if trusted {
+                "direct"
+            } else {
+                "unavailable"
+            };
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "direct_https_adapter_fixture",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .env("TRASH_AMP_HTTPS_FIXTURE", root.path())
+                    .env("TRASH_AMP_HTTPS_EXPECTED", expected)
+                    .env(
+                        "SSL_CERT_FILE",
+                        if trusted {
+                            trust.clone()
+                        } else {
+                            empty.join("missing.pem")
+                        },
+                    )
+                    .env("SSL_CERT_DIR", &empty)
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(
+                output.status.success(),
+                "{expected} fixture failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 }

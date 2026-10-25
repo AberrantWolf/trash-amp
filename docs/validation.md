@@ -372,3 +372,29 @@ packages. The updated signed verifier passed against the exact downloaded beta.1
 ZIP without modifying or replacing that archive. Future tag workflows publish
 automatically after all build and package checks; existing published tags and
 their assets are retained.
+
+## Beta.2 HTTPS playback and connection indicator — 2026-10-25
+
+The beta.2 candidate pins Collector's shared client and real-server fixtures to
+`c5587138c90f5d460b371cb9e489c8eb28aedb7a` (Collector beta.6). Streaming and downloads
+prefer automatically trusted private media and otherwise use advertised direct
+HTTPS with scoped grants. The playback-bar connection indicator distinguishes
+private, direct internet, public, disconnected and unavailable/unconfirmed routes.
+It describes periodically checked capability for the selected server, independent
+of cached playback and the immutable source of an already queued track.
+
+Local checks on the final beta.2 candidate pass: formatting, strict locked
+all-target Clippy, **67 Rust tests** and **28 release-tooling tests**. Three tests
+are marked ignored in the parent runner: the hardware-output and live MusicBrainz
+checks remain opt-in, while the HTTPS subprocess fixture is exercised four times
+by its parent integration test. The TLS matrix covers direct HTTPS decode/seek,
+downloads and offline retained playback, private-route preference, and untrusted
+media-certificate refusal with public fallback enabled. Headless Slint checks
+cover icon states, hover/click/keyboard details, obsolete results and connection
+removal. No system certificate store is changed by these fixtures.
+
+The candidate also includes the Double Parked Finder/Dock icon and automatic
+publication after tagged signed-package verification. Release notes retain the
+native/external-network, physical-device, accessibility and separate-Mac acceptance
+limits. GitHub validation and signed publication are recorded separately below
+when completed.

@@ -1,6 +1,6 @@
 # macOS beta release checklist
 
-Target: **0.1.0-beta.1**, Apple Silicon (arm64), macOS 15 or newer.
+Target: **0.1.0-beta.2**, Apple Silicon (arm64), macOS 15 or newer.
 This is a preparation checklist, not a declaration that the beta is qualified.
 Builds and automatic prerelease publication follow [the release guide](macos-release.md).
 Record validation results, hardware, macOS version and the exact tested commit in
@@ -13,7 +13,7 @@ Record validation results, hardware, macOS version and the exact tested commit i
 - [x] Conservative MusicBrainz enrichment, persistent response caching and provenance are implemented; local tags win and source music remains read-only.
 - [x] Collector browsing, lists, authenticated streaming, integrity-checked downloads and offline retention have automated real-server coverage. Native FLAC/MP3 streaming/download/offline GUI acceptance is recorded in [Collector connection](collector-connection.md).
 - [x] Collector artwork has a separate bounded 128 MiB cache; filesystem cover-art support remains later work.
-- [x] Builds use hosted Git sources without sibling checkouts: junk-libs `2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98`, Collector client/server test dependencies `14d56ab4cceaf82c09086d56d987484bab46d618`. Cargo.lock pins dependency resolution.
+- [x] Builds use hosted Git sources without sibling checkouts: junk-libs `2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98`, Collector client/server test dependencies `c5587138c90f5d460b371cb9e489c8eb28aedb7a`. Cargo.lock pins dependency resolution.
 - [x] Apple Silicon ZIP packaging includes release notes, application/dependency/native license notices and SHA-256 checksums. Package verification checks architecture, metadata, signature and dynamic dependencies.
 - [x] Release automation accepts alpha and beta tags, verifies tag/version agreement, and publishes downloadable prereleases after validation, signing, notarization and package verification. Rerunning a published tag leaves its notes and assets unchanged.
 - [x] Developer ID/Hardened Runtime signing, timestamping, notarization, stapling and extracted-package Gatekeeper checks are implemented. Tags require this path; local/PR/main development packages can remain ad-hoc signed. Generic Apple Developer team credentials use temporary runner-keychain cleanup and retained notarization diagnostics.
@@ -37,7 +37,7 @@ support beyond the evidence recorded below.
 - [ ] Run real redumper/BIN and CUE boundary comparisons before qualifying those paths, or explicitly label them experimental in the final release notes. Keep raw mixed-mode/multisession, HTOA controls and unapplied de-emphasis limits visible.
 - [ ] Check keyboard-only navigation, focus, VoiceOver labels, text scaling and reduced motion throughout browsing, transport, settings and lists. Verify media keys and Now Playing from the packaged app.
 - [ ] Measure optimized large-library scrolling/search, UI responsiveness, memory, idle/playing CPU and hidden-window energy with real libraries and the 2,000-album demo. Record hardware and window dimensions; address hangs or unbounded growth.
-- [ ] Review [beta release notes](releases/0.1.0-beta.1.md) against native acceptance evidence, document remaining known issues and Collector compatibility, and verify the issue-reporting instructions.
+- [ ] Review [beta release notes](releases/0.1.0-beta.2.md) against native acceptance evidence, document remaining known issues and Collector compatibility, and verify the issue-reporting instructions.
 - [ ] Download the published ZIP, verify its checksum, and complete the separate-Mac smoke test: Finder launch, version/Slint attribution, folders/restart, local audio, Collector enrollment/streaming/download/offline playback and media keys.
 
 ## Later work
