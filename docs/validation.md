@@ -466,3 +466,27 @@ This is a macOS 15+ Apple Silicon testing release. iPhone source-tree developmen
 work does not add an iOS download or establish TestFlight qualification. The
 separate-Mac installation/upgrade, physical-device, accessibility and broader
 native playback acceptance gates remain open.
+
+## Beta.4 preparation — 2026-10-26
+
+The shared UI now starts on Home for source/library selection, refresh, folder
+opening, Lists and Settings. Browser and album views have no source-picker toolbar;
+a Home icon returns without losing the current library location. Familiar actions
+use icons, accessible names and keyboard activation, with hover hints omitted on
+iOS/Android. Native Slint/Skia renders were inspected at 390 × 740, 330 × 740 with
+1.6× text, and 980 × 680. The phone album render exposes roughly two more track rows.
+
+Local checks on the beta.4 version/lockfile passed 107 active Rust tests (three
+opt-in/subprocess tests ignored), 28 release-tooling tests, formatting, strict
+all-target Clippy and whitespace checks. UI coverage includes Home/Settings/Lists
+navigation, restoration of album/track selection, search and track scroll position,
+search shortcuts from Home, cancellation of delayed pointer navigation, touch hint
+suppression and compact actions at 330/390px with larger text.
+
+Xcode's signed Debug device build of `0.1.0-beta.4` (bundle build `2.4`) passed
+strict signature verification, installed over the existing app on the connected
+iPhone 16 Pro, and launched successfully. The same process remained running after
+launch. Installation did not uninstall the app or clear its data. This is an
+installation/startup check, not new playback, VoiceOver or interruption acceptance.
+Tagged signing/notarization, publication and independent downloaded-package
+verification are recorded separately after completion.

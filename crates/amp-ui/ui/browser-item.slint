@@ -1,5 +1,5 @@
 import { Theme } from "theme.slint";
-import { Button } from "std-widgets.slint";
+import { IconButton } from "icon-button.slint";
 export struct BrowserRow { artwork: image, kind: int, title: string, artist: string, subtitle: string, duration: string }
 export component BrowserItem inherits Rectangle {
     in property <BrowserRow> item;
@@ -52,8 +52,8 @@ export component BrowserItem inherits Rectangle {
             if root.item.kind == 3 && root.show-album: Text { text: root.item.subtitle; color: Theme.muted; overflow: elide; font-size: 11px * root.text-scale; }
             if root.item.kind == 3: HorizontalLayout {
                 height: 28px * root.text-scale; spacing: 6px;
-                Button { text: "Play"; width: 56px * root.text-scale; accessible-label: "Play " + root.item.title; clicked => { root.play(); } }
-                Button { text: "+ Queue"; width: 88px * root.text-scale; accessible-label: "Add " + root.item.title + " to up next"; clicked => { root.enqueue(); } }
+                IconButton { icon: @image-url("icons/play.svg"); button-size: 28px * root.text-scale; label: "Play " + root.item.title; clicked => { root.play(); } }
+                IconButton { icon: @image-url("icons/queue.svg"); button-size: 28px * root.text-scale; label: "Add " + root.item.title + " to up next"; clicked => { root.enqueue(); } }
                 Rectangle { horizontal-stretch: 1; }
                 Text { text: root.item.duration; width: 34px * root.text-scale; color: Theme.muted; font-size: 11px * root.text-scale; vertical-alignment: center; }
             }

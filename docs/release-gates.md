@@ -1,6 +1,6 @@
 # macOS beta release checklist
 
-Target: **0.1.0-beta.3**, Apple Silicon (arm64), macOS 15 or newer.
+Target: **0.1.0-beta.4**, Apple Silicon (arm64), macOS 15 or newer.
 This is a preparation checklist, not a declaration that the beta is qualified.
 Builds and automatic prerelease publication follow [the release guide](macos-release.md).
 Record validation results, hardware, macOS version and the exact tested commit in
@@ -29,6 +29,7 @@ support beyond the evidence recorded below.
 - [x] Pass formatting, strict all-target Clippy, workspace tests, release-tooling tests, packaging and extracted-package verification in CI. [Signed candidate run 39885698740](https://github.com/AberrantWolf/trash-amp/actions/runs/39885698740) passed on `554e77a`: 53 Rust tests (two opt-in tests skipped) and 15 release-tooling tests. The release tag must repeat these checks for its final commit.
 - [x] Publish beta.2 after final tagged checks. [Tagged run 40148089210](https://github.com/AberrantWolf/trash-amp/actions/runs/40148089210) passed on `0aa96d2`: 67 Rust tests, 28 release-tooling tests, signing/notarization/stapling, extracted-package verification and automatic publication. The independently downloaded ZIP passed local signed-package and Gatekeeper checks; see [validation](validation.md#published-beta2--2026-10-25).
 - [x] Publish beta.3 after merging the shared UI/playback and iOS work. [Tagged run 40190068986](https://github.com/AberrantWolf/trash-amp/actions/runs/40190068986) passed on `cb474ce`: 105 Rust tests, 28 release-tooling tests, signing/notarization/stapling, extracted-package verification and automatic publication. The independently downloaded ZIP passed checksum, signature, ticket and Gatekeeper verification; see [validation](validation.md#published-beta3--2026-10-25).
+- [ ] Publish beta.4 with the compact Home/navigation UI and iOS timer backport after final tagged checks, then independently verify its downloaded ZIP.
 - [x] Run a signed manual candidate and confirm Apple's acceptance, stapling and extracted-package Gatekeeper verification. Apple accepted submission `a835f3f1-ce2b-4043-bdb7-d6f8a1c95b7a` with no issues; both the hosted runner and this Mac verified the downloaded package as Notarized Developer ID. See [the signed validation record](validation.md#completed-signed-candidate--2026-10-23).
 - [ ] Verify first launch of the downloaded, Developer ID-signed and notarized package on another Mac. Local signing validation alone does not complete this gate.
 - [ ] Verify clean installation and upgrade with existing preferences, saved folders, Collector credentials, lists, downloads and artwork. Retest Keychain behavior using the final signing identity, including connection removal and offline reopen.
@@ -39,7 +40,7 @@ support beyond the evidence recorded below.
 - [ ] Run real redumper/BIN and CUE boundary comparisons before qualifying those paths, or explicitly label them experimental in the final release notes. Keep raw mixed-mode/multisession, HTOA controls and unapplied de-emphasis limits visible.
 - [ ] Check keyboard-only navigation, focus, VoiceOver labels, text scaling and reduced motion throughout browsing, transport, settings and lists. Verify media keys and Now Playing from the packaged app.
 - [ ] Measure optimized large-library scrolling/search, UI responsiveness, memory, idle/playing CPU and hidden-window energy with real libraries and the 2,000-album demo. Record hardware and window dimensions; address hangs or unbounded growth.
-- [ ] Review [beta release notes](releases/0.1.0-beta.3.md) against native acceptance evidence, document remaining known issues and Collector compatibility, and verify the issue-reporting instructions.
+- [ ] Review [beta release notes](releases/0.1.0-beta.4.md) against native acceptance evidence, document remaining known issues and Collector compatibility, and verify the issue-reporting instructions.
 - [ ] Download the published ZIP, verify its checksum, and complete the separate-Mac smoke test: Finder launch, version/Slint attribution, folders/restart, local audio, Collector enrollment/streaming/download/offline playback and media keys.
 
 ## Later work

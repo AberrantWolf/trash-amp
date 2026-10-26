@@ -378,7 +378,10 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     let library = (*initial.library).clone();
     let preferences = initial.preferences.clone();
     let ui = PlayerWindow::new()?;
+    ui.set_home(true);
     ui.set_can_open_folder(folder_picker.is_some());
+    ui.global::<ButtonHints>()
+        .set_hover_tooltips(!cfg!(any(target_os = "ios", target_os = "android")));
     if folder_picker.is_none() {
         ui.set_status("Connect a Collector server in Settings to begin.".into());
     }
@@ -443,6 +446,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
                     if let Some(ui) = weak.upgrade() {
                         ui.invoke_source_changed(0);
                         ui.set_source_index(0);
+                        ui.set_home(false);
                         scan(path);
                     }
                 }));
@@ -590,6 +594,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     {
         ui.invoke_source_changed(0);
         ui.set_source_index(0);
+        ui.set_home(false);
         scan(PathBuf::from(path))
     }
     if let Some(url) = args
@@ -632,6 +637,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
         .position(|a| a == "--search")
         .and_then(|i| args.get(i + 1))
     {
+        ui.set_home(false);
         ui.set_search_text(query.clone().into());
         ui.invoke_search_changed();
     }
@@ -662,6 +668,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
         ui.set_detail_y(-offset.parse::<f32>()?);
     }
     if args.iter().any(|a| a == "--select-first") {
+        ui.set_home(false);
         select(&ui, &mut state.borrow_mut(), 0);
     }
     if let Some(path) = args
@@ -767,6 +774,153 @@ mod tests {
             out property <color> selection: Theme.selection;
         }
     }
+    #[test]
+    fn icon_button_preserves_input_accessibility_and_suppresses_touch_hints() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::platform::{Key, PointerEventButton, WindowEvent};
+        use std::cell::Cell;
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.set_wide(false);
+        ui.set_home(true);
+        ui.set_collector_active(true);
+        ui.window().set_size(slint::LogicalSize::new(390., 740.));
+        let clicks = Rc::new(Cell::new(0));
+        let count = clicks.clone();
+        ui.on_refresh_server(move || count.set(count.get() + 1));
+        ui.show().unwrap();
+        let button = ElementHandle::find_by_accessible_label(&ui, "Refresh")
+            .next()
+            .unwrap();
+        assert_eq!(button.accessible_enabled(), Some(true));
+        let has_hint = || {
+            ElementHandle::find_by_element_id(&ui, "IconButton::hint")
+                .next()
+                .is_some()
+        };
+        let position = slint::LogicalPosition::new(
+            button.absolute_position().x + 22.,
+            button.absolute_position().y + 22.,
+        );
+        ui.window()
+            .dispatch_event(WindowEvent::PointerMoved { position });
+        assert!(
+            !has_hint(),
+            "Hints wait for hover rather than flashing immediately"
+        );
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(600));
+        assert!(has_hint());
+        ui.window().dispatch_event(WindowEvent::PointerMoved {
+            position: slint::LogicalPosition::new(300., 140.),
+        });
+        assert!(!has_hint(), "Leaving the button dismisses its hint");
+        ui.global::<ButtonHints>().set_hover_tooltips(false);
+        ui.window()
+            .dispatch_event(WindowEvent::PointerMoved { position });
+        ui.window().dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        ui.window().dispatch_event(WindowEvent::PointerReleased {
+            position,
+            button: PointerEventButton::Left,
+        });
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(600));
+        assert!(!has_hint(), "Touch hosts must never create hover popups");
+        assert_eq!(clicks.get(), 1);
+        for text in [slint::SharedString::from(Key::Return), " ".into()] {
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text });
+        }
+        button.invoke_accessible_default_action();
+        assert_eq!(clicks.get(), 4);
+        ui.set_collector_busy(true);
+        assert_eq!(button.accessible_enabled(), Some(false));
+        button.invoke_accessible_default_action();
+        ui.window().dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        ui.window().dispatch_event(WindowEvent::PointerReleased {
+            position,
+            button: PointerEventButton::Left,
+        });
+        assert_eq!(clicks.get(), 4, "Disabled actions ignore activation");
+    }
+
+    #[test]
+    fn phone_actions_fit_and_leave_space_for_tracks_at_large_text_sizes() {
+        use i_slint_backend_testing::ElementHandle;
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.set_wide(false);
+        ui.set_can_open_folder(false);
+        ui.set_collector_active(true);
+        ui.set_collector_online(true);
+        ui.set_show_library(false);
+        ui.set_sources(ModelRc::new(VecModel::from(vec![
+            "A long Collector server name".into(),
+        ])));
+        ui.set_collections(ModelRc::new(VecModel::from(vec![
+            "Music collection".into(),
+        ])));
+        ui.set_album_title("Evening Sessions".into());
+        ui.set_album_artist("The Late Hours".into());
+        ui.set_tracks(ModelRc::new(VecModel::from(vec![super::TrackRow {
+            title: "First track".into(),
+            number: "01".into(),
+            duration: "3:00".into(),
+        }])));
+        ui.show().unwrap();
+        for width in [330., 390.] {
+            for scale in [1., 1.6] {
+                ui.window().set_size(slint::LogicalSize::new(width, 740.));
+                ui.set_text_scale(scale);
+                slint::platform::update_timers_and_animations();
+                for label in [
+                    "Home",
+                    "Back",
+                    "Play album",
+                    "Download album",
+                    "Download track",
+                    "Remove download",
+                ] {
+                    let button = ElementHandle::find_by_accessible_label(&ui, label)
+                        .next()
+                        .unwrap();
+                    let position = button.absolute_position();
+                    let size = button.size();
+                    assert!(
+                        size.width >= 44. && size.height >= 44.,
+                        "{label} keeps a touch target"
+                    );
+                    assert!(
+                        position.x >= 0. && position.x + size.width <= width,
+                        "{label} fits {width}px at {scale}x text"
+                    );
+                }
+                for label in ["Music source", "Music collection", "Settings"] {
+                    assert!(
+                        ElementHandle::find_by_accessible_label(&ui, label)
+                            .next()
+                            .is_none(),
+                        "{label} belongs on Home"
+                    );
+                }
+                let tracks = ElementHandle::find_by_accessible_label(&ui, "Album tracks")
+                    .next()
+                    .unwrap();
+                assert!(
+                    tracks.size().height >= 220.,
+                    "Track space at {width}px/{scale}x: {}",
+                    tracks.size().height
+                );
+            }
+        }
+    }
+
     #[test]
     fn oled_only_blacks_dark_surfaces_and_preserves_content_states() {
         use slint::Model;
@@ -1021,6 +1175,7 @@ mod tests {
         .unwrap();
         folder_choices(&ui, &state.borrow());
         wire_folder_selection(&ui, &state);
+        ui.set_home(true);
         ui.show().unwrap();
         assert!(
             ElementHandle::find_by_accessible_label(&ui, "Saved folder library")
@@ -1108,31 +1263,98 @@ mod tests {
         assert_eq!(ui.get_search_text(), "Miles");
     }
     #[test]
-    fn compact_source_selector_does_not_expand_into_catalog_space() {
+    fn home_owns_source_controls_and_restores_the_current_library() {
         use i_slint_backend_testing::ElementHandle;
+        use slint::platform::{Key, WindowEvent};
         i_slint_backend_testing::init_no_event_loop();
         let ui = PlayerWindow::new().unwrap();
         ui.set_wide(false);
         ui.set_can_open_folder(false);
-        ui.set_sources(ModelRc::new(VecModel::from(vec![SharedString::from(
-            "Collector",
-        )])));
-        ui.window().set_size(slint::LogicalSize::new(390.0, 844.0));
+        ui.set_collector_active(true);
+        ui.set_sources(ModelRc::new(VecModel::from(vec![
+            "Local folder".into(),
+            "Collector".into(),
+        ])));
+        ui.set_collections(ModelRc::new(VecModel::from(vec![
+            "All collections".into(),
+            "Music".into(),
+        ])));
+        ui.set_tracks(ModelRc::new(VecModel::from(
+            (0..32)
+                .map(|i| super::TrackRow {
+                    title: format!("Track {i}").into(),
+                    number: format!("{i:02}").into(),
+                    duration: "3:00".into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
+        ui.set_track_y(-240.);
+        ui.set_selected_album(7);
+        ui.set_selected_track(3);
+        ui.set_search_text("Miles".into());
+        ui.set_show_library(false);
+        ui.set_home(true);
+        ui.window().set_size(slint::LogicalSize::new(390., 844.));
         ui.show().unwrap();
-        slint::platform::update_timers_and_animations();
-        let source = ElementHandle::find_by_accessible_label(&ui, "Music source")
-            .next()
-            .unwrap();
+        let activate = |label| {
+            ElementHandle::find_by_accessible_label(&ui, label)
+                .next()
+                .unwrap()
+                .invoke_accessible_default_action();
+            slint::platform::update_timers_and_animations();
+        };
+        let has = |label| {
+            ElementHandle::find_by_accessible_label(&ui, label)
+                .next()
+                .is_some()
+        };
+        assert!(has("Home page"));
+        assert!(has("Music source") && has("Music collection"));
+        assert!(!has("Album tracks") && !has("Album browser"));
+        activate("Settings");
+        assert!(ui.get_settings() && !ui.get_home());
+        ui.window().dispatch_event(WindowEvent::KeyPressed {
+            text: Key::Escape.into(),
+        });
+        ui.window().dispatch_event(WindowEvent::KeyReleased {
+            text: Key::Escape.into(),
+        });
+        assert!(ui.get_home() && !ui.get_settings());
+        activate("Manage servers");
+        assert_eq!(ui.get_settings_tab(), 1);
+        assert!(has("Collector server URL"));
+        activate("Home");
+        activate("Lists");
+        assert!(ui.get_lists_open() && !ui.get_home());
+        activate("Home");
+        activate("Browse library");
+        assert!(!ui.get_home());
+        assert!(has("Album tracks"));
+        assert!(!has("Music source") && !has("Music collection"));
+        assert_eq!(ui.get_selected_album(), 7);
+        assert_eq!(ui.get_selected_track(), 3);
+        assert_eq!(ui.get_search_text(), "Miles");
+        assert!(!ui.get_show_library(), "Home returns to the existing album");
         assert!(
-            source.size().height < 60.0,
-            "Source selector should stay a single row"
+            (ui.get_track_y() + 240.).abs() < 1.,
+            "Home preserves the track scroll position"
         );
+        activate("Home");
+        activate("Browse library");
+        assert!(has("Album tracks"));
+        assert_eq!(ui.get_selected_track(), 3);
+        assert!((ui.get_track_y() + 240.).abs() < 1.);
+        ui.set_show_library(true);
         let browser = ElementHandle::find_by_accessible_label(&ui, "Album browser")
             .next()
             .unwrap();
         assert!(
-            browser.size().height > 450.0,
-            "Catalog should receive remaining vertical space"
+            (browser.absolute_position().y - 16.).abs() < 1.,
+            "No toolbar above browsing"
+        );
+        assert!(
+            browser.size().height > 650.,
+            "Browsing uses the former source-picker space"
         );
     }
 

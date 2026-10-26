@@ -190,7 +190,7 @@ checksum = "e9d4ee0d472d1cd2e28c97dfa124b3d8d992e10eb0a035f33f5d12e3a177ba3b"
 
 [[package]]
 name = "amp-app"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "amp-audio",
  "amp-core",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "amp-audio"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "amp-core",
  "anyhow",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "amp-collector"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "amp-audio",
  "amp-core",
@@ -246,7 +246,7 @@ dependencies = [
 
 [[package]]
 name = "amp-core"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -255,7 +255,7 @@ dependencies = [
 
 [[package]]
 name = "amp-library"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "amp-core",
  "anyhow",
@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "amp-media"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "amp-app",
  "souvlaki",
@@ -283,7 +283,7 @@ dependencies = [
 
 [[package]]
 name = "amp-ui"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "amp-app",
  "amp-collector",
@@ -7531,7 +7531,7 @@ dependencies = [
 
 [[package]]
 name = "trash-amp"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "amp-app",
  "amp-collector",
@@ -7548,7 +7548,7 @@ dependencies = [
 
 [[package]]
 name = "trash-amp-ios"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "amp-app",
  "amp-collector",

@@ -283,6 +283,7 @@ fn open(ui: &PlayerWindow, s: &mut State, target: Target) {
     if s.browser.detail.as_ref() == Some(&target) && !ui.get_show_library() {
         return;
     }
+    ui.set_home(false);
     ui.set_search_editing(false);
     push(ui, s);
     s.browser.selected_result = Some(target.clone());
@@ -327,6 +328,9 @@ pub(super) fn rebuild(ui: &PlayerWindow, s: &mut State, reset: bool) {
     render_browser(ui, s);
 }
 pub(super) fn poll(ui: &PlayerWindow, s: &mut State) {
+    if ui.get_home() || ui.get_settings() || ui.get_lists_open() {
+        s.browser.pending_open = None;
+    }
     if s.browser
         .pending_open
         .as_ref()
@@ -434,6 +438,7 @@ pub(super) fn wire(ui: &PlayerWindow, state: &Rc<RefCell<State>>) {
     ui.on_focus_search_requested(move || {
         if let Some(ui) = weak.upgrade() {
             state1.borrow_mut().browser.pending_open = None;
+            ui.set_home(false);
             ui.set_settings(false);
             ui.set_lists_open(false);
             ui.set_show_library(true);
@@ -775,7 +780,7 @@ mod tests {
         assert_eq!(toggles.get(), 1);
         ui.set_wide(false);
         ui.set_show_library(false);
-        ui.set_lists_open(true);
+        ui.set_home(true);
         slint::platform::update_timers_and_animations();
         ui.window().dispatch_event(WindowEvent::KeyPressed {
             text: Key::Control.into(),
@@ -788,6 +793,7 @@ mod tests {
         assert!(ui.get_show_library());
         assert!(!ui.get_lists_open());
         assert!(!ui.get_settings());
+        assert!(!ui.get_home());
         i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(60));
         slint::platform::update_timers_and_animations();
         assert!(ui.get_search_editing());
@@ -823,6 +829,13 @@ mod tests {
         assert_eq!(state.borrow().browser.selected_result, Some(target));
         assert!(state.borrow().playback.snapshot().current.is_none());
         ui.invoke_back();
+        ui.invoke_browse_action(false, i as i32, 3);
+        assert!(state.borrow().browser.pending_open.is_some());
+        ui.set_home(true);
+        poll(&ui, &mut state.borrow_mut());
+        assert!(state.borrow().browser.pending_open.is_none());
+        assert!(ui.get_home() && ui.get_show_library());
+        ui.set_home(false);
         ui.invoke_browse_action(false, i as i32, 3);
         ui.set_search_text("changed".into());
         ui.invoke_search_changed();

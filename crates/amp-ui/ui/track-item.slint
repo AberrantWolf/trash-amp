@@ -1,5 +1,5 @@
 import { Theme } from "theme.slint";
-import { Button } from "std-widgets.slint";
+import { IconButton } from "icon-button.slint";
 export struct TrackRow { title: string, duration: string, number: string }
 export component TrackItem inherits Rectangle {
     in property <TrackRow> track;
@@ -27,6 +27,6 @@ export component TrackItem inherits Rectangle {
         }
         Text { text: root.track.title; color: Theme.text; overflow: elide; vertical-alignment: center; }
         Text { text: root.track.duration; color: Theme.muted; width: 44px; vertical-alignment: center; }
-        Button { text: "+"; accessible-label: "Add " + root.track.title + " to up next"; width: 36px; clicked => { root.enqueue(); } }
+        IconButton { label: "Add " + root.track.title + " to up next"; icon: @image-url("icons/queue.svg"); clicked => { root.enqueue(); } }
     }
 }

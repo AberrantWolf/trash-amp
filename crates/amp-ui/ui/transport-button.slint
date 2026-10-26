@@ -1,31 +1,6 @@
-import { Theme } from "theme.slint";
+import { IconButton } from "icon-button.slint";
 
-// Transport glyphs use the app palette in both modes, including keyboard focus.
-export component TransportButton inherits Rectangle {
-    in property <image> icon;
-    in property <bool> primary;
-    callback clicked();
-    min-width: 40px; min-height: 40px;
-    border-radius: 6px;
-    background: primary ? Theme.accent : (pointer.has-hover || pointer.pressed ? Theme.hover : Theme.raised);
-    border-width: 1px;
-    border-color: focus.has-focus ? Theme.accent : (primary ? Theme.accent : Theme.border);
-    forward-focus: focus;
-    accessible-role: button;
-    accessible-action-default => { root.clicked(); }
-    focus := FocusScope {
-        width: 100%; height: 100%;
-        key-pressed(event) => {
-            if event.text == " " || event.text == Key.Return { root.clicked(); return accept; }
-            return reject;
-        }
-    }
-    Image {
-        source: root.icon;
-        colorize: root.primary ? (Theme.dark ? #242321 : #ffffff) : Theme.text;
-        width: root.primary ? 24px : 20px; height: self.width;
-        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-        opacity: pointer.pressed ? 0.65 : 1;
-    }
-    pointer := TouchArea { clicked => { focus.focus(); root.clicked(); } }
+// Share names, hover hints and keyboard behavior with the other icon actions.
+export component TransportButton inherits IconButton {
+    button-size: 40px;
 }

@@ -246,6 +246,15 @@ during this check. A second report from 10:53, before installation of the fix,
 has the old build UUID and the same `__CFRunLoopDoTimer + 816` watchdog stack.
 Overnight physical-device qualification remains outstanding.
 
+## Home/navigation beta.4 install (2026-10-26)
+
+The signed Xcode Debug build for `0.1.0-beta.4`, bundle version `2.4`, installed
+and launched on the physical iPhone 16 Pro. Its process remained running after
+launch. The in-place installation retained the app data. Home now owns source
+and library selection, refresh, Lists and Settings; browsing has no top picker
+rows. This verifies signed installation and startup; playback, VoiceOver and
+interruption qualification were not repeated for this UI change.
+
 ## Remaining work
 
 1. Qualify the independent playback and catalog workers under iOS background

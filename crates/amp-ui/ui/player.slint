@@ -1,4 +1,6 @@
 import { Slider, CheckBox } from "themed-controls.slint";
+import { IconButton, ButtonHints } from "icon-button.slint";
+export { ButtonHints }
 import { TransportButton } from "transport-button.slint";
 import { Theme } from "theme.slint";
 import { Palette, Button, ScrollView, ListView, AboutSlint, ComboBox, LineEdit } from "std-widgets.slint";
@@ -103,6 +105,11 @@ export component PlayerWindow inherits Window {
     in-out property <bool> prefer-raw: true;
     in-out property <bool> automatic-metadata: true;
     in-out property <bool> settings;
+    // Launch routing is supplied by the host; returning Home preserves browse state.
+    in-out property <bool> home;
+    changed home => {
+        if root.home { root.settings = false; root.lists-open = false; root.search-editing = false; }
+    }
     in-out property <bool> show-library: true;
     in-out property <bool> show-queue;
     // Store the desktop choice independently of the temporary phone layout.
@@ -114,8 +121,8 @@ export component PlayerWindow inherits Window {
     in property <bool> wide: true;
     in property <bool> short: false;
     changed short => { if root.short { root.search-editing = false; } }
-    changed settings => { if root.settings { root.search-editing = false; root.lists-open = false; } }
-    changed lists-open => { if root.lists-open { root.search-editing = false; root.settings = false; } }
+    changed settings => { if root.settings { root.search-editing = false; root.lists-open = false; root.home = false; } }
+    changed lists-open => { if root.lists-open { root.search-editing = false; root.settings = false; root.home = false; } }
     changed show-library => { if !root.show-library && !root.wide { root.search-editing = false; } }
     changed wide => { if !root.wide && !root.show-library { root.search-editing = false; } }
     in property <bool> can-open-folder: true;
@@ -146,37 +153,81 @@ export component PlayerWindow inherits Window {
             if (event.text == Key.LeftArrow) { root.previous(); return accept; }
             if (event.text == Key.RightArrow) { root.next(); return accept; }
         }
-        if (event.text == Key.Escape && (root.settings || root.lists-open)) { root.settings = false; root.lists-open = false; keyboard.focus(); return accept; }
-        if (event.text == Key.Return && !root.settings && !root.lists-open) { root.activate-selection(); return accept; }
+        if (event.text == Key.Escape && (root.settings || root.lists-open)) { root.home = true; keyboard.focus(); return accept; }
+        if (event.text == Key.Escape && root.home) { root.home = false; keyboard.focus(); return accept; }
+        if (event.text == Key.Return && !root.home && !root.settings && !root.lists-open) { root.activate-selection(); return accept; }
         return reject;
       }
       VerticalLayout {
         padding: 16px; spacing: 8px;
-        HorizontalLayout {
-            height: 32px; spacing: 6px;
-            if root.wide: ComboBox { model: root.sources; current-index <=> root.source-index; accessible-label: "Music source"; horizontal-stretch: 1; selected(i) => { root.source-changed(self.current-index); } }
-            if root.wide && root.collector-active && !root.settings: ComboBox { model: root.collections; current-index <=> root.collection-index; accessible-label: "Music collection"; horizontal-stretch: 1; selected(i) => { root.collection-changed(self.current-index); } }
-            if root.wide && root.collector-active && !root.settings: Button { text: "Refresh"; enabled: !root.collector-busy; clicked => { root.refresh-server(); } }
-            if !root.wide: Text { text: root.settings ? "Settings" : root.lists-open ? "Lists" : "trash amp"; color: Theme.text; font-weight: 700; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
-            if root.can-open-folder: Button { text: "Open folder"; clicked => { root.open-folder(); } }
-            Button { text: root.lists-open ? "Library" : "Lists"; enabled: root.collector-active || root.lists-open; clicked => { root.settings = false; root.lists-open = !root.lists-open; keyboard.focus(); } }
-            Button { text: root.settings ? "Done" : "Settings"; clicked => { root.lists-open = false; root.settings = !root.settings; keyboard.focus(); } }
+        // Source and library selection live on Home, never above the track list.
+        if root.settings || root.lists-open: HorizontalLayout {
+            height: 44px; spacing: 8px;
+            IconButton { label: "Home"; icon: @image-url("icons/home.svg"); clicked => { root.home = true; keyboard.focus(); } }
+            Text { text: root.settings ? "Settings" : "Lists"; color: Theme.text; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
         }
-        if !root.wide && !root.settings: VerticalLayout {
-            height: (root.collector-active ? 68px : 32px) * root.text-scale;
-            spacing: 4px;
-            ComboBox { model: root.sources; current-index <=> root.source-index; accessible-label: "Music source"; selected(i) => { root.source-changed(self.current-index); } }
-            if root.collector-active: HorizontalLayout {
-                ComboBox { model: root.collections; current-index <=> root.collection-index; accessible-label: "Music collection"; selected(i) => { root.collection-changed(self.current-index); } }
-                Button { text: "Refresh"; enabled: !root.collector-busy; clicked => { root.refresh-server(); } }
+        if root.home: Rectangle {
+            accessible-role: groupbox; accessible-label: "Home page";
+            background: Theme.surface; border-radius: 6px;
+            home-scroll := ScrollView {
+                mouse-drag-pan-enabled: true;
+                width: 100%; height: 100%;
+                content-width: self.visible-width;
+                content-height: max(self.visible-height, home-content.min-height);
+                home-content := VerticalLayout {
+                    x: max(0px, (home-scroll.visible-width - self.width) / 2);
+                    width: min(home-scroll.visible-width, 560px);
+                    height: home-scroll.content-height;
+                    padding: root.wide ? 24px : 12px; spacing: 16px;
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text { text: "Home"; color: Theme.text; font-size: 27px * root.text-scale; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
+                        IconButton { label: "Settings"; icon: @image-url("icons/settings.svg"); clicked => { root.settings = true; keyboard.focus(); } }
+                    }
+                    Text { text: "Choose your music"; color: Theme.muted; wrap: word-wrap; }
+                    VerticalLayout {
+                        spacing: 6px;
+                        Text { text: "Source"; color: Theme.text; font-weight: 600; }
+                        ComboBox { model: root.sources; current-index <=> root.source-index; accessible-label: "Music source"; min-height: 44px;
+                            selected(i) => { root.source-changed(self.current-index); } }
+                    }
+                    if root.collector-active: VerticalLayout {
+                        spacing: 6px;
+                        Text { text: "Library"; color: Theme.text; font-weight: 600; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            ComboBox { model: root.collections; current-index <=> root.collection-index; accessible-label: "Music collection"; horizontal-stretch: 1;
+                                selected(i) => { root.collection-changed(self.current-index); } }
+                            IconButton { label: "Refresh"; icon: @image-url("icons/refresh.svg"); enabled: !root.collector-busy; clicked => { root.refresh-server(); } }
+                        }
+                        Text { text: root.connection-status; color: Theme.muted; wrap: word-wrap; }
+                    }
+                    if !root.collector-active && root.folder-libraries.length > 0: VerticalLayout {
+                        spacing: 6px;
+                        Text { text: "Folder library"; color: Theme.text; font-weight: 600; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            ComboBox { model: root.folder-libraries; current-index <=> root.folder-index; accessible-label: "Saved folder library"; horizontal-stretch: 1;
+                                selected(i) => { root.folder-selected(self.current-index); } }
+                            IconButton { label: "Refresh folder"; icon: @image-url("icons/refresh.svg"); enabled: root.folder-index >= 0 && !root.scanning; clicked => { root.refresh-folder(); } }
+                        }
+                    }
+                    if !root.collector-active && root.folder-libraries.length == 0: Text {
+                        text: root.can-open-folder ? "Open a music folder to start a local library." : "Add a server to start listening.";
+                        color: Theme.muted; wrap: word-wrap;
+                    }
+                    Button { text: "Browse library"; accessible-label: "Browse library"; min-height: 44px;
+                        clicked => { root.home = false; keyboard.focus(); } }
+                    if root.collector-active: Button { text: "Lists"; accessible-label: "Lists"; min-height: 44px;
+                        clicked => { root.lists-open = true; keyboard.focus(); } }
+                    Rectangle { height: 1px; background: Theme.divider; }
+                    if root.can-open-folder: Button { text: "Open folder"; accessible-label: "Open folder"; min-height: 44px;
+                        clicked => { root.open-folder(); } }
+                    Button { text: "Add / manage servers"; accessible-label: "Manage servers"; min-height: 44px;
+                        clicked => { root.settings-tab = 1; root.settings = true; keyboard.focus(); } }
+                    Rectangle { min-height: 0px; vertical-stretch: 1; }
+                }
             }
-        }
-        if !root.collector-active && !root.settings && !root.lists-open && root.folder-libraries.length > 0: HorizontalLayout {
-            height: 32px; spacing: 6px;
-            ComboBox { model: root.folder-libraries; current-index <=> root.folder-index; accessible-label: "Saved folder library"; horizontal-stretch: 1;
-                selected(i) => { root.folder-selected(self.current-index); } }
-            Button { text: "Refresh folder"; enabled: root.folder-index >= 0 && !root.scanning;
-                clicked => { root.refresh-folder(); } }
         }
         if root.lists-open: Rectangle {
             background: Theme.surface; border-radius: 6px;
@@ -192,24 +243,24 @@ export component PlayerWindow inherits Window {
                 Text { text: root.connection-status; color: Theme.muted; wrap: word-wrap; }
                 HorizontalLayout {
                     ComboBox { model: root.saved-lists; current-index <=> root.list-index; selected(i) => { root.list-selected(self.current-index); } }
-                    Button { text: "Play"; enabled: root.list-index > 0; clicked => { root.play-list(false); } }
-                    Button { text: "Shuffle"; enabled: root.list-index > 0; clicked => { root.play-list(true); } }
-                    Button { text: "Download list"; enabled: !root.collector-busy && root.collector-online && root.list-index > 0; clicked => { root.download-action(2); } }
-                    Button { text: "Remove list downloads"; enabled: root.list-index > 0; clicked => { root.download-action(3); } }
+                    IconButton { label: "Play"; icon: @image-url("icons/play.svg"); enabled: root.list-index > 0; clicked => { root.play-list(false); } }
+                    IconButton { label: "Shuffle"; icon: @image-url("icons/shuffle.svg"); enabled: root.list-index > 0; clicked => { root.play-list(true); } }
+                    IconButton { label: "Download list"; icon: @image-url("icons/download.svg"); enabled: !root.collector-busy && root.collector-online && root.list-index > 0; clicked => { root.download-action(2); } }
+                    IconButton { label: "Remove list downloads"; icon: @image-url("icons/remove-download.svg"); enabled: root.list-index > 0; clicked => { root.download-action(3); } }
                 }
                 HorizontalLayout {
                     LineEdit { text <=> root.list-name; placeholder-text: "List name"; accessible-label: "List name"; }
-                    Button { text: "Create"; enabled: !root.collector-busy && root.collector-online && root.list-editable; clicked => { root.list-command(0); } }
-                    Button { text: "Rename"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-index > 0; clicked => { root.list-command(1); } }
-                    Button { text: "Delete"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-index > 0; clicked => { root.list-command(2); } }
+                    IconButton { label: "Create"; icon: @image-url("icons/plus.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable; clicked => { root.list-command(0); } }
+                    IconButton { label: "Rename"; icon: @image-url("icons/edit.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-index > 0; clicked => { root.list-command(1); } }
+                    IconButton { label: "Delete"; icon: @image-url("icons/trash.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-index > 0; clicked => { root.list-command(2); } }
                 }
                 HorizontalLayout {
                     Button { text: "Append album"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.selected-album >= 0; clicked => { root.list-command(3); } }
                     Button { text: "Append disc"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.selected-album >= 0; clicked => { root.list-command(10); } }
                     Button { text: "Append track"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.selected-track >= 0; clicked => { root.list-command(4); } }
                     Button { text: "Remove entry"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-entry >= 0; clicked => { root.list-command(5); } }
-                    Button { text: "Move up"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-entry > 0; clicked => { root.list-command(6); } }
-                    Button { text: "Move down"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-entry >= 0; clicked => { root.list-command(7); } }
+                    IconButton { label: "Move up"; icon: @image-url("icons/up.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-entry > 0; clicked => { root.list-command(6); } }
+                    IconButton { label: "Move down"; icon: @image-url("icons/down.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-entry >= 0; clicked => { root.list-command(7); } }
                 }
                 HorizontalLayout {
                     Button { text: "Retry original changes"; enabled: !root.collector-busy && root.collector-online; clicked => { root.list-command(8); } }
@@ -303,7 +354,7 @@ export component PlayerWindow inherits Window {
                 }
             }
         }
-        if !root.short && !root.settings && !root.lists-open: HorizontalLayout {
+        if !root.home && !root.short && !root.settings && !root.lists-open: HorizontalLayout {
             spacing: 0px;
             if root.wide || root.show-library: Rectangle {
                 accessible-role: groupbox;
@@ -314,12 +365,13 @@ export component PlayerWindow inherits Window {
                 horizontal-stretch: root.wide ? 0 : 1;
                 background: Theme.surface; border-radius: 6px;
                 HorizontalLayout {
-                    x: 8px; y: 8px; width: parent.width - 16px; height: 32px;
+                    x: 8px; y: 8px; width: parent.width - 16px; height: 44px; spacing: 6px;
+                    IconButton { label: "Home"; icon: @image-url("icons/home.svg"); clicked => { root.home = true; keyboard.focus(); } }
                     ComboBox { model: ["Albums", "Artists"]; current-index <=> root.sort-order; selected(_) => { root.sort-changed(); } }
-                    if root.section-open: Button { text: "Back"; clicked => { root.back(); keyboard.focus(); } }
+                    if root.section-open: IconButton { label: "Back"; icon: @image-url("icons/back.svg"); button-size: 32px; clicked => { root.back(); keyboard.focus(); } }
                 }
                 search-bar := HorizontalLayout {
-                    x: 8px; y: root.wide ? 46px : parent.height - self.height - 8px;
+                    x: 8px; y: root.wide ? 58px : parent.height - self.height - 8px;
                     width: parent.width - 16px; height: 36px * root.text-scale; spacing: 4px;
                     search := LineEdit {
                         in-out property <bool> request-focus <=> root.focus-search;
@@ -334,13 +386,13 @@ export component PlayerWindow inherits Window {
                             return reject;
                         }
                     }
-                    if root.search-text != "": Button { text: "×"; accessible-label: "Clear search"; max-width: 32px;
+                    if root.search-text != "": IconButton { label: "Clear search"; icon: @image-url("icons/close.svg"); button-size: 36px;
                         clicked => { root.search-text = ""; root.search-changed(); search.focus(); } }
                 }
                 list := ListView {
-                    x: 8px; y: root.wide ? 52px + search-bar.height : 46px;
+                    x: 8px; y: root.wide ? 64px + search-bar.height : 58px;
                     width: parent.width - 16px;
-                    height: parent.height - 60px - search-bar.height;
+                    height: parent.height - 72px - search-bar.height;
                     viewport-y <=> root.browser-y;
                     for item[i] in root.browser-rows: BrowserItem {
                         item: item; text-scale: root.text-scale; selected: root.browser-selected == i;
@@ -376,13 +428,12 @@ export component PlayerWindow inherits Window {
             if root.wide || !root.show-library: VerticalLayout {
                 min-width: 0px; horizontal-stretch: 1;
                 spacing: 10px;
-                if !root.wide || root.can-back: HorizontalLayout {
-                    Button { text: "Back"; max-width: 90px; clicked => { root.back(); keyboard.focus(); } }
-                    Rectangle { horizontal-stretch: 1; }
-                }
                 HorizontalLayout {
-                    Image { source: root.album-art; width: 64px; height: 64px; image-fit: contain; }
-                    Text { text: root.album-title; color: Theme.text; font-size: 27px * root.text-scale; font-weight: 600; wrap: word-wrap; }
+                    spacing: 8px;
+                    if !root.wide || root.can-back: IconButton { label: "Back"; icon: @image-url("icons/back.svg"); clicked => { root.back(); keyboard.focus(); } }
+                    Image { source: root.album-art; width: root.wide ? 64px : 48px; height: self.width; image-fit: contain; }
+                    Text { text: root.album-title; color: Theme.text; font-size: (root.wide ? 27px : 22px) * root.text-scale; font-weight: 600; wrap: word-wrap; }
+                    if root.artist-view && !root.wide: IconButton { label: "Home"; icon: @image-url("icons/home.svg"); clicked => { root.home = true; keyboard.focus(); } }
                 }
                 if root.artist-view: Text { text: root.album-artist; color: Theme.muted; wrap: word-wrap; }
                 if !root.artist-view: artist-link := FocusScope {
@@ -409,10 +460,13 @@ export component PlayerWindow inherits Window {
                 }
                 if !root.artist-view && root.collector-active: ComboBox { model: root.album-sources; current-index <=> root.album-source-index; selected(_) => { root.album-source-selected(self.current-index); } }
                 if !root.artist-view: HorizontalLayout {
-                    Button { text: "Play album"; enabled: root.tracks.length > 0 && !root.album-ambiguous; clicked => { root.play-track(0); } }
-                    if root.collector-active: Button { text: "Download album"; enabled: !root.collector-busy && root.collector-online; clicked => { root.download-action(0); } }
-                    if root.collector-active: Button { text: "Download track"; enabled: !root.collector-busy && root.collector-online && root.selected-track >= 0; clicked => { root.download-action(6); } }
-                    if root.collector-active: Button { text: "Remove download"; clicked => { root.download-action(1); } }
+                    spacing: 6px; alignment: start;
+                    IconButton { label: "Play album"; icon: @image-url("icons/play.svg"); enabled: root.tracks.length > 0 && !root.album-ambiguous; clicked => { root.play-track(0); } }
+                    if root.collector-active: IconButton { label: "Download album"; icon: @image-url("icons/download.svg"); enabled: !root.collector-busy && root.collector-online; clicked => { root.download-action(0); } }
+                    if root.collector-active: IconButton { label: "Download track"; icon: @image-url("icons/download-track.svg"); enabled: !root.collector-busy && root.collector-online && root.selected-track >= 0; clicked => { root.download-action(6); } }
+                    if root.collector-active: IconButton { label: "Remove download"; icon: @image-url("icons/remove-download.svg"); clicked => { root.download-action(1); } }
+                    if !root.wide: Rectangle { horizontal-stretch: 1; }
+                    if !root.wide: IconButton { label: "Home"; icon: @image-url("icons/home.svg"); clicked => { root.home = true; keyboard.focus(); } }
                 }
                 if !root.artist-view: HorizontalLayout {
                     spacing: 0px;
@@ -444,7 +498,7 @@ export component PlayerWindow inherits Window {
                     }
                 }
                 if root.show-queue && !root.artist-view: VerticalLayout {
-                    Button { text: "Clear up next"; clicked => { root.clear-queue(); } }
+                    IconButton { label: "Clear up next"; icon: @image-url("icons/trash.svg"); clicked => { root.clear-queue(); } }
                     ListView {
                         min-height: 0px; preferred-height: 0px; vertical-stretch: 1;
                         for title in root.queued: Text { text: title; color: Theme.text; height: 34px; overflow: elide; }
@@ -459,15 +513,16 @@ export component PlayerWindow inherits Window {
                 padding: 8px; spacing: 4px;
                 HorizontalLayout {
                     spacing: 10px;
-                    TransportButton { icon: @image-url("icons/previous.svg"); accessible-label: "Previous track"; width: 40px; clicked => { root.previous(); } }
+                    if root.short && !root.home && !root.settings && !root.lists-open: IconButton { label: "Home"; icon: @image-url("icons/home.svg"); button-size: 40px; clicked => { root.home = true; keyboard.focus(); } }
+                    TransportButton { icon: @image-url("icons/previous.svg"); label: "Previous track"; width: 40px; clicked => { root.previous(); } }
                     TransportButton {
                         width: 48px; height: 40px;
                         primary: true;
                         icon: root.playing ? @image-url("icons/pause.svg") : @image-url("icons/play.svg");
-                        accessible-label: root.playing ? "Pause" : "Play";
+                        label: root.playing ? "Pause" : "Play";
                         clicked => { root.toggle-play(); }
                     }
-                    TransportButton { icon: @image-url("icons/next.svg"); accessible-label: "Next track"; width: 40px; clicked => { root.next(); } }
+                    TransportButton { icon: @image-url("icons/next.svg"); label: "Next track"; width: 40px; clicked => { root.next(); } }
                     VerticalLayout {
                         Text { text: root.now-title; color: Theme.text; overflow: elide; font-weight: 600; }
                         Text { text: root.now-artist; color: Theme.muted; overflow: elide; font-size: 12px * root.text-scale; }

@@ -2,11 +2,11 @@
 
 An album-focused Rust music player. The first development target is macOS, with a Slint UI over independent library and audio crates.
 
-The current testing release is **0.1.0-beta.3**, for Apple Silicon Macs on macOS 15
+The current testing release is **0.1.0-beta.4**, for Apple Silicon Macs on macOS 15
 or newer. Download it from [Releases](https://github.com/AberrantWolf/trash-amp/releases).
 Beta acceptance testing is in progress.
 See the [beta checklist](docs/release-gates.md),
-[release notes](docs/releases/0.1.0-beta.3.md), and
+[release notes](docs/releases/0.1.0-beta.4.md), and
 [release guide](docs/macos-release.md) for qualification, packaging and the GitHub
 automated prerelease workflow.
 
@@ -54,6 +54,7 @@ The initial build downloads Slint/Skia dependencies and can take several minutes
 ## Current development slice
 
 - Size-adaptive album/track browsing, compact transport, a playback level meter, and reduced-motion preference.
+- Compact icon actions with desktop hover tooltips, keyboard controls, and screen-reader names. iOS/Android omit hover tooltips. Home holds source/library selection, refresh, folder opening, Lists, and Settings; a Home icon returns there without a toolbar above the tracks.
 - Filesystem libraries, including mounted network shares and single-album folders.
 - Read-only tag inspection, compilation merging across artist folders, separate conflicting album copies, CUE/BIN track discovery, CD-TEXT album fields.
 - Local SQLite library snapshot and preferences. Failed scans preserve the previous library. A new scan cancels the previous scan between file operations.
@@ -77,6 +78,18 @@ Supported decoding is determined by the pinned Symphonia version. WAV/FLAC/MP3/V
 Current redumper `.scram/.state/.subcode/.toc` audio packages now play directly, including without BIN/CUE files. Raw remains the default; turn off “Prefer redumper raw dumps” and reopen the folder to choose BIN/CUE. With raw selected, invalid packages are reported rather than silently replaced with BIN playback. Missing BIN files can use a supported raw package even when BIN is preferred. Reopen existing cached libraries to replace the old pending-decoder entries.
 
 The initial raw reader supports single-session, two-channel, all-audio discs. Mixed-mode/multisession raw images remain explicitly unsupported. Raw samples retain the recording timeline; drive offset is not applied twice. Skipped/C2-error samples stop playback with an error. CUE playback includes stored and synthetic gaps and excludes data pregaps. Hidden first-track audio is exposed by junk-libs but has no player UI yet. PRE flags are reported in album source text; de-emphasis is not yet applied. Full real-dump comparison is still pending the fixture path.
+
+## Home and libraries
+
+The app opens on **Home**. Choose **Local folder** or a saved server, then choose a
+saved folder library or server collection and press **Browse library**. **Open
+folder** adds a local library on desktop; **Add / manage servers** opens server
+settings. Lists and general settings are also available from Home.
+
+The house icon returns to Home from the browser or album controls. Returning to
+the same library keeps your album, selection, search, and scroll position. Playback
+controls remain available on Home and in Settings. Cmd/Ctrl+F opens library search
+directly from Home.
 
 ## Search and artist browsing
 
