@@ -489,4 +489,27 @@ iPhone 16 Pro, and launched successfully. The same process remained running afte
 launch. Installation did not uninstall the app or clear its data. This is an
 installation/startup check, not new playback, VoiceOver or interruption acceptance.
 Tagged signing/notarization, publication and independent downloaded-package
-verification are recorded separately after completion.
+verification are recorded below.
+
+## Published beta.4 — 2026-10-26
+
+Release commit `7f6393b23ed6fd8528d3747b1f2b23ebe2fc3702` passed the
+[main workflow](https://github.com/AberrantWolf/trash-amp/actions/runs/40263152841)
+before the annotated `v0.1.0-beta.4` tag was pushed. The
+[tagged workflow](https://github.com/AberrantWolf/trash-amp/actions/runs/40263820370)
+then passed validation, Developer ID/Hardened Runtime signing, notarization,
+stapling, extracted-package verification and automatic publication.
+
+The [published prerelease](https://github.com/AberrantWolf/trash-amp/releases/tag/v0.1.0-beta.4)
+contains the macOS arm64 ZIP and its SHA-256 file. A fresh download of both assets
+passed checksum verification, strict code-signature verification, Hardened
+Runtime/timestamp checks, stapled-ticket validation, version/build metadata and
+license-notice checks, and the packaged `--help` smoke test. Gatekeeper reported
+`accepted` and `source=Notarized Developer ID`. The smoke test used isolated app
+data. The ZIP SHA-256 is
+`dababd9fe542298d945db98b3652e8013cf348d0e014bc98e8969ec2f26ee485`.
+
+The signed iPhone development build was installed and launched before commit and
+push, as recorded above. The published ZIP is macOS-only. Separate-Mac upgrade,
+VoiceOver, extended physical-device playback and overnight iOS resume acceptance
+remain open; publication does not complete those qualification gates.
