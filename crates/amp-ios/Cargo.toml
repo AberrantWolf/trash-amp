@@ -31,3 +31,7 @@ dispatch2 = "0.3"
 version = "0.3.2"
 default-features = false
 features = ["std"]
+
+[target.'cfg(target_os = "ios")'.dev-dependencies]
+i-slint-backend-winit = { version = "=1.18.1", default-features = false }
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }

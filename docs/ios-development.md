@@ -55,6 +55,10 @@ These command-line overrides do not save preferences.
 
 ## Local builds
 
+The repository includes the patched winit source and Cargo selects it
+automatically. Normal build commands use the fix; no manual dependency patching
+or changes to Cargo's global cache are needed.
+
 Use the pinned Rust toolchain and a full Xcode installation with iOS SDKs:
 
 ```sh
@@ -196,6 +200,51 @@ simulator. The enrolled account connects, refreshes its catalog and displays alb
 artwork. Account approval remains a user action. Regression tests cover invalid URLs,
 unreadable trust files, asynchronous connection failures, stale completions,
 browser-opening failures, modal input blocking and keyboard dismissal.
+
+## Foreground timer recovery (2026-10-26)
+
+The 2026-10-26 phone watchdog report showed the main thread in
+CoreFoundation's repeating-timer catch-up loop during foreground resume.
+winit 0.30.13's iOS waker uses a 0.1 µs interval, so a long suspension can
+require billions of deadline increments before UIKit can update the scene.
+The app's 50 ms UI refresh is not that native repeat interval.
+
+The workspace now selects a vendored winit 0.30.13 with a narrow backport of
+[upstream PR #4703](https://github.com/rust-windowing/winit/pull/4703).
+The PR is still unmerged and targets winit's newer API; the older idle-timer
+fix, #3906, is already in 0.30.13 and does not address this resume stall.
+The backport uses a large nonzero repeat interval and manually rearms every
+iteration, including unchanged `WaitUntil` deadlines. Provenance, removal
+criteria and test commands are in
+[the vendor patch notes](../vendor/winit/TRASH_AMP_PATCH.md).
+
+`scripts/test-ios-timer.py` compares the original and patched native CF timers.
+Pass `--simulator UDID` to also build and run the real Slint/winit probe with
+timed waits, an unchanged expired deadline, idle waits, and process freezes in
+`Poll` and `WaitUntil`. Its separate app identifier keeps the user's library
+and Collector credentials out of the tests. `--scenario` and `--skip-native`
+allow a longer suspension check without repeating the other cases. Logs and
+JSON results are written under `target/ios-timer-tests/`.
+
+Validation on 2026-10-26: all 105 active workspace tests pass, as do workspace
+and iOS simulator Clippy checks with Rust warnings denied. Simulator and device
+bundles build, and the signed device bundle passes signature verification.
+Native CF catch-up measured 91.787 ms / 0.009 ms (original / patched) after a
+30-second pause, and 557.053 ms / 0.019 ms after 180 seconds. The actual iOS
+Slint/winit probe passes idle waits, timed waits, and three consecutive wakeups
+for an identical expired deadline. It resumes after 30-second freezes in both
+`Poll` and `WaitUntil`; a 180-second `WaitUntil` freeze adds about 29 ms of
+resume overhead. Third-party notices regenerate successfully with the vendored
+crate. The full simulator app installs and launches.
+
+The signed patched build also installs and launches on the physical iPhone 16
+Pro (iOS 27.0.1). With no debugger attached, the same process survives three
+minutes in the background and foreground resume, remaining alive 20 seconds
+afterward, beyond the 10-second scene-update watchdog allowance. Screenshots
+confirm the library UI before and after resume; no crash report was generated
+during this check. A second report from 10:53, before installation of the fix,
+has the old build UUID and the same `__CFRunLoopDoTimer + 816` watchdog stack.
+Overnight physical-device qualification remains outstanding.
 
 ## Remaining work
 
