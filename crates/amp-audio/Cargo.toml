@@ -11,6 +11,8 @@ junk-libs-audio = { workspace = true, features = ["decode-compressed"] }
 junk-libs-playback.workspace = true
 cpal = "0.18.2"
 rtrb = "0.3"
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["std", "AVAudioSession", "AVAudioSessionTypes"] }
 [dev-dependencies]
 hound = "3"
 tempfile = "3"

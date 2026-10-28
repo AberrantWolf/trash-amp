@@ -27,6 +27,7 @@ struct Session {
     consumer: Mutex<rtrb::Consumer<Frame>>,
     health: Arc<Health>,
     alive: AtomicBool,
+    running: AtomicBool,
 }
 impl Session {
     fn wait_frames(&self, count: usize) {
@@ -56,17 +57,26 @@ struct Devices {
     current: Option<Device>,
     sessions: Vec<Arc<Session>>,
     attempts: Vec<Instant>,
+    checks: usize,
 }
 struct FakeBackend {
     devices: Arc<Mutex<Devices>>,
     gate: Option<Arc<(Mutex<bool>, Condvar)>>,
+    release_when_paused: bool,
 }
 impl Backend for FakeBackend {
     type Stream = Stream;
+    fn release_when_paused(&self) -> bool {
+        self.release_when_paused
+    }
+    fn set_playing(&mut self, stream: &mut Stream, playing: bool) -> Result<()> {
+        stream.0.running.store(playing, Ordering::Release);
+        Ok(())
+    }
     fn default_key(&mut self) -> Result<String> {
-        self.devices
-            .lock()
-            .unwrap()
+        let mut devices = self.devices.lock().unwrap();
+        devices.checks += 1;
+        devices
             .current
             .as_ref()
             .map(|device| device.key.clone())
@@ -86,17 +96,23 @@ impl Backend for FakeBackend {
         if device.fails {
             bail!("Output is temporarily unavailable");
         }
-        let (producer, consumer) = rtrb::RingBuffer::new(8_192);
+        let (producer, consumer) = rtrb::RingBuffer::new(if self.release_when_paused {
+            output::buffer_capacity(device.rate, true)
+        } else {
+            8_192
+        });
         let health = Arc::new(Health::default());
         let session = Arc::new(Session {
             shared,
             consumer: Mutex::new(consumer),
             health: health.clone(),
             alive: AtomicBool::new(true),
+            running: AtomicBool::new(false),
         });
         devices.sessions.push(session.clone());
         Ok(Output {
-            _stream: Stream(session),
+            stream: Stream(session),
+            running: false,
             producer,
             rate: device.rate,
             key: device.key,
@@ -116,15 +132,31 @@ impl Harness {
         Self::with_gate(current, None)
     }
     fn with_gate(current: Option<Device>, gate: Option<Arc<(Mutex<bool>, Condvar)>>) -> Self {
+        Self::with_policy(current, gate, false)
+    }
+    fn with_policy(
+        current: Option<Device>,
+        gate: Option<Arc<(Mutex<bool>, Condvar)>>,
+        release_when_paused: bool,
+    ) -> Self {
+        Self::with_resolver(current, gate, release_when_paused, None)
+    }
+    fn with_resolver(
+        current: Option<Device>,
+        gate: Option<Arc<(Mutex<bool>, Condvar)>>,
+        release_when_paused: bool,
+        resolver: Option<Arc<dyn MediaResolver>>,
+    ) -> Self {
         let devices = Arc::new(Mutex::new(Devices {
             current,
             ..Default::default()
         }));
         let (player, thread) = Player::spawn(
-            None,
+            resolver,
             FakeBackend {
                 devices: devices.clone(),
                 gate: gate.clone(),
+                release_when_paused,
             },
         )
         .unwrap();
@@ -152,6 +184,7 @@ impl Harness {
 impl Drop for Harness {
     fn drop(&mut self) {
         self.player.shared.shutdown.store(true, Ordering::Relaxed);
+        let _ = self.player.commands.send(Command::Shutdown);
         if let Some(gate) = &self.gate {
             *gate.0.lock().unwrap() = true;
             gate.1.notify_all();
@@ -168,6 +201,297 @@ fn wait(mut condition: impl FnMut() -> bool) {
 }
 fn playing(player: &Player, expected: bool) {
     wait(|| player.snapshot().playing == expected);
+}
+
+#[test]
+fn pause_stops_output_without_watchdog_reopens_and_resumes_exact_buffered_audio() {
+    let (_dir, track) = tests::fixture(44_100, 1_176);
+    let harness = Harness::new(Some(Device::new("first", 44_100)));
+    let session = harness.session(0);
+    harness.player.play(vec![track.clone(), track], 0);
+    session.wait_frames(2_352);
+    session.render(37);
+    harness.player.set_playing(false);
+    wait(|| !session.running.load(Ordering::Acquire));
+    assert_eq!(harness.player.snapshot().level, 0.0);
+    let checks = harness.devices.lock().unwrap().checks;
+    // Exceed the callback watchdog without supplying any callbacks.
+    thread::sleep(Duration::from_millis(3_200));
+    assert_eq!(harness.devices.lock().unwrap().checks, checks);
+    assert_eq!(harness.devices.lock().unwrap().sessions.len(), 1);
+    assert_eq!(harness.player.shared.position.load(Ordering::Relaxed), 37);
+    assert!(!session.running.load(Ordering::Acquire));
+    assert!(harness.player.event().is_none());
+    harness.player.set_playing(true);
+    wait(|| session.running.load(Ordering::Acquire));
+    for (index, frame) in session.render(2_352 - 37).chunks_exact(2).enumerate() {
+        assert_eq!(frame[0], (((index + 37) % 1_176) % 1_000) as f32 / 32_768.0);
+        assert_eq!(frame[1], -frame[0]);
+    }
+    // Natural queue completion must release the device as well as manual pause.
+    wait(|| !session.running.load(Ordering::Acquire));
+    assert!(!harness.player.snapshot().playing);
+    assert_eq!(harness.player.snapshot().level, 0.0);
+}
+
+#[test]
+fn paused_seek_and_queue_changes_resume_at_the_requested_frame() {
+    for release_when_paused in [false, true] {
+        let (_dir, track) = tests::fixture(44_100, 44_100);
+        let harness = Harness::with_policy(
+            Some(Device::new("first", 44_100)),
+            None,
+            release_when_paused,
+        );
+        harness.player.play(vec![track.clone(); 2], 0);
+        let session = harness.session(0);
+        session.wait_frames(100);
+        session.render(37);
+        harness.player.toggle();
+        wait(|| !session.running.load(Ordering::Acquire));
+        harness.player.next();
+        harness.player.seek(0.01);
+        // A synchronous edit fences all preceding transport commands.
+        let update = harness
+            .player
+            .edit_queue(Box::new(move |index| {
+                assert_eq!(index, 1);
+                (vec![track; 2], None)
+            }))
+            .unwrap();
+        assert!(!update.clock.playing);
+        assert_eq!(update.clock.seconds, 0.01);
+        assert!(!session.running.load(Ordering::Acquire));
+        harness.player.toggle();
+        let resumed = if release_when_paused {
+            harness.session(1)
+        } else {
+            session
+        };
+        wait(|| resumed.running.load(Ordering::Acquire));
+        resumed.render(0); // Retire pre-seek frames as the first resumed callback does.
+        wait(|| {
+            resumed.consumer.lock().unwrap().peek().is_ok_and(|frame| {
+                frame.generation == harness.player.shared.generation.load(Ordering::Acquire)
+            })
+        });
+        assert_eq!(resumed.render(10)[0], 441.0 / 32_768.0);
+    }
+}
+
+#[test]
+fn mobile_pause_releases_output_without_reopening_until_play_and_restores_audible_position() {
+    let (_dir, track) = tests::fixture(44_100, 1_176);
+    let harness = Harness::with_policy(Some(Device::new("first", 44_100)), None, true);
+    harness.player.play(vec![track.clone(), track], 0);
+    let old = harness.session(0);
+    old.wait_frames(2_352);
+    old.render(37); // The decoder is already in the next track.
+    harness.player.set_playing(false);
+    wait(|| !old.alive.load(Ordering::Acquire));
+    let attempts = harness.devices.lock().unwrap().attempts.len();
+    thread::sleep(Duration::from_millis(1_200));
+    assert_eq!(harness.devices.lock().unwrap().attempts.len(), attempts);
+    assert_eq!(harness.player.shared.position.load(Ordering::Relaxed), 37);
+    assert_eq!(harness.player.snapshot().level, 0.0);
+    assert!(!harness.player.snapshot().playing);
+    assert!(harness.player.event().is_none());
+    harness.player.set_playing(true);
+    let new = harness.session(1);
+    new.wait_frames(2_352 - 37);
+    for (index, frame) in new.render(2_352 - 37).chunks_exact(2).enumerate() {
+        assert_eq!(frame[0], (((index + 37) % 1_176) % 1_000) as f32 / 32_768.0);
+    }
+    wait(|| !new.alive.load(Ordering::Acquire));
+    assert!(!harness.player.snapshot().playing);
+    assert!(harness.player.event().is_none());
+}
+
+#[derive(Default)]
+struct NetworkGate {
+    blocked: Mutex<bool>,
+    changed: Condvar,
+    entered: AtomicBool,
+    reads: AtomicUsize,
+}
+impl NetworkGate {
+    fn release(&self) {
+        *self.blocked.lock().unwrap() = false;
+        self.changed.notify_all();
+    }
+}
+struct NetworkReader {
+    bytes: std::io::Cursor<Vec<u8>>,
+    gate: Arc<NetworkGate>,
+}
+impl std::io::Read for NetworkReader {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let mut blocked = self.gate.blocked.lock().unwrap();
+        while *blocked {
+            self.gate.entered.store(true, Ordering::Release);
+            let (guard, timeout) = self
+                .gate
+                .changed
+                .wait_timeout(blocked, Duration::from_secs(3))
+                .unwrap();
+            blocked = guard;
+            if timeout.timed_out() && *blocked {
+                return Err(std::io::ErrorKind::TimedOut.into());
+            }
+        }
+        self.gate.reads.fetch_add(1, Ordering::Relaxed);
+        std::io::Read::read(&mut self.bytes, bytes)
+    }
+}
+impl std::io::Seek for NetworkReader {
+    fn seek(&mut self, from: std::io::SeekFrom) -> std::io::Result<u64> {
+        std::io::Seek::seek(&mut self.bytes, from)
+    }
+}
+struct NetworkResolver {
+    bytes: Vec<u8>,
+    gate: Arc<NetworkGate>,
+    opens: AtomicUsize,
+}
+impl MediaResolver for NetworkResolver {
+    fn resolve(&self, _: &Track) -> Result<ByteSource> {
+        self.opens.fetch_add(1, Ordering::Relaxed);
+        Ok(ByteSource::new(
+            NetworkReader {
+                bytes: std::io::Cursor::new(self.bytes.clone()),
+                gate: self.gate.clone(),
+            },
+            MediaHint::new(
+                Some(self.bytes.len() as u64),
+                Some("wav"),
+                Some("audio/wav"),
+            ),
+        ))
+    }
+    fn cancel(&self) {
+        self.gate.release();
+    }
+}
+
+#[test]
+fn mobile_resume_plays_retained_pcm_while_network_refill_is_blocked() {
+    let (_dir, mut track) = tests::fixture(44_100, 44_100 * 20);
+    let MediaAccess::File { locator } = &track.access else {
+        unreachable!()
+    };
+    let gate = Arc::new(NetworkGate::default());
+    let resolver = Arc::new(NetworkResolver {
+        bytes: std::fs::read(locator).unwrap(),
+        gate: gate.clone(),
+        opens: AtomicUsize::new(0),
+    });
+    track.access = MediaAccess::Managed {
+        provider: "network-test".into(),
+        item: "track".into(),
+    };
+    let harness = Harness::with_resolver(
+        Some(Device::new("first", 44_100)),
+        None,
+        true,
+        Some(resolver.clone()),
+    );
+    harness.player.play(vec![track], 0);
+    let old = harness.session(0);
+    let capacity = output::buffer_capacity(44_100, true);
+    old.wait_frames(capacity);
+    old.render(147);
+    harness.player.set_playing(false);
+    wait(|| !old.alive.load(Ordering::Acquire));
+    *gate.blocked.lock().unwrap() = true;
+    let reads = gate.reads.load(Ordering::Relaxed);
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(gate.reads.load(Ordering::Relaxed), reads);
+    assert!(
+        !gate.entered.load(Ordering::Acquire),
+        "pause must not fetch more data"
+    );
+    harness.player.set_playing(true);
+    let new = harness.session(1);
+    wait(|| new.running.load(Ordering::Acquire));
+    assert!(new.consumer.lock().unwrap().slots() >= capacity - 147);
+    assert_eq!(
+        resolver.opens.load(Ordering::Relaxed),
+        1,
+        "resume must reuse the dormant reader"
+    );
+    let mut position = 147;
+    // Make the decoder reach its next network read, leaving at least two
+    // seconds of PCM available to cover that read's latency.
+    while !gate.entered.load(Ordering::Acquire) && position < 44_100 {
+        assert_frames(&new.render(4_410), position);
+        position += 4_410;
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(gate.entered.load(Ordering::Acquire));
+    assert_frames(&new.render(4_410), position);
+    position += 4_410;
+    assert_eq!(harness.player.snapshot().underruns, 0);
+    gate.release();
+    new.wait_frames(capacity);
+    assert_frames(&new.render(4_410), position);
+    assert_eq!(harness.player.snapshot().underruns, 0);
+    assert!(harness.player.event().is_none());
+}
+
+fn assert_frames(samples: &[f32], start: usize) {
+    for (index, frame) in samples.chunks_exact(2).enumerate() {
+        assert_eq!(frame[0], ((start + index) % 1_000) as f32 / 32_768.0);
+        assert_eq!(frame[1], -frame[0]);
+    }
+}
+
+#[test]
+fn repeated_mobile_pauses_retain_only_unplayed_audio_after_buffer_rollover() {
+    let (_dir, track) = tests::fixture(44_100, 44_100 * 20);
+    let harness = Harness::with_policy(Some(Device::new("first", 44_100)), None, true);
+    harness.player.play(vec![track], 0);
+    let capacity = output::buffer_capacity(44_100, true);
+    let mut position = 0;
+    for attempt in 0..3 {
+        let session = harness.session(attempt);
+        session.wait_frames(capacity);
+        assert_frames(&session.render(44_100), position);
+        position += 44_100;
+        session.wait_frames(capacity);
+        harness.player.set_playing(false);
+        wait(|| !session.alive.load(Ordering::Acquire));
+        assert_eq!(
+            harness.player.shared.position.load(Ordering::Relaxed),
+            position as u64
+        );
+        harness.player.set_playing(true);
+    }
+    let resumed = harness.session(3);
+    resumed.wait_frames(4_410);
+    assert_frames(&resumed.render(4_410), position);
+    assert!(harness.player.event().is_none());
+}
+
+#[test]
+fn mobile_resume_discards_retained_pcm_when_sample_rate_changes() {
+    let (_dir, track) = tests::fixture(44_100, 88_200);
+    let harness = Harness::with_policy(Some(Device::new("first", 44_100)), None, true);
+    harness.player.play(vec![track.clone()], 0);
+    let old = harness.session(0);
+    old.wait_frames(8_820);
+    old.render(4_410);
+    harness.player.set_playing(false);
+    wait(|| !old.alive.load(Ordering::Acquire));
+    harness.device(Some(Device::new("48khz", 48_000)));
+    harness.player.set_playing(true);
+    let new = harness.session(1);
+    new.wait_frames(32);
+    assert_eq!(harness.player.snapshot().seconds, 0.1);
+    let mut reference = Converted::new(&track, 4_800, 48_000, None).unwrap();
+    for frame in new.render(32).chunks_exact(2) {
+        assert_eq!(frame, reference.next().unwrap().unwrap());
+    }
+    assert!(harness.player.event().is_none());
 }
 
 #[test]
@@ -424,6 +748,7 @@ fn dropping_the_player_does_not_wait_for_a_blocked_device_open() {
         FakeBackend {
             devices: devices.clone(),
             gate: Some(gate.clone()),
+            release_when_paused: false,
         },
     )
     .unwrap();

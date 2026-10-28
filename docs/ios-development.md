@@ -12,9 +12,9 @@ implemented, so this host hides the folder picker.
   storage and native capabilities from a launcher. It contains no OS selection logic.
 - `trash-amp` remains the desktop executable. Its launcher supplies the desktop
   data directory, `rfd` folder picker and native media-control window handle.
-- `trash-amp-ios` supplies Application Support storage, `AVAudioSession` music
-  configuration and Souvlaki media controls. The application worker configures
-  and activates the audio session on playback requests. Native metadata updates
+- `trash-amp-ios` supplies Application Support storage and Souvlaki media controls.
+  `amp-audio` owns `AVAudioSession` configuration and activation on the audio
+  worker, alongside the device stream. Native metadata updates
   use Apple's main dispatch queue, independently of Slint timers.
 - Domain values, catalog search, decoding, Collector transport and persistence
   remain in their existing crates.
@@ -35,6 +35,56 @@ The shared layout accounts for window safe-area insets and the virtual keyboard.
 Settings and Lists scroll views permit drag panning. These changes use geometry
 and capabilities rather than OS names. Existing hover/double-click interactions
 still need a touch and accessibility pass.
+
+## Paused playback and battery
+
+Pause stops and drops the CPAL output stream, then deactivates the iOS audio
+session with `NotifyOthersOnDeactivation`. Dropping also removes CPAL's native
+interruption observers, which could otherwise reactivate a paused session when
+another app's interruption ends. Resume activates the session and opens a fresh
+stream using the current route and sample rate. The audio worker also releases
+the session after queue completion, an output failure or shutdown. Session
+operations are serialized with stream operations, so a rapid pause/play cannot
+deactivate a newly resumed stream.
+
+The iOS decoder retains up to three seconds of unplayed PCM, the queue, the exact
+audible position and its decoder/reader state. A bounded worker-side mirror keeps
+the last device-buffer's worth of produced frames; pause trims already played
+frames after the device stops. The real-time callback still uses only its ring
+and atomics. At 44.1/48 kHz the paused frame cache uses roughly 4–5 MB, including
+per-frame position metadata, plus the decoder's existing bounded buffers.
+
+The worker sleeps until a transport/queue command or shutdown, instead of polling
+every three milliseconds. Collector's reader uses a current-thread runtime and
+fetches on demand: retaining it does not issue network requests while paused.
+Resume preloads the saved PCM before starting the new device, then continues
+decoding from the end of read-ahead while the callback plays that buffer. No
+reader reopen or seek is needed for an unchanged sample rate. A seek, sequence
+edit or sample-rate change discards incompatible PCM and rebuilds at the audible
+position. A slow connection can still exhaust the available buffer; three seconds
+is a maximum runway, not a guarantee of uninterrupted resume.
+
+Desktop streams retain their buffered audio while paused, with one-second checks
+for asynchronous device errors. Devices without hardware pause retain software
+pause. Default-device polling and the callback watchdog are disabled for a
+deliberately paused stream; resume resets the watchdog. The inactive session
+allows iOS to suspend the app when it has no other background work. UI and
+application timers do not need to keep the process alive for paused playback or
+lock-screen resume.
+
+Regression tests cover exact samples across a pause longer than the watchdog,
+paused seeks/queue edits, repeated buffer rollover, delayed network reads during
+resume, sample-rate changes, natural queue completion and output recovery. Physical
+iPhone validation is still required: play, pause, lock for several minutes, and
+compare CPU/audio activity in Instruments and battery use with the prior build.
+Check lock-screen/Bluetooth resume, rapid pause/play, completion, another app's
+audio, and headphone/Bluetooth route changes during a pause. Build checks and
+fake-device tests do not measure device battery savings.
+
+On 2026-10-28, optimized Release build 2.5 passed signature verification and was
+installed and launched on the user's iPhone 16 Pro without an attached debugger.
+The user reported an initial improvement. This is preliminary hardware feedback;
+longer battery measurements and the remaining device checks are still open.
 
 ## Appearance
 

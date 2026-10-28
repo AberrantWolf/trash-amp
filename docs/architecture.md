@@ -13,7 +13,7 @@ Slint is the initial custom UI, using Skia. Layout follows available width, heig
 - `amp-media`: native media-session adapter. Routes system commands to `amp-app` and dispatches coalesced metadata updates through a host-supplied executor. No Slint dependency.
 - `amp-ui`: shared Slint UI and presentation adapter. Reads playback/catalog snapshots and sends commands. Navigation, search presentation and Collector view projection use its presentation loop; they do not commit catalog or preference changes.
 - `trash-amp`: desktop launcher and native desktop capabilities.
-- `trash-amp-ios`: iOS launcher, sandbox storage and audio-session integration. See [iOS development](ios-development.md) for the bootstrap and remaining work.
+- `trash-amp-ios`: iOS launcher, sandbox storage and native media controls. `amp-audio` owns the iOS audio session alongside its device stream. See [iOS development](ios-development.md) for the bootstrap and remaining work.
 
 The [application services](application-service.md) run independently of the presentation loop. The full future provider and driver system remains unfinished. UniFFI is the planned Swift/Kotlin command and event bridge. Raw audio should remain in the engine, not flow through the UI bridge.
 

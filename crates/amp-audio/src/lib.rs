@@ -25,6 +25,8 @@ use std::{
     thread,
 };
 
+#[cfg(target_os = "ios")]
+mod ios_session;
 mod output;
 #[cfg(test)]
 mod recovery_tests;
@@ -109,6 +111,7 @@ pub struct QueueUpdate {
     pub clock: Snapshot,
 }
 enum Command {
+    Shutdown,
     Edit(QueueEdit, u64, mpsc::Sender<Vec<Track>>),
     Replace(Vec<Track>, usize, u64),
     Seek(f64),
@@ -265,6 +268,7 @@ impl Drop for Player {
             resolver.cancel();
         }
         self.shared.shutdown.store(true, Ordering::Relaxed);
+        let _ = self.commands.send(Command::Shutdown);
     }
 }
 

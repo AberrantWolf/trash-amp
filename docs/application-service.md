@@ -49,10 +49,12 @@ commands. Already queued tasks check the session identity before updating an OS
 object.
 
 The host also supplies session preparation. The application worker calls it
-before engine creation, sequence replacement and explicit resume requests. iOS
-uses this hook to configure and activate `AVAudioSession` away from the UI thread.
-Preparation must not synchronously wait for the UI thread. Now Playing observers
-should schedule work and return promptly.
+before engine creation, sequence replacement and explicit resume requests. The
+current hosts use a no-op hook: `amp-audio` serializes iOS session activation and
+deactivation with device operations on the audio worker. Pausing releases the
+iOS stream and session, retaining a bounded PCM buffer and dormant decoder state
+for resume. Preparation must not synchronously wait for the UI thread. Now
+Playing observers should schedule work and return promptly.
 
 ## Catalog completion and persistence
 

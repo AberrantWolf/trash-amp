@@ -1,8 +1,7 @@
 //! iOS launch services. UIKit/file-provider integration belongs in this crate.
 use amp_collector::NativeCredentialStorage;
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use objc2::{AnyThread, rc::Retained};
-use objc2_avf_audio::{AVAudioSession, AVAudioSessionCategoryPlayback};
 use objc2_foundation::{NSMutableDictionary, NSNumber, NSString};
 use objc2_foundation::{
     NSSearchPathDirectory, NSSearchPathDomainMask, NSSearchPathForDirectoriesInDomains,
@@ -133,22 +132,6 @@ fn media_controls(
     .map(|session| Box::new(session) as amp_ui::MediaSessionGuard)
 }
 
-fn prepare_playback() -> anyhow::Result<()> {
-    // SAFETY: The service serializes this policy on its worker. Activation is
-    // blocking, so it must not run in a UI or audio render callback.
-    unsafe {
-        let session = AVAudioSession::sharedInstance();
-        session
-            .setCategory_error(
-                AVAudioSessionCategoryPlayback.context("Playback audio category unavailable")?,
-            )
-            .map_err(|e| anyhow!("Cannot configure music playback: {e}"))?;
-        session
-            .setActive_error(true)
-            .map_err(|e| anyhow!("Cannot activate music playback: {e}"))
-    }
-}
-
 pub fn run() -> anyhow::Result<()> {
     let paths = NSSearchPathForDirectoriesInDomains(
         NSSearchPathDirectory::ApplicationSupportDirectory,
@@ -169,7 +152,7 @@ pub fn run() -> anyhow::Result<()> {
             credentials.save(&credential)?;
         }
     }
-    let service = amp_app::PlaybackService::new(Arc::new(prepare_playback))?;
+    let service = amp_app::PlaybackService::new(Arc::new(|| Ok(())))?;
     let catalog = amp_app::catalog::CatalogService::open(
         &data_dir.join("library.sqlite3"),
         service.playback(),

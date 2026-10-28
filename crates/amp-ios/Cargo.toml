@@ -23,7 +23,6 @@ amp-media.workspace = true
 anyhow.workspace = true
 slint.workspace = true
 souvlaki.workspace = true
-objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["std", "AVAudioSession", "AVAudioSessionTypes"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSPathUtilities", "NSDictionary", "NSValue", "NSObject", "NSURL"] }
 dispatch2 = "0.3"
 

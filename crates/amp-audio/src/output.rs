@@ -15,7 +15,8 @@ pub(super) struct Health {
 
 pub(super) struct Output<S> {
     // Drop the stream before releasing its producer or health state.
-    pub _stream: S,
+    pub stream: S,
+    pub running: bool,
     pub producer: rtrb::Producer<Frame>,
     pub rate: u32,
     pub key: String,
@@ -24,11 +25,31 @@ pub(super) struct Output<S> {
 
 pub(super) trait Backend: Send + 'static {
     type Stream;
+    /// Open stopped so the worker can restore buffered PCM before callbacks start.
     fn open(&mut self, shared: Arc<Shared>) -> Result<Output<Self::Stream>>;
     fn default_key(&mut self) -> Result<String>;
+    fn set_playing(&mut self, stream: &mut Self::Stream, playing: bool) -> Result<()>;
+    fn release_when_paused(&self) -> bool {
+        false
+    }
 }
 
 pub(super) struct CpalBackend;
+
+pub(super) fn buffer_capacity(rate: u32, retain_on_pause: bool) -> usize {
+    if retain_on_pause {
+        rate as usize * 3
+    } else {
+        rate as usize / 2
+    }
+}
+
+pub(super) struct CpalStream {
+    // The audio unit must stop before the session is released.
+    stream: Option<cpal::Stream>,
+    #[cfg(target_os = "ios")]
+    session: super::ios_session::AudioSession,
+}
 
 fn default_device() -> Result<(cpal::Device, cpal::SupportedStreamConfig, String)> {
     let device = cpal::default_host()
@@ -46,18 +67,63 @@ fn default_device() -> Result<(cpal::Device, cpal::SupportedStreamConfig, String
 }
 
 impl Backend for CpalBackend {
-    type Stream = cpal::Stream;
+    type Stream = CpalStream;
+
+    fn release_when_paused(&self) -> bool {
+        // Remove CPAL's interruption observers too: they can reactivate the
+        // shared iOS session when an interruption ends, even for a paused unit.
+        cfg!(target_os = "ios")
+    }
+
+    fn set_playing(&mut self, stream: &mut Self::Stream, playing: bool) -> Result<()> {
+        if playing {
+            #[cfg(target_os = "ios")]
+            stream.session.activate()?;
+            stream
+                .stream
+                .as_ref()
+                .context("Audio output retired")?
+                .play()?;
+        } else {
+            if let Err(error) = stream
+                .stream
+                .as_ref()
+                .context("Audio output retired")?
+                .pause()
+            {
+                // Some desktop devices (e.g. ALSA) only support software pause.
+                // Keep their existing silent-callback behavior without a retry loop.
+                if cfg!(target_os = "ios") || error.kind() != cpal::ErrorKind::UnsupportedOperation
+                {
+                    return Err(error.into());
+                }
+            }
+            #[cfg(target_os = "ios")]
+            {
+                // Remove the audio unit and interruption observers before
+                // deactivation, and report deactivation errors to the worker.
+                drop(stream.stream.take());
+                stream.session.deactivate()?;
+            }
+        }
+        Ok(())
+    }
 
     fn default_key(&mut self) -> Result<String> {
         Ok(default_device()?.2)
     }
 
     fn open(&mut self, shared: Arc<Shared>) -> Result<Output<Self::Stream>> {
+        #[cfg(target_os = "ios")]
+        let session = super::ios_session::AudioSession::new()?;
         let (device, supported, key) = default_device()?;
         let format = supported.sample_format();
         let config: cpal::StreamConfig = supported.into();
         let health = Arc::new(Health::default());
-        let (producer, consumer) = rtrb::RingBuffer::new(config.sample_rate as usize / 2);
+        let (producer, consumer) = rtrb::RingBuffer::new(buffer_capacity(
+            config.sample_rate,
+            self.release_when_paused(),
+        ));
         let stream = match format {
             cpal::SampleFormat::F32 => {
                 stream::<f32>(&device, &config, consumer, shared, health.clone())?
@@ -73,9 +139,15 @@ impl Backend for CpalBackend {
             }
             other => bail!("Unsupported output sample format: {other}"),
         };
-        stream.play()?;
+        // The worker restores the generation and preloads retained audio before
+        // starting callbacks. No network access is needed to play that audio.
         Ok(Output {
-            _stream: stream,
+            stream: CpalStream {
+                stream: Some(stream),
+                #[cfg(target_os = "ios")]
+                session,
+            },
+            running: false,
             producer,
             rate: config.sample_rate,
             key,

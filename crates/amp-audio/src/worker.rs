@@ -26,6 +26,12 @@ pub(super) fn run<B: Backend>(
     let mut generation = 0;
     let mut pending = None;
     let mut exhausted = true;
+    let mut queued_command = None;
+    // Mirror at most one device buffer on the decoder worker. Keeping the last
+    // capacity frames always includes every frame still pending in the ring,
+    // without sharing its consumer or adding locks/work to the render callback.
+    let mut resume_buffer = VecDeque::<Frame>::new();
+    let mut paused_output = false;
     while !shared.shutdown.load(Ordering::Relaxed) {
         let now = Instant::now();
         let lost = output.as_ref().is_some_and(|current| {
@@ -34,14 +40,14 @@ pub(super) fn run<B: Backend>(
                 callbacks = count;
                 last_callback = now;
             }
-            let changed = if now >= next_check {
+            let changed = if current.running && now >= next_check {
                 next_check = now + RETRY_INTERVAL;
                 backend.default_key().ok().as_ref() != Some(&current.key)
             } else {
                 false
             };
             current.health.failed.load(Ordering::Acquire)
-                || now.duration_since(last_callback) >= CALLBACK_TIMEOUT
+                || (current.running && now.duration_since(last_callback) >= CALLBACK_TIMEOUT)
                 || changed
         });
         if lost {
@@ -58,24 +64,48 @@ pub(super) fn run<B: Backend>(
             let _ = errors.send(PlayerEvent::OutputUnavailable("Audio output disconnected or changed. Playback paused; reconnecting to the default output…".into()));
             reader = None;
             pending = None;
+            resume_buffer.clear();
+            paused_output = false;
             // Back off even when a device opens successfully but immediately fails.
             next_retry = next_retry.max(now);
         }
-        if output.is_none() && now >= next_retry {
+        if output.is_none()
+            && now >= next_retry
+            && (shared.playing.load(Ordering::Relaxed) || !backend.release_when_paused())
+        {
             next_retry = now + RETRY_INTERVAL;
             match backend.open(shared.clone()) {
-                Ok(current) => {
-                    index = shared.track.load(Ordering::Relaxed);
-                    position =
-                        scale_frame(shared.position.load(Ordering::Relaxed), rate, current.rate);
-                    rate = current.rate;
-                    shared.sample_rate.store(rate, Ordering::Release);
-                    shared.position.store(position, Ordering::Relaxed);
-                    generation += 1;
-                    shared.generation.store(generation, Ordering::Release);
-                    reader = None;
-                    pending = None;
-                    exhausted = index >= tracks.len();
+                Ok(mut current) => {
+                    if paused_output
+                        && rate == current.rate
+                        && resume_buffer.len() <= current.producer.slots()
+                    {
+                        // Restore PCM before starting the device, then continue
+                        // decoding exactly where read-ahead stopped. The callback
+                        // can play this runway even if the next read blocks.
+                        for frame in &resume_buffer {
+                            let _ = current.producer.push(*frame);
+                        }
+                    } else {
+                        // A route/sample-rate change or transport edit invalidates
+                        // output-rate PCM. Rebuild from the exact audible clock.
+                        index = shared.track.load(Ordering::Relaxed);
+                        position = scale_frame(
+                            shared.position.load(Ordering::Relaxed),
+                            rate,
+                            current.rate,
+                        );
+                        rate = current.rate;
+                        shared.sample_rate.store(rate, Ordering::Release);
+                        shared.position.store(position, Ordering::Relaxed);
+                        generation += 1;
+                        shared.generation.store(generation, Ordering::Release);
+                        reader = None;
+                        pending = None;
+                        exhausted = index >= tracks.len();
+                        resume_buffer.clear();
+                    }
+                    paused_output = false;
                     callbacks = current.health.callbacks.load(Ordering::Relaxed);
                     last_callback = now;
                     next_check = now + RETRY_INTERVAL;
@@ -97,7 +127,7 @@ pub(super) fn run<B: Backend>(
         if shared.shutdown.load(Ordering::Relaxed) {
             break;
         }
-        while let Ok(command) = rx.try_recv() {
+        while let Some(command) = queued_command.take().or_else(|| rx.try_recv().ok()) {
             // Fence the audible clock through policy evaluation and generation
             // installation. The device callback uses a single nonblocking CAS.
             let _clock = ClockGuard::lock(&shared.clock_writer);
@@ -106,6 +136,7 @@ pub(super) fn run<B: Backend>(
             let mut replaced = None;
             let mut edited = None;
             match command {
+                Command::Shutdown => return,
                 Command::Edit(edit, sequence, reply) => {
                     let audible = shared.track.load(Ordering::Relaxed);
                     let (updated, start) = edit(audible);
@@ -241,6 +272,8 @@ pub(super) fn run<B: Backend>(
                 }
             }
             if reset {
+                resume_buffer.clear();
+                paused_output = false;
                 generation += 1;
                 shared.generation.store(generation, Ordering::Release);
                 shared.track.store(index, Ordering::Relaxed);
@@ -261,9 +294,69 @@ pub(super) fn run<B: Backend>(
             }
         }
         let Some(current) = output.as_mut() else {
-            thread::sleep(Duration::from_millis(3));
+            if !shared.playing.load(Ordering::Relaxed) && backend.release_when_paused() {
+                // iOS has no device or session to monitor while idle. Native
+                // controls still send commands directly and wake this wait.
+                match rx.recv() {
+                    Ok(command) => queued_command = Some(command),
+                    Err(_) => break,
+                }
+                continue;
+            }
+            match rx.recv_timeout(next_retry.saturating_duration_since(Instant::now())) {
+                Ok(command) => queued_command = Some(command),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
             continue;
         };
+        let playing = shared.playing.load(Ordering::Relaxed);
+        if current.running != playing {
+            if let Err(error) = backend.set_playing(&mut current.stream, playing) {
+                current.health.failed.store(true, Ordering::Release);
+                let _ = errors.send(PlayerEvent::PlaybackError(format!(
+                    "Cannot change audio output playback: {error:#}"
+                )));
+                continue;
+            }
+            current.running = playing;
+            // A deliberate pause is not a stalled device. Give a resumed stream
+            // a fresh watchdog window, including after iOS suspends the app.
+            callbacks = current.health.callbacks.load(Ordering::Relaxed);
+            last_callback = Instant::now();
+            next_check = last_callback;
+        }
+        if !playing {
+            shared.level.store(0, Ordering::Relaxed);
+            if backend.release_when_paused() {
+                // The audio unit/observers/session go away, but PCM and decoder
+                // state stay in memory. The provider's current-thread reader
+                // performs no work until decoding resumes.
+                drop(output.take());
+                {
+                    let _clock = ClockGuard::lock(&shared.clock_writer);
+                    let audible_track = shared.track.load(Ordering::Relaxed);
+                    let audible_frame = shared.position.load(Ordering::Relaxed);
+                    resume_buffer.retain(|frame| {
+                        frame.generation == generation
+                            && (frame.track > audible_track
+                                || (frame.track == audible_track
+                                    && frame.position >= audible_frame))
+                    });
+                }
+                paused_output = true;
+                next_retry = Instant::now();
+                continue;
+            }
+            // Keep decoded frames and the exact audible clock. Commands wake
+            // immediately; only check asynchronous device failures once/second.
+            match rx.recv_timeout(RETRY_INTERVAL) {
+                Ok(command) => queued_command = Some(command),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            continue;
+        }
         let producer = &mut current.producer;
         if !exhausted
             && shared.playing.load(Ordering::Relaxed)
@@ -320,10 +413,18 @@ pub(super) fn run<B: Backend>(
                 }
             }
         }
-        if let Some(frame) = pending.take()
-            && let Err(rtrb::PushError::Full(f)) = producer.push(frame)
-        {
-            pending = Some(f);
+        if let Some(frame) = pending.take() {
+            match producer.push(frame) {
+                Ok(()) if backend.release_when_paused() => {
+                    let capacity = producer.buffer().capacity();
+                    if resume_buffer.len() == capacity {
+                        resume_buffer.pop_front();
+                    }
+                    resume_buffer.push_back(frame);
+                }
+                Ok(()) => {}
+                Err(rtrb::PushError::Full(frame)) => pending = Some(frame),
+            }
         }
     }
 }
