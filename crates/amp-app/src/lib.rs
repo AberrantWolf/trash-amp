@@ -1,13 +1,18 @@
 //! Application playback service. Commands, queue policy and engine monitoring do
 //! not depend on a window, event loop, provider UI or native media framework.
 pub mod catalog;
+pub mod files;
 
 use amp_audio::{MediaResolver, OutputState, Player, PlayerEvent};
 use amp_core::{Album, Library, Track};
 use anyhow::{Result, bail};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, RwLock, mpsc},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::Duration,
 };
@@ -70,6 +75,9 @@ pub trait Engine: Send {
     fn next(&self);
     fn previous(&self);
     fn append(&self, tracks: Vec<Track>);
+    fn append_stream(&self, tracks: Vec<Track>) {
+        self.append(tracks);
+    }
     fn truncate(&self, len: usize);
     /// Apply policy atomically against the audible index, after prior commands.
     fn edit_queue(&self, edit: amp_audio::QueueEdit) -> Result<amp_audio::QueueUpdate>;
@@ -99,6 +107,9 @@ impl Engine for Player {
     fn append(&self, tracks: Vec<Track>) {
         self.append(tracks);
     }
+    fn append_stream(&self, tracks: Vec<Track>) {
+        self.append_stream(tracks);
+    }
     fn truncate(&self, len: usize) {
         self.truncate(len);
     }
@@ -123,6 +134,11 @@ enum Command {
     Album(Vec<Track>, usize),
     Track(Track),
     List(Vec<Track>),
+    ReplaceQueue(Vec<Track>),
+    FileDiscovery(String, Arc<AtomicBool>),
+    FileQueue(Track, Arc<AtomicBool>),
+    FileQueueAppend(String, Vec<Track>),
+    FileQueueFinished(String),
     Enqueue(Track),
     ClearQueue,
     Metadata(Album),
@@ -164,6 +180,24 @@ impl Playback {
     }
     pub fn play_list(&self, tracks: Vec<Track>) {
         self.send(Command::List(tracks));
+    }
+    /// Start a transient queue, exposing every remaining track in Up next.
+    /// Replaces the current sequence and any pending explicit tracks.
+    pub fn replace_queue(&self, tracks: Vec<Track>) {
+        self.send(Command::ReplaceQueue(tracks));
+    }
+    /// Start discovery-owned playback; cancellation prevents stale queued commands.
+    pub fn begin_file_discovery(&self, session: String, cancelled: Arc<AtomicBool>) {
+        self.send(Command::FileDiscovery(session, cancelled));
+    }
+    pub fn start_file_queue(&self, track: Track, cancelled: Arc<AtomicBool>) {
+        self.send(Command::FileQueue(track, cancelled));
+    }
+    pub fn finish_file_queue(&self, session: String) {
+        self.send(Command::FileQueueFinished(session));
+    }
+    pub fn append_file_queue(&self, session: String, tracks: Vec<Track>) {
+        self.send(Command::FileQueueAppend(session, tracks));
     }
     pub fn enqueue(&self, track: Track) {
         self.send(Command::Enqueue(track));
@@ -271,6 +305,7 @@ struct Worker {
     buffer_seconds: u32,
     default_album: Option<(Vec<Track>, bool)>,
     queue: Queue,
+    file_queue: Option<(String, Arc<AtomicBool>)>,
     clock: amp_audio::Snapshot,
     expected_sequence: u64,
     published: Arc<RwLock<Snapshot>>,
@@ -312,6 +347,7 @@ impl Worker {
             buffer_seconds: amp_core::default_audio_buffer_seconds(),
             default_album: None,
             queue: Queue::default(),
+            file_queue: None,
             clock: amp_audio::Snapshot::default(),
             expected_sequence: 0,
             published,
@@ -366,6 +402,16 @@ impl Worker {
         self.poll();
     }
     fn command(&mut self, command: Command) {
+        if matches!(
+            &command,
+            Command::Album(..)
+                | Command::Track(..)
+                | Command::List(..)
+                | Command::ReplaceQueue(..)
+                | Command::ClearQueue
+        ) {
+            self.cancel_file_queue();
+        }
         let result = match command {
             Command::Resolver(resolver) => {
                 if self.engine.is_some() {
@@ -390,6 +436,39 @@ impl Worker {
             Command::List(tracks) => {
                 let len = tracks.len();
                 self.replace(tracks, 0, len)
+            }
+            Command::ReplaceQueue(tracks) => self.replace(tracks, 0, 1),
+            Command::FileDiscovery(session, cancelled) => {
+                self.cancel_file_queue();
+                if !cancelled.load(Ordering::Relaxed) {
+                    self.file_queue = Some((session, cancelled));
+                }
+                Ok(())
+            }
+            Command::FileQueue(track, cancelled) => self.start_file_queue(track, cancelled),
+            Command::FileQueueFinished(session) => {
+                if self
+                    .file_queue
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == session)
+                {
+                    self.file_queue.take();
+                }
+                Ok(())
+            }
+            Command::FileQueueAppend(session, tracks) => {
+                if self
+                    .file_queue
+                    .as_ref()
+                    .is_some_and(|(id, stop)| *id == session && !stop.load(Ordering::Relaxed))
+                {
+                    if let Some(engine) = &self.engine {
+                        self.queue.sequence.extend(tracks.iter().cloned());
+                        engine.append_stream(tracks);
+                        self.queue_dirty = true;
+                    }
+                }
+                Ok(())
             }
             Command::Enqueue(track) => {
                 if let Some(engine) = &self.engine {
@@ -524,6 +603,30 @@ impl Worker {
         self.clock = update.clock;
         self.queue.sequence = update.tracks;
         self.queue_dirty = true;
+    }
+    fn cancel_file_queue(&mut self) {
+        if let Some((_, stop)) = self.file_queue.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+    fn start_file_queue(&mut self, track: Track, cancelled: Arc<AtomicBool>) -> Result<()> {
+        if cancelled.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let session = track.id.library.clone();
+        if !self
+            .file_queue
+            .as_ref()
+            .is_some_and(|(id, stop)| *id == session && Arc::ptr_eq(stop, &cancelled))
+        {
+            self.cancel_file_queue();
+        }
+        if let Err(error) = self.replace(vec![track], 0, 1) {
+            cancelled.store(true, Ordering::Relaxed);
+            return Err(error);
+        }
+        self.file_queue = Some((session, cancelled));
+        Ok(())
     }
     fn play_track(&mut self, track: Track) -> Result<()> {
         if self.engine.is_none() {

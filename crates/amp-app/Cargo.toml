@@ -9,6 +9,7 @@ amp-core.workspace = true
 amp-library.workspace = true
 amp-audio.workspace = true
 anyhow.workspace = true
+natord = "1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -869,3 +869,29 @@ fn system_pause_is_visible_while_network_read_is_blocked_and_never_auto_resumes(
     assert!(!harness.player.snapshot().playing);
     assert_eq!(harness.devices.lock().unwrap().sessions.len(), 1);
 }
+
+#[test]
+fn progressive_append_resumes_natural_exhaustion_but_never_explicit_pause() {
+    let (_dir, track) = tests::fixture(44_100, 100);
+    let harness = Harness::with_policy(Some(Device::new("first", 44_100)), None, false);
+    harness.player.play(vec![track.clone()], 0);
+    let session = harness.session(0);
+    session.wait_frames(100);
+    session.render(100);
+    wait(|| !harness.player.snapshot().playing);
+    harness.player.append_stream(vec![track.clone()]);
+    wait(|| harness.player.snapshot().playing);
+    session.wait_frames(100);
+    session.render(100);
+    wait(|| !harness.player.snapshot().playing);
+    harness.player.set_playing(false);
+    // Queue command ordering is fenced by the next append: a deliberate Pause
+    // while waiting for files must prevent a later discovery from resuming audio.
+    let tracks = vec![track.clone(); 3];
+    harness.player.append_stream(vec![track]);
+    let update = harness
+        .player
+        .edit_queue(Box::new(move |_| (tracks, None)))
+        .unwrap();
+    assert!(!update.clock.playing);
+}

@@ -221,13 +221,7 @@ impl FilesystemProvider {
             BTreeMap::new();
         let audio_paths: Vec<_> = paths
             .iter()
-            .filter(|path| {
-                !claimed.contains(*path)
-                    && matches!(
-                        extension(path).as_str(),
-                        "flac" | "mp3" | "wav" | "aiff" | "aif" | "ogg" | "m4a" | "aac" | "opus"
-                    )
-            })
+            .filter(|path| !claimed.contains(*path) && is_supported_audio_file(path))
             .collect();
         completed = total - audio_paths.len();
         // Four readers hide network latency without flooding a NAS with open files.
@@ -391,6 +385,19 @@ fn merge_album_fragments(fragments: Vec<AlbumFragment>) -> Vec<AlbumFragment> {
         }
     }
     groups.into_values().flatten().collect()
+}
+
+/// Standalone formats shared by library scanning and transient file playback.
+pub fn is_supported_audio_file(path: &Path) -> bool {
+    matches!(
+        extension(path).as_str(),
+        "flac" | "mp3" | "wav" | "aiff" | "aif" | "ogg" | "m4a" | "aac" | "opus"
+    )
+}
+
+/// Read local tags without opening a store or enriching/saving library metadata.
+pub fn local_file_track(path: &Path, session: &str) -> Result<Track> {
+    tagged_track(path, session).map(|(_, _, _, track)| track)
 }
 
 fn extension(path: &Path) -> String {
@@ -1091,5 +1098,37 @@ mod tests {
         assert!(library.albums.is_empty());
         assert_eq!(library.warnings.len(), 1);
         assert!(library.warnings[0].contains("missing .state"));
+    }
+}
+
+#[cfg(test)]
+mod transient_file_tests {
+    use super::*;
+    #[test]
+    fn local_track_uses_filename_without_creating_library_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("A song.WAV");
+        let mut wav = hound::WavWriter::create(
+            &path,
+            hound::WavSpec {
+                channels: 2,
+                sample_rate: 44100,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .unwrap();
+        wav.write_sample(0i16).unwrap();
+        wav.write_sample(0i16).unwrap();
+        wav.finalize().unwrap();
+        assert!(is_supported_audio_file(&path));
+        let track = local_file_track(&path, "drop:unique").unwrap();
+        assert_eq!(track.title, "A song");
+        assert_eq!(track.artist, "Unknown artist");
+        assert_eq!(track.id.library, "drop:unique");
+        assert!(
+            matches!(track.access, MediaAccess::File { locator } if locator == path.to_str().unwrap())
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

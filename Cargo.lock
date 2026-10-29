@@ -196,6 +196,7 @@ dependencies = [
  "amp-core",
  "amp-library",
  "anyhow",
+ "natord",
  "tempfile",
 ]
 
@@ -6494,6 +6495,7 @@ dependencies = [
  "const-field-offset",
  "i-slint-backend-linuxkms",
  "i-slint-backend-selector",
+ "i-slint-backend-winit",
  "i-slint-common",
  "i-slint-core",
  "i-slint-core-macros",
@@ -7543,6 +7545,7 @@ dependencies = [
  "amp-ui",
  "anyhow",
  "directories",
+ "i-slint-backend-testing",
  "raw-window-handle",
  "rfd",
  "slint",

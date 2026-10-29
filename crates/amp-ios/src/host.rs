@@ -164,6 +164,7 @@ pub fn run() -> anyhow::Result<()> {
         // Collector streaming/downloads are the initial mobile source. External
         // folders need a document picker and security-scoped access, not raw paths.
         folder_picker: None,
+        file_drop: None,
         media_controls,
         playback: service.playback(),
         catalog: catalog.catalog(),

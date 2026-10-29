@@ -51,6 +51,23 @@ local source. Existing single-library caches migrate automatically.
 
 The initial build downloads Slint/Skia dependencies and can take several minutes. A Rust toolchain and macOS Xcode command-line tools are required. The lockfile pins the development dependency set. Other targets have not yet been validated.
 
+## Drop files to play
+
+On desktop, drop music files or folders anywhere on the player to make a temporary
+playlist. Folders are searched recursively, filtering unsupported files as they
+are encountered. Dropped items keep their supplied order; folder contents use
+natural path order (2 before 10). Playlist files and disc-image packages are skipped.
+
+The first discovered track replaces the current queue and starts playing while
+more files are found and added to **Up next**. A nonmodal progress strip shows
+counts and offers **Cancel**; playback controls and library browsing remain
+available. Cancelling stops discovery and keeps tracks already added. Choosing
+different music or clearing Up next also stops discovery, so late results cannot
+refill or change the replacement queue. If no usable files are found, existing
+playback is preserved. Missing or unreadable files are skipped. Files are played
+directly, without copying them or adding them to a library; the playlist lasts
+only for this session.
+
 ## Current development slice
 
 - Size-adaptive album/track browsing, compact transport, a playback level meter, and reduced-motion preference.

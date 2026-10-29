@@ -9,6 +9,7 @@ export { BrowserRow }
 import { TrackItem, TrackRow } from "track-item.slint";
 export { TrackRow }
 import { TransportSeek } from "transport-seek.slint";
+import { FileLoadingStatus } from "file-loading-status.slint";
 import { ErrorDialog } from "error-dialog.slint";
 import { ConnectionIndicator, ConnectionKind } from "connection-indicator.slint";
 export { ConnectionKind }
@@ -19,6 +20,12 @@ export component PlayerWindow inherits Window {
         if root.error-message != "" { error-dialog.take-focus(); }
         else { keyboard.focus(); }
     }
+    in-out property <bool> loading-files;
+    in property <string> loading-message;
+    in property <string> loading-path;
+    in property <bool> drop-hovered;
+    in property <bool> adhoc-queue;
+    callback cancel-file-load();
     in property <ConnectionKind> connection-kind;
     icon: @image-url("../../../assets/macos/trash-amp.png");
     in property <[string]> sources;
@@ -441,12 +448,12 @@ export component PlayerWindow inherits Window {
                 HorizontalLayout {
                     spacing: 8px;
                     if !root.wide || root.can-back: IconButton { label: "Back"; icon: @image-url("icons/back.svg"); clicked => { root.back(); keyboard.focus(); } }
-                    Image { source: root.album-art; width: root.wide ? 64px : 48px; height: self.width; image-fit: contain; }
-                    Text { text: root.album-title; color: Theme.text; font-size: (root.wide ? 27px : 22px) * root.text-scale; font-weight: 600; wrap: word-wrap; }
+                    if !(root.show-queue && root.adhoc-queue && !root.artist-view): Image { source: root.album-art; width: root.wide ? 64px : 48px; height: self.width; image-fit: contain; }
+                    Text { horizontal-stretch: 1; text: root.show-queue && root.adhoc-queue && !root.artist-view ? "Ad hoc playlist" : root.album-title; color: Theme.text; font-size: (root.wide ? 27px : 22px) * root.text-scale; font-weight: 600; wrap: root.show-queue && root.adhoc-queue && !root.artist-view ? TextWrap.no-wrap : TextWrap.word-wrap; }
                     if root.artist-view && !root.wide: IconButton { label: "Home"; icon: @image-url("icons/home.svg"); clicked => { root.home = true; keyboard.focus(); } }
                 }
                 if root.artist-view: Text { text: root.album-artist; color: Theme.muted; wrap: word-wrap; }
-                if !root.artist-view: artist-link := FocusScope {
+                if !root.artist-view && !(root.show-queue && root.adhoc-queue && !root.artist-view): artist-link := FocusScope {
                     enabled: root.tracks.length > 0;
                     height: 24px * root.text-scale;
                     accessible-role: button; accessible-label: "Artist: " + root.album-artist;
@@ -468,8 +475,8 @@ export component PlayerWindow inherits Window {
                         artist(name) => { root.open-artist(name); keyboard.focus(); }
                     }
                 }
-                if !root.artist-view && root.collector-active: ComboBox { model: root.album-sources; current-index <=> root.album-source-index; selected(_) => { root.album-source-selected(self.current-index); } }
-                if !root.artist-view: HorizontalLayout {
+                if !root.artist-view && root.collector-active && !(root.show-queue && root.adhoc-queue && !root.artist-view): ComboBox { model: root.album-sources; current-index <=> root.album-source-index; selected(_) => { root.album-source-selected(self.current-index); } }
+                if !root.artist-view && !(root.show-queue && root.adhoc-queue && !root.artist-view): HorizontalLayout {
                     spacing: 6px; alignment: start;
                     IconButton { label: "Play album"; icon: @image-url("icons/play.svg"); enabled: root.tracks.length > 0 && !root.album-ambiguous; clicked => { root.play-track(0); } }
                     if root.collector-active: IconButton { label: "Download album"; icon: @image-url("icons/download.svg"); enabled: !root.collector-busy && root.collector-online; clicked => { root.download-action(0); } }
@@ -481,6 +488,7 @@ export component PlayerWindow inherits Window {
                 if !root.artist-view: HorizontalLayout {
                     spacing: 0px;
                     for label[i] in ["Tracks", "Up next (" + root.queued.length + ")"] : tab := FocusScope {
+                        horizontal-stretch: 1; min-width: 100px;
                         height: 34px;
                         accessible-role: AccessibleRole.tab;
                         accessible-label: label + (root.show-queue == (i == 1) ? ", selected" : "");
@@ -490,7 +498,7 @@ export component PlayerWindow inherits Window {
                             return reject;
                         }
                         accessible-action-default => { root.show-queue = i == 1; }
-                        Text { text: label; color: root.show-queue == (i == 1) ? Theme.text : Theme.muted; horizontal-alignment: center; vertical-alignment: center; }
+                        Text { width: 100%; height: 100%; text: label; color: root.show-queue == (i == 1) ? Theme.text : Theme.muted; horizontal-alignment: center; vertical-alignment: center; }
                         Rectangle { y: parent.height - 2px; height: 2px; width: 100%; background: root.show-queue == (i == 1) ? Theme.accent : Theme.hover; }
                         TouchArea { clicked => { root.show-queue = i == 1; tab.focus(); } }
                     }
@@ -515,6 +523,10 @@ export component PlayerWindow inherits Window {
                     }
                 }
             }
+        }
+        if root.loading-files: FileLoadingStatus {
+            message: root.loading-message; path: root.loading-path; compact: root.short;
+            cancelled => { root.cancel-file-load(); }
         }
         Rectangle {
             height: 104px * root.text-scale;
@@ -561,6 +573,14 @@ export component PlayerWindow inherits Window {
         }
 
     }
+    }
+    if root.drop-hovered && !root.loading-files: Rectangle {
+        background: #0009; border-width: 3px; border-color: Theme.accent;
+        Text {
+            text: "Drop music files or folders to play"; color: Theme.text;
+            horizontal-alignment: center; vertical-alignment: center; wrap: word-wrap;
+            font-size: 24px;
+        }
     }
     error-dialog := ErrorDialog {
         visible: root.error-message != "";

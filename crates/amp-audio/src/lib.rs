@@ -129,7 +129,7 @@ enum Command {
     SetPlaying(bool),
     Next,
     Previous,
-    Append(Vec<Track>),
+    Append(Vec<Track>, bool),
     Truncate(usize),
 }
 /// Adapter invoked only on the decoder worker, never in the device callback.
@@ -233,8 +233,12 @@ impl Player {
             let _ = self.commands.send(Command::Previous);
         }
     }
+    /// Continue a progressively discovered queue after natural exhaustion, preserving pause.
+    pub fn append_stream(&self, tracks: Vec<Track>) {
+        let _ = self.commands.send(Command::Append(tracks, true));
+    }
     pub fn append(&self, tracks: Vec<Track>) {
-        let _ = self.commands.send(Command::Append(tracks));
+        let _ = self.commands.send(Command::Append(tracks, false));
     }
     pub fn truncate(&self, len: usize) {
         let _ = self.commands.send(Command::Truncate(len));

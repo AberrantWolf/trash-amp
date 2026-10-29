@@ -27,6 +27,7 @@ pub struct AppConfig {
     pub collector: Arc<amp_collector::Adapter>,
     pub args: Vec<String>,
     pub folder_picker: Option<FolderPicker>,
+    pub file_drop: Option<FileDropInstaller>,
     pub media_controls: MediaControlsFactory,
     pub open_url: UrlOpener,
     pub playback: Playback,
@@ -44,9 +45,19 @@ pub type MediaControlsFactory = fn(&slint::Window, Playback) -> Result<MediaSess
 pub type UrlOpened = Box<dyn FnOnce(Result<(), String>) + Send>;
 pub type UrlOpener = fn(&str, UrlOpened);
 
+/// File drops are supplied by a desktop host; shared UI stays backend-independent.
+pub enum FileDropEvent {
+    Hover(bool),
+    Files(Vec<PathBuf>),
+}
+/// Return whether the window is currently accepting drops, including on hover events.
+pub type FileDropCallback = Rc<dyn Fn(FileDropEvent) -> bool>;
+pub type FileDropInstaller = fn(&slint::Window, FileDropCallback);
+
 mod artwork;
 mod browse;
 mod collector;
+mod files;
 struct State {
     playback: Playback,
     artwork: std::collections::BTreeMap<String, String>,
@@ -181,9 +192,11 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
             albums(ui, state);
         } else if changed_selected && let Some(index) = state.selected {
             let showing_library = ui.get_show_library();
+            let showing_queue = ui.get_show_queue();
             let track = ui.get_selected_track();
             select(ui, state, index);
             ui.set_show_library(showing_library);
+            ui.set_show_queue(showing_queue);
             ui.set_selected_track(track);
         }
         browse::rebuild(ui, state, replacement);
@@ -292,6 +305,12 @@ fn start(ui: &PlayerWindow, state: &mut State, index: usize) {
 /// transport commands, queue progression or native media metadata publication.
 fn render_playback(ui: &PlayerWindow, state: &State, last_notice: &mut u64) {
     let snapshot = state.playback.snapshot();
+    ui.set_adhoc_queue(
+        snapshot
+            .current
+            .as_ref()
+            .is_some_and(|t| t.id.library.starts_with("drop:")),
+    );
     let upcoming = snapshot
         .up_next
         .iter()
@@ -342,6 +361,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
         args,
         collector,
         folder_picker,
+        file_drop,
         media_controls,
         open_url,
         playback,
@@ -556,6 +576,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
             }
         });
     }
+    let file_load = files::Controller::new(&ui, state.clone(), file_drop);
     let mut last_notice = 0;
     let mut last_catalog_notice = 0;
     let timer = slint::Timer::default();
@@ -570,6 +591,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
                 let size = ui.window().size().to_logical(ui.window().scale_factor());
                 ui.set_wide(size.width > 720.0 * ui.get_text_scale());
                 ui.set_short(size.height < 420.0 * ui.get_text_scale());
+                file_load.poll();
                 collector.poll();
                 let mut s = state.borrow_mut();
                 browse::poll(&ui, &mut s);
@@ -773,6 +795,85 @@ mod tests {
             out property <color> text: Theme.text;
             out property <color> selection: Theme.selection;
         }
+    }
+    #[test]
+    fn catalog_metadata_refresh_keeps_up_next_open() {
+        struct MetadataBackend;
+        impl amp_app::catalog::Backend for MetadataBackend {
+            fn scan(
+                &self,
+                _: PathBuf,
+                _: Preferences,
+                _: &dyn Fn() -> bool,
+                _: &mut dyn FnMut(amp_library::ScanProgress),
+            ) -> anyhow::Result<Library> {
+                unreachable!("This test only requests metadata enrichment")
+            }
+            fn enrich(
+                &self,
+                library: &mut Library,
+                _: &Store,
+                _: &dyn Fn() -> bool,
+                _: &dyn Fn() -> bool,
+                update: &mut dyn FnMut(&amp_core::Album),
+            ) -> anyhow::Result<()> {
+                library.albums[0].title = "Enriched title".into();
+                library.albums[0].tracks[0].title = "Enriched track".into();
+                update(&library.albums[0]);
+                Ok(())
+            }
+        }
+        i_slint_backend_testing::init_no_event_loop();
+        let data =
+            std::env::temp_dir().join(format!("trash-queue-metadata-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&data).unwrap();
+        let cache = data.join("library.sqlite3");
+        let mut library = amp_library::demo_library();
+        library.albums.truncate(1);
+        library.id = "review-queue".into();
+        library.root = "/offline/review-queue".into();
+        Store::open(&cache).unwrap().save_library(&library).unwrap();
+        let playback = PlaybackService::new(Arc::new(|| Ok(()))).unwrap();
+        let service =
+            CatalogService::with_backend(&cache, playback.playback(), Arc::new(MetadataBackend))
+                .unwrap();
+        let catalog = service.catalog();
+        let snapshot = catalog.bootstrap_snapshot().unwrap();
+        let mut state = State {
+            playback: playback.playback(),
+            catalog: catalog.clone(),
+            library: (*snapshot.library).clone(),
+            artwork: Default::default(),
+            browser: browse::Browser::default(),
+            selected: None,
+            folders: snapshot.folders,
+            catalog_revision: snapshot.library_revision,
+            catalog_replacement: snapshot.replacement_revision,
+            preferences: snapshot.preferences,
+        };
+        let ui = PlayerWindow::new().unwrap();
+        browse::rebuild(&ui, &mut state, true);
+        select(&ui, &mut state, 0);
+        browse::show_playback_queue(&ui, &mut state);
+        assert!(ui.get_show_queue());
+        catalog.enrich_current();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut notice = 0;
+        while state.library.albums[0].title != "Enriched title" {
+            render_catalog(&ui, &mut state, &mut notice);
+            assert!(std::time::Instant::now() < deadline, "Metadata completes");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            ui.get_show_queue(),
+            "Updating the selected album must not leave Up next"
+        );
+        assert!(!ui.get_show_library());
+        assert_eq!(ui.get_album_title(), "Enriched title");
+        drop(state);
+        drop(service);
+        drop(playback);
+        std::fs::remove_dir_all(data).unwrap();
     }
     #[test]
     fn icon_button_preserves_input_accessibility_and_suppresses_touch_hints() {

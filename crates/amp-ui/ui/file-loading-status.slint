@@ -1,0 +1,21 @@
+import { Theme } from "theme.slint";
+import { Button } from "std-widgets.slint";
+
+export component FileLoadingStatus inherits Rectangle {
+    in property <string> message;
+    in property <string> path;
+    in property <bool> compact;
+    callback cancelled();
+    height: root.compact ? 44px : 68px;
+    background: Theme.raised; border-radius: 6px;
+    accessible-role: region; accessible-label: "Music discovery";
+    HorizontalLayout {
+        padding: 8px; spacing: 12px;
+        VerticalLayout {
+            horizontal-stretch: 1; min-width: 0px;
+            Text { text: root.message; color: Theme.text; overflow: elide; accessible-live-region: polite; }
+            if !root.compact: Text { text: root.path; color: Theme.muted; overflow: elide; }
+        }
+        Button { text: "Cancel"; accessible-label: "Stop finding music"; clicked => { root.cancelled(); } }
+    }
+}

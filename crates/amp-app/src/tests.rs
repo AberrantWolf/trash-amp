@@ -607,3 +607,139 @@ fn saved_buffer_is_bounded_and_reaches_engine_before_playback() {
         assert_eq!(*received.lock().unwrap(), Some(expected));
     }
 }
+
+#[test]
+fn dropped_playlist_replaces_pending_tracks_and_ignores_catalog_name_updates() {
+    let (service, fake) = setup();
+    let p = service.playback();
+    p.play_list(vec![track("old")]);
+    p.enqueue(track("pending"));
+    let mut dropped = track("local");
+    dropped.id.library = "drop:session".into();
+    dropped.title = "Local title".into();
+    p.replace_queue(vec![dropped.clone(), track("second")]);
+    let state = settle(&p);
+    assert_eq!(state.current.unwrap().id, dropped.id);
+    assert_eq!(ids(&state.up_next), ["second"]);
+    assert!(state.playing);
+    let mut catalog_track = dropped.clone();
+    catalog_track.id.library = "catalog".into();
+    catalog_track.title = "Catalog title".into();
+    p.refresh_catalog_metadata(
+        Arc::new(Library {
+            id: "catalog".into(),
+            albums: vec![Album {
+                id: catalog_track.id.clone(),
+                title: "Album".into(),
+                artist: "Artist".into(),
+                tracks: vec![catalog_track],
+                source_label: String::new(),
+            }],
+            ..Default::default()
+        }),
+        Arc::default(),
+    );
+    assert_eq!(settle(&p).current.unwrap().title, "Local title");
+    assert_eq!(ids(&fake.lock().unwrap().tracks), ["local", "second"]);
+}
+
+#[test]
+fn clearing_dropped_queue_keeps_current_track_and_removes_remainder() {
+    let (service, fake) = setup();
+    let p = service.playback();
+    p.replace_queue(vec![track("first"), track("second"), track("third")]);
+    assert_eq!(ids(&settle(&p).up_next), ["second", "third"]);
+    p.transport(Transport::Next);
+    assert_eq!(settle(&p).current.unwrap().id.item, "second");
+    assert_eq!(ids(&settle(&p).up_next), ["third"]);
+    p.clear_queue();
+    let state = settle(&p);
+    assert_eq!(state.current.unwrap().id.item, "second");
+    assert!(state.up_next.is_empty());
+    assert_eq!(ids(&fake.lock().unwrap().tracks), ["first", "second"]);
+    // An empty replacement must preserve the current queue too.
+    p.replace_queue(vec![]);
+    assert_eq!(settle(&p).current.unwrap().id.item, "second");
+}
+
+#[test]
+fn progressive_queue_appends_preserve_pause_and_navigation() {
+    let (service, fake) = setup();
+    let p = service.playback();
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut first = track("first");
+    first.id.library = "drop:stream".into();
+    p.begin_file_discovery("drop:stream".into(), stop.clone());
+    p.start_file_queue(first, stop.clone());
+    assert_eq!(settle(&p).current.unwrap().id.item, "first");
+    p.transport(Transport::Pause);
+    p.transport(Transport::Seek(23.));
+    settle(&p);
+    p.append_file_queue("drop:stream".into(), vec![track("second"), track("third")]);
+    let state = settle(&p);
+    assert!(!state.playing);
+    assert_eq!(state.seconds, 23.);
+    assert_eq!(ids(&state.up_next), ["second", "third"]);
+    p.transport(Transport::Next);
+    assert_eq!(settle(&p).current.unwrap().id.item, "second");
+    assert!(!settle(&p).playing);
+    p.finish_file_queue("drop:stream".into());
+    assert_eq!(ids(&settle(&p).up_next), ["third"]);
+    assert!(
+        !stop.load(Ordering::Relaxed),
+        "Finishing must not invalidate accepted commands"
+    );
+    assert_eq!(fake.lock().unwrap().replacements, 1);
+}
+#[test]
+fn cancelling_discovery_preserves_accepted_tracks_and_rejects_late_commands() {
+    let (service, _) = setup();
+    let p = service.playback();
+    let stop = Arc::new(AtomicBool::new(false));
+    let first = track("first");
+    p.start_file_queue(first, stop.clone());
+    settle(&p);
+    p.append_file_queue("test".into(), vec![track("second")]);
+    settle(&p);
+    stop.store(true, Ordering::Relaxed);
+    p.append_file_queue("test".into(), vec![track("late")]);
+    assert_eq!(ids(&settle(&p).up_next), ["second"]);
+    let cancelled = Arc::new(AtomicBool::new(true));
+    p.start_file_queue(track("never"), cancelled);
+    assert_eq!(settle(&p).current.unwrap().id.item, "first");
+}
+#[test]
+fn replacing_or_clearing_a_progressive_queue_cancels_discovery() {
+    let (service, _) = setup();
+    let p = service.playback();
+    for clear in [false, true] {
+        let stop = Arc::new(AtomicBool::new(false));
+        p.start_file_queue(track("first"), stop.clone());
+        settle(&p);
+        if clear {
+            p.clear_queue();
+        } else {
+            p.play_album(vec![track("replacement")], 0);
+        }
+        settle(&p);
+        assert!(stop.load(Ordering::Relaxed));
+        p.append_file_queue("test".into(), vec![track("late")]);
+        assert!(settle(&p).up_next.is_empty());
+        assert_eq!(
+            settle(&p).current.unwrap().id.item,
+            if clear { "first" } else { "replacement" }
+        );
+    }
+}
+
+#[test]
+fn choosing_music_before_first_discovery_prevents_a_late_start() {
+    let (service, _) = setup();
+    let p = service.playback();
+    let stop = Arc::new(AtomicBool::new(false));
+    p.begin_file_discovery("test".into(), stop.clone());
+    p.play_album(vec![track("chosen")], 0);
+    p.start_file_queue(track("late-first"), stop.clone());
+    assert_eq!(settle(&p).current.unwrap().id.item, "chosen");
+    assert!(stop.load(Ordering::Relaxed));
+}

@@ -207,6 +207,7 @@ fn render_browser(ui: &PlayerWindow, s: &mut State) {
 }
 fn render_artist(ui: &PlayerWindow, s: &mut State, name: &str) {
     let page = s.browser.index.artist(name);
+    ui.set_show_queue(false);
     ui.set_artist_view(true);
     ui.set_album_title(name.into());
     ui.set_album_artist(
@@ -253,6 +254,24 @@ fn location(ui: &PlayerWindow, s: &State) -> Location {
 fn push(ui: &PlayerWindow, s: &mut State) {
     s.browser.history.push(location(ui, s));
     ui.set_can_back(true);
+}
+/// Queue navigation records the complete detail context, including artist pages.
+pub(super) fn show_playback_queue(ui: &PlayerWindow, s: &mut State) {
+    push(ui, s);
+    s.browser.detail = None;
+    if let Some(index) = s.selected {
+        select(ui, s, index);
+    } else {
+        albums(ui, s);
+    }
+    ui.set_home(false);
+    ui.set_settings(false);
+    ui.set_lists_open(false);
+    ui.set_artist_view(false);
+    ui.set_show_library(false);
+    ui.set_show_queue(true);
+    ui.set_adhoc_queue(true);
+    render_browser(ui, s);
 }
 fn show_target(ui: &PlayerWindow, s: &mut State, target: &Target) {
     match target {
@@ -627,6 +646,30 @@ mod tests {
         ui.set_search_text(query.into());
         s.browser.results = s.browser.index.search(query);
         render_browser(ui, s);
+    }
+    #[test]
+    fn progressive_queue_navigation_restores_artist_and_allows_reopening_it() {
+        let (ui, state, path, _service) = setup("stream-artist");
+        ui.invoke_open_artist("Layout fixture".into());
+        assert!(ui.get_artist_view());
+        show_playback_queue(&ui, &mut state.borrow_mut());
+        assert!(!ui.get_artist_view());
+        assert!(ui.get_show_queue());
+        assert!(state.borrow().browser.detail.is_none());
+        rebuild(&ui, &mut state.borrow_mut(), false);
+        assert!(
+            !ui.get_artist_view(),
+            "Metadata refresh must not hide the queue"
+        );
+        ui.invoke_back();
+        assert!(ui.get_artist_view());
+        assert!(!ui.get_show_queue());
+        show_playback_queue(&ui, &mut state.borrow_mut());
+        ui.invoke_open_artist("Layout fixture".into());
+        assert!(ui.get_artist_view());
+        assert!(!ui.get_show_queue());
+        drop(state);
+        let _ = std::fs::remove_file(path);
     }
     #[test]
     fn previews_show_all_and_back_restore_search() {

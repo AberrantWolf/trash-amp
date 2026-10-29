@@ -10,7 +10,7 @@ amp-ui.workspace = true
 amp-app.workspace = true
 amp-media.workspace = true
 anyhow.workspace = true
-slint.workspace = true
+slint = { workspace = true, features = ["unstable-winit-030"] }
 souvlaki.workspace = true
 rfd = "0.17"
 directories = "6"
@@ -18,3 +18,6 @@ webbrowser = "1"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 raw-window-handle = "0.6"
+
+[dev-dependencies]
+i-slint-backend-testing = "=1.18.1"

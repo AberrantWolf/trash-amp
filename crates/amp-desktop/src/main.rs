@@ -32,6 +32,8 @@ fn media_controls(
     .map(|session| Box::new(session) as amp_ui::MediaSessionGuard)
 }
 
+mod drops;
+
 fn main() -> anyhow::Result<()> {
     let data_dir = std::env::var_os("TRASH_AMP_DATA_DIR")
         .map(PathBuf::from)
@@ -64,6 +66,7 @@ fn main() -> anyhow::Result<()> {
                 selected(path);
             }
         })),
+        file_drop: Some(drops::install),
         media_controls,
         playback: service.playback(),
         catalog: catalog.catalog(),

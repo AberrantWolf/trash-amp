@@ -26,6 +26,7 @@ pub(super) fn run<B: Backend>(
     let mut generation = 0;
     let mut pending = None;
     let mut exhausted = true;
+    let mut resume_on_append = false;
     let mut queued_command = None;
     // Mirror at most one device buffer on the decoder worker. Keeping the last
     // capacity frames always includes every frame still pending in the ring,
@@ -51,6 +52,7 @@ pub(super) fn run<B: Backend>(
                 || changed
         });
         if lost {
+            resume_on_append = false;
             shared.playing.store(false, Ordering::Relaxed);
             if let Some(current) = output.take() {
                 current.health.failed.store(true, Ordering::Release);
@@ -135,6 +137,9 @@ pub(super) fn run<B: Backend>(
             let mut reset = true;
             let mut replaced = None;
             let mut edited = None;
+            if !matches!(&command, Command::Append(..)) {
+                resume_on_append = false;
+            }
             match command {
                 Command::Shutdown => return,
                 Command::Edit(edit, sequence, reply) => {
@@ -263,11 +268,15 @@ pub(super) fn run<B: Backend>(
                         index = tracks.len();
                     }
                 }
-                Command::Append(t) => {
+                Command::Append(t, continue_stream) => {
                     tracks.extend(t);
                     reset = false;
                     if exhausted && index < tracks.len() {
                         exhausted = false;
+                        if continue_stream && resume_on_append {
+                            shared.playing.store(true, Ordering::Relaxed);
+                            resume_on_append = false;
+                        }
                     }
                 }
             }
@@ -381,7 +390,9 @@ pub(super) fn run<B: Backend>(
         }
         if exhausted || !shared.playing.load(Ordering::Relaxed) || producer.slots() == 0 {
             if exhausted && producer.slots() == producer.buffer().capacity() {
-                shared.playing.store(false, Ordering::Relaxed);
+                if shared.playing.swap(false, Ordering::Relaxed) {
+                    resume_on_append = true;
+                }
             }
             thread::sleep(Duration::from_millis(3));
             continue;
