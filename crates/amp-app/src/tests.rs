@@ -96,6 +96,7 @@ impl Drop for Fake {
 }
 fn track(name: &str) -> Track {
     Track {
+        blocked_reason: None,
         id: ItemId {
             library: "test".into(),
             provider: "test".into(),
@@ -606,4 +607,120 @@ fn saved_buffer_is_bounded_and_reaches_engine_before_playback() {
         settle(&playback);
         assert_eq!(*received.lock().unwrap(), Some(expected));
     }
+}
+
+#[test]
+fn blocked_tracks_are_filtered_without_changing_requested_start_or_explicit_queue() {
+    let (service, fake) = setup();
+    let playback = service.playback();
+    let mut blocked = track("protected");
+    blocked.blocked_reason = Some(amp_core::PlaybackBlockReason::Protected);
+    playback.enqueue(track("explicit"));
+    playback.play_album(vec![blocked.clone(), track("one"), track("two")], 2);
+    settle(&playback);
+    assert_eq!(
+        ids(&fake.lock().unwrap().tracks),
+        ["one", "two", "explicit"]
+    );
+    assert_eq!(fake.lock().unwrap().clock.track, 1);
+    playback.play_track(blocked.clone());
+    playback.enqueue(blocked.clone());
+    let snapshot = settle(&playback);
+    assert!(snapshot.notice.unwrap().message.contains("Protected"));
+    assert_eq!(
+        ids(&fake.lock().unwrap().tracks),
+        ["one", "two", "explicit"]
+    );
+    playback.play_list_from(vec![blocked.clone(), track("must-not-start")]);
+    settle(&playback);
+    assert_eq!(
+        ids(&fake.lock().unwrap().tracks),
+        ["one", "two", "explicit"]
+    );
+    playback.play_list(vec![blocked]);
+    settle(&playback);
+    assert_eq!(
+        ids(&fake.lock().unwrap().tracks),
+        ["one", "two", "explicit"]
+    );
+}
+
+#[test]
+fn album_and_idle_play_choose_first_playable_track() {
+    let (service, fake) = setup();
+    let playback = service.playback();
+    let mut blocked = track("cloud");
+    blocked.blocked_reason = Some(amp_core::PlaybackBlockReason::NotLocal);
+    playback.play_album_start(vec![blocked.clone(), track("local")]);
+    settle(&playback);
+    assert_eq!(ids(&fake.lock().unwrap().tracks), ["local"]);
+    drop(service);
+    let (service, fake) = setup();
+    let playback = service.playback();
+    playback.set_default_album(Some((vec![blocked, track("another")], false)));
+    playback.transport(Transport::Play);
+    settle(&playback);
+    assert_eq!(ids(&fake.lock().unwrap().tracks), ["another"]);
+}
+
+#[test]
+fn access_revocation_uses_audible_track_and_preserves_other_providers() {
+    let (service, fake) = setup();
+    let playback = service.playback();
+    let mut native = track("native");
+    native.id.provider = "native".into();
+    playback.play_album_start(vec![native.clone(), track("current"), native.clone()]);
+    settle(&playback);
+    {
+        let mut state = fake.lock().unwrap();
+        state.clock.track = 1;
+        state.clock.seconds = 23.0;
+    }
+    playback.revoke_provider("native".into());
+    let snapshot = settle(&playback);
+    assert_eq!(snapshot.current.unwrap().title, "current");
+    assert_eq!(snapshot.seconds, 23.0);
+    assert!(snapshot.playing);
+    assert_eq!(ids(&fake.lock().unwrap().tracks), ["native", "current"]);
+    playback.play_track(native);
+    settle(&playback);
+    playback.enqueue(track("retained"));
+    settle(&playback);
+    playback.revoke_provider("native".into());
+    let snapshot = settle(&playback);
+    assert!(snapshot.current.is_none());
+    assert!(!snapshot.playing);
+    assert_eq!(ids(&snapshot.up_next), ["retained"]);
+}
+
+#[test]
+fn idle_selection_receives_availability_updates_without_a_ui_tick() {
+    let (service, fake) = setup();
+    let playback = service.playback();
+    let original = track("idle");
+    playback.set_default_album(Some((vec![original.clone()], false)));
+    settle(&playback);
+    let mut updated = original;
+    updated.blocked_reason = Some(amp_core::PlaybackBlockReason::Protected);
+    let library = Library {
+        id: "test".into(),
+        albums: vec![Album {
+            id: ItemId {
+                library: "test".into(),
+                provider: "test".into(),
+                item: "album".into(),
+            },
+            title: "Album".into(),
+            artist: "Artist".into(),
+            tracks: vec![updated],
+            source_label: "Test".into(),
+        }],
+        ..Default::default()
+    };
+    playback.refresh_catalog_metadata(Arc::new(library), Arc::default());
+    playback.transport(Transport::Play);
+    let snapshot = settle(&playback);
+    assert!(!snapshot.playing);
+    assert!(snapshot.notice.unwrap().message.contains("No playable"));
+    assert_eq!(fake.lock().unwrap().replacements, 0);
 }

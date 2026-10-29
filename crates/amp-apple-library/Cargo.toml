@@ -1,0 +1,23 @@
+[package]
+name = "amp-apple-library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+amp-core.workspace = true
+amp-audio.workspace = true
+amp-app.workspace = true
+anyhow.workspace = true
+sha2 = "0.10"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSString", "NSURL", "NSError", "NSValue", "NSDictionary", "NSData", "NSNotification", "NSDistributedNotificationCenter", "NSOperation", "NSObject", "block2"] }
+
+[dev-dependencies]
+hound = "3"
+tempfile = "3"

@@ -58,15 +58,27 @@ Playing observers should schedule work and return promptly.
 
 ## Catalog completion and persistence
 
+The catalog owner also owns registered source selection, startup restoration,
+cache/live loads, access status and refresh. Hosts supply providers through
+`amp-app::sources`; Slint sends commands and projects immutable snapshots.
+Collector source jobs and Apple library jobs use the same generation and
+selection-persistence boundary. See [Device Music Library](device-music-library.md).
+Provider resolvers are registered in the launcher before playback starts, and
+can return encoded bytes or decoded PCM without selecting another engine.
+
+
 The launcher also owns `CatalogService`. Its worker holds the live local SQLite
 connection. Folder scans and metadata lookups run on separate job threads, so
 slow files or network requests do not block catalog commands or playback.
 The UI reads immutable catalog snapshots and renders progress and notices.
 It does not acknowledge completion to make a job finish or persist its results.
 
-A shared generation scope covers local and external source operations. New
-requests cancel obsolete jobs immediately. The owner rejects stale scan results,
-metadata patches and provider completions before they can replace the catalog.
+A shared generation scope covers local and external source selection operations.
+New selections cancel obsolete jobs immediately. Per-load request tickets fence
+automatic refreshes within a selection generation; notifications during a load
+coalesce into another refresh. These refreshes do not cancel concurrent enrollment
+or list mutations. The owner rejects stale scan results, metadata patches and
+provider completions before they can replace the catalog.
 Local and external catalog sources remain distinct. An opaque provider catalog
 is never persisted as a filesystem folder just because it has a nonempty root.
 
@@ -91,7 +103,8 @@ Preference writes are serialized by the catalog worker. Disabling network
 metadata updates its cancellation flag immediately, even if a database operation
 is still pending. Catalog replacements refresh names in the playback service
 without changing media references or queue order. Source changes clear idle-play
-selection from the previous catalog. Existing active playback continues.
+selection from the previous catalog. Same-source updates replace idle selection
+eligibility by item identity. Existing active playback continues.
 
 Startup loads an initial snapshot before a window is shown. After startup,
 presentation callbacks send asynchronous commands. Shutdown cancels outstanding

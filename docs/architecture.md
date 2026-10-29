@@ -10,6 +10,7 @@ Slint is the initial custom UI, using Skia. Layout follows available width, heig
 - `amp-library`: filesystem enumeration, tags, CD structure and local cache. Introduce additional providers here without requiring every source to have a path. UI adapters should eventually consume paged queries and incremental updates.
 - `amp-audio`: playback commands, stream preparation, decoding, seeking, format conversion and output. Bounded sample buffering isolates the audio callback. Device lifecycle will become a separate output adapter; CPAL is the first implementation.
 - `amp-app`: window-independent playback and catalog services. Owns playback orchestration, scan/metadata completion, source-generation checks, catalog selection and persistence. Exposes asynchronous commands and presentation snapshots.
+- `amp-apple-library`: Apple music-library enumeration, authorization, artwork and opaque asset/file access. Native frameworks stay inside this adapter.
 - `amp-media`: native media-session adapter. Routes system commands to `amp-app` and dispatches coalesced metadata updates through a host-supplied executor. No Slint dependency.
 - `amp-ui`: shared Slint UI and presentation adapter. Reads playback/catalog snapshots and sends commands. Navigation, search presentation and Collector view projection use its presentation loop; they do not commit catalog or preference changes.
 - `trash-amp`: desktop launcher and native desktop capabilities.
@@ -27,7 +28,7 @@ For DLNA: discovery produces providers, ContentDirectory browsing produces album
 
 ## Apple and Android
 
-Apple native library enumeration and asset access require user authorization and native frameworks. Available unprotected assets can use AVFoundation-backed access where needed. Subscription content uses platform-managed playback; PCM effects and visualization cannot be assumed. A shared playback controller must reconcile native playback events with transport state and capabilities. Crossing between managed and PCM backends does not carry a gapless guarantee.
+Device Music Library is a registered read-only source on Mac, iOS and iPadOS. See [implementation and qualification](device-music-library.md). Apple native library enumeration and asset access require user authorization and native frameworks. Available unprotected assets can use AVFoundation-backed access where needed. Subscription content uses platform-managed playback; PCM effects and visualization cannot be assumed. A shared playback controller must reconcile native playback events with transport state and capabilities. Crossing between managed and PCM backends does not carry a gapless guarantee.
 
 Android uses MediaStore/content URIs and a native media service. Background playback must not depend on an Activity or Slint window. Media3 can expose shared browsing/transport through a Player adapter and MediaLibraryService.
 
@@ -43,7 +44,7 @@ Bit-perfect output is a future goal, not the initial contract. Output uses the d
 
 ## Catalog and metadata
 
-One folder library is active at a time. Each canonical folder path has its own catalog in `folder_libraries`, and `state.active_folder` records the last selected folder. Legacy `state.library` snapshots migrate transactionally on open. Selecting a saved folder loads its catalog without filesystem access; explicit refresh rescans it. Failed scans preserve the saved catalog. Cache stays on local storage; source media is read-only.
+One browsing source is active at a time; the catalog owner persists its stable source ID independently of UI/provider presentation. Provider media resolvers remain registered for the lifetime of playback, so queued items survive browsing-source changes. One folder library is active at a time. Each canonical folder path has its own catalog in `folder_libraries`, and `state.active_folder` records the last selected folder. Legacy `state.library` snapshots migrate transactionally on open. Selecting a saved folder loads its catalog without filesystem access; explicit refresh rescans it. Failed scans preserve the saved catalog. Cache stays on local storage; source media is read-only.
 
 Current grouping first gathers tracks by folder, tagged album title and explicit album artist (never by individual track artist). It then merges same-title tagged fragments across folders when their explicit album artists do not conflict and their disc/track slots do not overlap. Missing track numbers fall back to track-title conflicts. Mixed track artists display as Various artists unless an album artist is specified. Untagged folder names alone do not justify cross-folder merging. This deliberately permits title-based fallback for artist-first collections, with some ambiguity when unrelated albums lack identifying tags. Tracks sort by disc/track. Refreshing a folder rescans with this rule; reopening a saved folder retains its cached grouping until refreshed.
 

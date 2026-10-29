@@ -1,4 +1,7 @@
 //! Collector transport, local persistence and media access. No UI dependencies.
+mod source;
+pub use source::source_id;
+
 use amp_core::{Album, ItemId, Library, MediaAccess, Track};
 use anyhow::{Context, Result, bail};
 pub use collector_client::{
@@ -129,6 +132,7 @@ pub struct Adapter {
     db: Mutex<Connection>,
     media: Mutex<Vec<(ConnectionKey, MediaCancellation)>>,
     downloads_cancel: AtomicBool,
+    source_observer: Mutex<Option<amp_app::sources::SourceObserver>>,
     download_token: Mutex<Option<MediaCancellation>>,
 }
 fn connection_id(key: ConnectionKey) -> String {
@@ -173,6 +177,7 @@ impl Adapter {
             db: Mutex::new(db),
             media: Mutex::new(vec![]),
             downloads_cancel: AtomicBool::new(false),
+            source_observer: Mutex::new(None),
             download_token: Mutex::new(None),
         }))
     }
@@ -269,7 +274,9 @@ impl Adapter {
             .context("Unknown connection")?;
         c.removed = true;
         c.name = format!("{} (offline)", c.name);
-        self.put("connection", &connection_id(key), &c)
+        self.put("connection", &connection_id(key), &c)?;
+        self.notify_availability(key);
+        Ok(())
     }
     pub fn client(&self, key: ConnectionKey) -> Result<EnrolledClient> {
         Ok(EnrolledClient::from_storage(self.secrets.as_ref(), key)?)
@@ -578,7 +585,11 @@ impl Adapter {
         let entry = list.entries.items.get(index)?;
         let item = entry.item_id?;
         if let Some(audio) = &entry.audio {
-            Some(remote_track(key, item, list.list.collection_id, "", audio))
+            let mut track = remote_track(key, item, list.list.collection_id, "", audio);
+            if self.downloaded(&track) {
+                track.availability = amp_core::Availability::Downloaded;
+            }
+            Some(track)
         } else if let Some(ids::ListTarget::MusicTrack {
             capture_id,
             source_representation_id,
@@ -909,7 +920,9 @@ impl Adapter {
                 return Err(e);
             }
         }
-        self.put("download", &id, &record)
+        self.put("download", &id, &record)?;
+        self.notify_availability(remote.key);
+        Ok(())
     }
     pub fn remove_download(&self, track: &Track) -> Result<()> {
         let remote = parse_remote(track)?;
@@ -932,6 +945,7 @@ impl Adapter {
             .lock()
             .unwrap()
             .execute("DELETE FROM records WHERE kind='download' AND id=?", [id])?;
+        self.notify_availability(remote.key);
         Ok(())
     }
 }
@@ -952,6 +966,7 @@ fn remote_track(
         audio: Some(row.clone()),
     };
     Track {
+        blocked_reason: None,
         availability: match row.state {
             api::MusicTrackAvailabilityState::Available { .. } => amp_core::Availability::Available,
             api::MusicTrackAvailabilityState::Preparing => amp_core::Availability::Preparing,
@@ -1023,10 +1038,7 @@ struct CachedReader {
 impl Read for CachedReader {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
         if self.cancellation.is_cancelled() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "Playback cancelled",
-            ));
+            return Err(std::io::Error::other("Playback cancelled"));
         };
         self.file.read(bytes)
     }
@@ -1034,10 +1046,7 @@ impl Read for CachedReader {
 impl std::io::Seek for CachedReader {
     fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
         if self.cancellation.is_cancelled() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "Playback cancelled",
-            ));
+            return Err(std::io::Error::other("Playback cancelled"));
         };
         self.file.seek(position)
     }
@@ -1402,5 +1411,23 @@ mod tests {
         assert_eq!(saved.create.unwrap().name, "Original");
         a.discard_commands(key).unwrap();
         assert!(a.pending_commands(key).unwrap().is_empty());
+    }
+    #[test]
+    fn canceled_cached_reads_are_terminal_errors_not_retry_signals() {
+        let file = tempfile::tempfile().unwrap();
+        let cancellation = MediaCancellation::default();
+        cancellation.cancel();
+        let mut reader = CachedReader { file, cancellation };
+        assert_ne!(
+            reader.read(&mut [0u8; 1]).unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        assert!(reader.read_exact(&mut [0u8; 1]).is_err());
+        assert_ne!(
+            std::io::Seek::seek(&mut reader, std::io::SeekFrom::Start(0))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::Interrupted
+        );
     }
 }

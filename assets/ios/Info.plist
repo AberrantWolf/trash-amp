@@ -8,7 +8,8 @@
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-	<key>CFBundleName</key>
+	<key>NSAppleMusicUsageDescription</key><string>Browse and play unprotected music stored in your music library.</string>
+    <key>CFBundleName</key>
 	<string>Trash Amp</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>

@@ -22,6 +22,7 @@ pub(super) fn run<B: Backend>(
     let mut tracks: Vec<Track> = vec![];
     let mut index = 0;
     let mut reader: Option<Converted> = None;
+    let mut reader_revision = 0;
     let mut position = 0;
     let mut generation = 0;
     let mut pending = None;
@@ -357,6 +358,15 @@ pub(super) fn run<B: Backend>(
             }
             continue;
         }
+        let input_revision = shared.input_revision.load(Ordering::Acquire);
+        if shared.input_changes.load(Ordering::Acquire) > 0 {
+            match rx.recv_timeout(Duration::from_millis(1)) {
+                Ok(command) => queued_command = Some(command),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            continue;
+        }
         let producer = &mut current.producer;
         if !exhausted
             && shared.playing.load(Ordering::Relaxed)
@@ -364,9 +374,20 @@ pub(super) fn run<B: Backend>(
             && pending.is_none()
         {
             if let Some(track) = tracks.get(index) {
+                reader_revision = input_revision;
                 match Converted::new(track, position, rate, resolver.as_deref()) {
                     Ok(r) => reader = Some(r),
                     Err(e) => {
+                        if shared.shutdown.load(Ordering::Acquire) {
+                            return;
+                        }
+                        if shared.input_revision.load(Ordering::Acquire) != reader_revision {
+                            queued_command = rx.recv().ok();
+                            if queued_command.is_none() {
+                                return;
+                            }
+                            continue;
+                        }
                         let _ = errors.send(PlayerEvent::PlaybackError(format!(
                             "{}: {e:#}",
                             track.title
@@ -405,6 +426,17 @@ pub(super) fn run<B: Backend>(
                     reader = None;
                 }
                 Err(e) => {
+                    if shared.shutdown.load(Ordering::Acquire) {
+                        return;
+                    }
+                    if shared.input_revision.load(Ordering::Acquire) != reader_revision {
+                        reader = None;
+                        queued_command = rx.recv().ok();
+                        if queued_command.is_none() {
+                            return;
+                        }
+                        continue;
+                    }
                     let _ = errors.send(PlayerEvent::PlaybackError(format!(
                         "Playback stopped: {e:#}"
                     )));

@@ -152,14 +152,23 @@ pub fn run() -> anyhow::Result<()> {
             credentials.save(&credential)?;
         }
     }
-    let service = amp_app::PlaybackService::new(Arc::new(|| Ok(())))?;
+    let apple = amp_apple_library::Adapter::open(data_dir.join("apple-library"))?;
+    let mut resolvers = amp_audio::ResolverRegistry::default();
+    resolvers.register("collector", collector.clone())?;
+    resolvers.register(amp_apple_library::PROVIDER, apple.clone())?;
+    let service =
+        amp_app::PlaybackService::with_resolver(Arc::new(|| Ok(())), Arc::new(resolvers))?;
     let catalog = amp_app::catalog::CatalogService::open(
         &data_dir.join("library.sqlite3"),
         service.playback(),
     )?;
+    catalog
+        .catalog()
+        .register_sources(vec![collector.clone(), apple], false);
     amp_ui::run(amp_ui::AppConfig {
         collector,
         open_url,
+        music_access_settings_url: "app-settings:",
         args: std::env::args().collect(),
         // Collector streaming/downloads are the initial mobile source. External
         // folders need a document picker and security-scoped access, not raw paths.

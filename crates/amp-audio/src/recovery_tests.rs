@@ -869,3 +869,137 @@ fn system_pause_is_visible_while_network_read_is_blocked_and_never_auto_resumes(
     assert!(!harness.player.snapshot().playing);
     assert_eq!(harness.devices.lock().unwrap().sessions.len(), 1);
 }
+
+struct CancelInputResolver {
+    opening: bool,
+    opens: AtomicUsize,
+    tokens: Mutex<Vec<std::sync::Weak<AtomicBool>>>,
+    entered: mpsc::Sender<()>,
+}
+struct CancelInputReader {
+    token: Arc<AtomicBool>,
+    entered: Option<mpsc::Sender<()>>,
+    frame: u64,
+}
+impl PcmReader for CancelInputReader {
+    fn format(&self) -> PcmFormat {
+        PcmFormat::new(44100, 1).unwrap()
+    }
+    fn total_frames(&self) -> Option<u64> {
+        Some(441000)
+    }
+    fn seek_exact(&mut self, frame: FramePosition) -> Result<()> {
+        self.frame = frame.0;
+        Ok(())
+    }
+    fn read_frames(&mut self, max: usize) -> Result<Option<PcmChunk>> {
+        if let Some(entered) = self.entered.take() {
+            entered.send(()).unwrap();
+            while !self.token.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        if self.token.load(Ordering::Acquire) {
+            bail!("Native read canceled");
+        }
+        if self.frame >= 441000 {
+            return Ok(None);
+        }
+        let count = max.min((441000 - self.frame) as usize);
+        let chunk = PcmChunk::new(self.format(), FramePosition(self.frame), vec![0.25; count])?;
+        self.frame += count as u64;
+        Ok(Some(chunk))
+    }
+}
+impl MediaResolver for CancelInputResolver {
+    fn resolve(&self, _: &Track) -> Result<ByteSource> {
+        bail!("Decoded input")
+    }
+    fn open(&self, _: &Track) -> Result<MediaInput> {
+        let first = self.opens.fetch_add(1, Ordering::AcqRel) == 0;
+        let token = Arc::new(AtomicBool::new(false));
+        self.tokens.lock().unwrap().push(Arc::downgrade(&token));
+        if first && self.opening {
+            self.entered.send(()).unwrap();
+            while !token.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(1));
+            }
+            bail!("Native initialization canceled");
+        }
+        Ok(MediaInput::Decoded(Box::new(CancelInputReader {
+            token,
+            entered: (first && !self.opening).then(|| self.entered.clone()),
+            frame: 0,
+        })))
+    }
+    fn cancel(&self) {
+        self.tokens.lock().unwrap().retain(|weak| {
+            if let Some(token) = weak.upgrade() {
+                token.store(true, Ordering::Release);
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
+#[test]
+fn seek_and_queue_edits_cancel_blocked_inputs_without_pausing_or_reporting_decode_errors() {
+    for opening in [false, true] {
+        for edit in [false, true] {
+            let (_directory, mut track) = tests::fixture(44100, 1);
+            track.duration_seconds = 10.0;
+            track.access = MediaAccess::Managed {
+                provider: "native".into(),
+                item: "track".into(),
+            };
+            let devices = Arc::new(Mutex::new(Devices {
+                current: Some(Device::new("output", 44100)),
+                ..Default::default()
+            }));
+            let (entered, waiting) = mpsc::channel();
+            let resolver = Arc::new(CancelInputResolver {
+                opening,
+                opens: AtomicUsize::new(0),
+                tokens: Mutex::default(),
+                entered,
+            });
+            let (player, worker) = Player::spawn(
+                Some(resolver.clone()),
+                FakeBackend {
+                    devices: devices.clone(),
+                    gate: None,
+                    release_when_paused: false,
+                },
+            )
+            .unwrap();
+            player.play(vec![track.clone()], 0);
+            waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+            if edit {
+                let update = player
+                    .edit_queue(Box::new(move |_| (vec![track], None)))
+                    .unwrap();
+                assert!(update.clock.playing);
+            } else {
+                player.seek(0.5);
+            }
+            wait(|| resolver.opens.load(Ordering::Acquire) >= 2);
+            let session = devices.lock().unwrap().sessions.last().unwrap().clone();
+            session.wait_frames(128);
+            assert!(
+                player.snapshot().playing,
+                "Transport cancellation must retain play intent"
+            );
+            if !edit {
+                assert_eq!(player.snapshot().seconds, 0.5);
+            }
+            assert_eq!(session.render(128)[0], 0.25);
+            assert!(
+                player.event().is_none(),
+                "Cancellation is not a decode failure"
+            );
+            drop(player);
+            worker.join().unwrap();
+        }
+    }
+}
