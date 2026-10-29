@@ -49,6 +49,14 @@ files remain available offline after removing credentials or connections; explic
 removal deletes retained audio. Streams are not retained. Artwork has a separate
 128 MiB cache. Neither browsing nor playback requests server preparation.
 
+Cancel marks every unfinished download in the active batch as cancelled and keeps
+completed audio. Interrupted pending work resumes at launch; cancelled work needs
+an explicit retry. Album disc choices use Disc N labels and retain their selection
+by source identity without filtering the stored catalog. A selector appears only
+when there is more than one source disc; alternatives for the same disc number
+use Version N labels. Browsing artwork uses shared, bounded thumbnails decoded
+in the background as rows are requested.
+
 ## Validation, 2026-10-07
 
 Workspace tests cover cache isolation across server/account identities, restart

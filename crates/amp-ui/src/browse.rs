@@ -65,23 +65,19 @@ impl Default for Browser {
         }
     }
 }
-fn decorate(
-    rows: &mut [BrowserRow],
+fn artwork_paths(
     actions: &[Action],
     artwork: &std::collections::BTreeMap<String, String>,
-) {
-    for (row, action) in rows.iter_mut().zip(actions) {
-        let id = match action {
+) -> Vec<Option<PathBuf>> {
+    actions
+        .iter()
+        .map(|action| match action {
             Action::Open(Target::Album(id)) | Action::Open(Target::Track { album: id, .. }) => {
-                Some(id)
+                artwork.get(&id.item).map(PathBuf::from)
             }
             _ => None,
-        };
-        row.artwork = id
-            .and_then(|id| artwork.get(&id.item))
-            .and_then(|p| super::artwork::load(std::path::Path::new(p)))
-            .unwrap_or_default();
-    }
+        })
+        .collect()
 }
 fn row(entry: &Entry, compact: bool) -> BrowserRow {
     let kind = match &entry.target {
@@ -190,8 +186,7 @@ fn render_browser(ui: &PlayerWindow, s: &mut State) {
         }
     }
     b.rows = actions;
-    decorate(&mut rows, &b.rows, &s.artwork);
-    ui.set_browser_rows(ModelRc::new(VecModel::from(rows)));
+    ui.set_browser_rows(artwork::model(rows, artwork_paths(&b.rows, &s.artwork)));
     ui.set_browser_selected(
         b.selected_result
             .as_ref()
@@ -234,9 +229,9 @@ fn render_artist(ui: &PlayerWindow, s: &mut State, name: &str) {
             append_entries(&mut rows, &mut actions, &tracks, usize::MAX);
         }
     }
-    decorate(&mut rows, &actions, &s.artwork);
+    let paths = artwork_paths(&actions, &s.artwork);
     s.browser.detail_rows = actions;
-    ui.set_artist_rows(ModelRc::new(VecModel::from(rows)));
+    ui.set_artist_rows(artwork::model(rows, paths));
 }
 fn location(ui: &PlayerWindow, s: &State) -> Location {
     Location {
@@ -281,10 +276,21 @@ fn show_target(ui: &PlayerWindow, s: &mut State, target: &Target) {
         }
         Target::Album(id) | Target::Track { album: id, .. } => {
             if let Some(index) = s.library.albums.iter().position(|a| &a.id == id) {
+                if let Target::Track { track, .. } = target
+                    && let Some(source) = s.library.albums[index]
+                        .tracks
+                        .iter()
+                        .find(|t| &t.id == track)
+                        .and_then(|t| t.source.as_ref())
+                {
+                    s.selected_sources.insert(
+                        album_key(&s.library.albums[index]),
+                        source.representation.clone(),
+                    );
+                }
                 select(ui, s, index);
                 if let Target::Track { track, .. } = target {
-                    if let Some(i) = s.library.albums[index]
-                        .tracks
+                    if let Some(i) = displayed_tracks(s, index)
                         .iter()
                         .position(|t| &t.id == track)
                     {
@@ -639,6 +645,7 @@ mod tests {
             browser: Browser::default(),
             library: amp_library::demo_library(),
             selected: None,
+            selected_sources: Default::default(),
             catalog: service.catalog(),
             folders: service.catalog().snapshot().folders,
             catalog_revision: 0,

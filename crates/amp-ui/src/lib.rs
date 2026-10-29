@@ -15,11 +15,7 @@ use std::{
     cell::RefCell,
     path::PathBuf,
     rc::Rc,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::{Arc, mpsc},
     time::Duration,
 };
 slint::include_modules!();
@@ -78,6 +74,7 @@ struct State {
     browser: browse::Browser,
     library: Library,
     selected: Option<usize>,
+    selected_sources: std::collections::BTreeMap<String, String>,
     catalog: Catalog,
     folders: Arc<[amp_library::SavedFolder]>,
     catalog_revision: u64,
@@ -251,18 +248,27 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
                             || a.blocked_reason != b.blocked_reason
                     })
             });
-        let selected_track_id = state
-            .selected
-            .and_then(|i| state.library.albums.get(i))
-            .and_then(|album| {
-                usize::try_from(ui.get_selected_track())
-                    .ok()
-                    .and_then(|i| album.tracks.get(i))
-            })
-            .map(|t| t.id.clone());
+        let selected_track_id = state.selected.and_then(|index| {
+            usize::try_from(ui.get_selected_track())
+                .ok()
+                .and_then(|row| {
+                    displayed_tracks(state, index)
+                        .get(row)
+                        .map(|track| track.id.clone())
+                })
+        });
         let had_selection = selected_id.is_some();
         let artwork_changed = state.artwork != *snapshot.artwork;
         state.library = (*snapshot.library).clone();
+        let album_keys = state
+            .library
+            .albums
+            .iter()
+            .map(album_key)
+            .collect::<std::collections::BTreeSet<_>>();
+        state
+            .selected_sources
+            .retain(|key, _| album_keys.contains(key));
         state.artwork = (*snapshot.artwork).clone();
         state.selected = if replacement {
             None
@@ -283,8 +289,7 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
             ui.set_show_queue(showing_queue);
             let track = selected_track_id
                 .and_then(|id| {
-                    state.library.albums[index]
-                        .tracks
+                    displayed_tracks(state, index)
                         .iter()
                         .position(|t| t.id == id)
                 })
@@ -302,46 +307,108 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
         ui.set_status(notice.message.into());
     }
 }
+fn album_key(album: &amp_core::Album) -> String {
+    serde_json::to_string(&album.id).expect("album identity is serializable")
+}
+fn disc_sources(album: &amp_core::Album) -> Vec<(String, u32, bool)> {
+    let mut sources = std::collections::BTreeMap::<String, (u32, bool)>::new();
+    for track in &album.tracks {
+        if let Some(source) = &track.source {
+            let entry = sources
+                .entry(source.representation.clone())
+                .or_insert((track.disc, false));
+            entry.1 |= track.playback_block().is_none();
+        }
+    }
+    let mut sources: Vec<_> = sources
+        .into_iter()
+        .map(|(id, (disc, playable))| (id, disc, playable))
+        .collect();
+    sources.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
+    sources
+}
+fn displayed_tracks(state: &State, index: usize) -> Vec<Track> {
+    let Some(album) = state.library.albums.get(index) else {
+        return vec![];
+    };
+    let source = state.selected_sources.get(&album_key(album));
+    album
+        .tracks
+        .iter()
+        .filter(|track| {
+            source.is_none_or(|id| {
+                track
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| &source.representation == id)
+            })
+        })
+        .cloned()
+        .collect()
+}
 fn select(ui: &PlayerWindow, state: &mut State, index: usize) {
     let Some(album) = state.library.albums.get(index) else {
         return;
     };
-    let mut sources = std::collections::BTreeMap::new();
-    for t in &album.tracks {
-        if let amp_core::MediaAccess::Managed { provider, item } = &t.access
-            && provider == "collector"
-            && let Ok(r) = serde_json::from_str::<amp_collector::RemoteTrack>(item)
-        {
-            sources.insert(
-                r.source,
-                (t.disc, r.audio.map(|a| a.source_label).unwrap_or_default()),
-            );
-        }
+    let sources = disc_sources(album);
+    let key = album_key(album);
+    if let Some(selected) = state.selected_sources.get(&key)
+        && !sources.iter().any(|(id, _, _)| id == selected)
+    {
+        state.selected_sources.remove(&key);
     }
-    let ambiguous = sources
-        .values()
-        .map(|(disc, _)| disc)
+    // A single source disc needs no selector; alternatives stay explicit.
+    let disc_count = sources
+        .iter()
+        .map(|(_, disc, _)| disc)
         .collect::<std::collections::BTreeSet<_>>()
-        .len()
-        < sources.len();
+        .len();
+    if sources.len() == 1
+        && !state.selected_sources.contains_key(&key)
+        && let Some((id, _, _)) = sources
+            .iter()
+            .find(|(_, _, playable)| *playable)
+            .or(sources.first())
+    {
+        state.selected_sources.insert(key.clone(), id.clone());
+    }
+    let selected_source = state.selected_sources.get(&key);
+    let ambiguous = selected_source.is_none() && disc_count < sources.len();
+    let tracks = displayed_tracks(state, index);
     ui.set_album_ambiguous(ambiguous);
     state
         .playback
-        .set_default_album(Some((album.tracks.clone(), ambiguous)));
-    ui.set_album_source_index(0);
+        .set_default_album(Some((tracks.clone(), ambiguous)));
+    ui.set_album_source_index(
+        selected_source
+            .and_then(|id| sources.iter().position(|(source, _, _)| source == id))
+            .map_or(0, |i| i as i32 + 1),
+    );
     ui.set_album_sources(ModelRc::new(VecModel::from(
         std::iter::once(SharedString::from(if ambiguous {
-            "Choose a source disc"
+            "Choose a disc"
         } else {
-            "All album discs"
+            "All discs"
         }))
-        .chain(
-            sources
-                .values()
-                .map(|(disc, label)| SharedString::from(format!("Disc {disc} · {label}"))),
-        )
+        .chain(sources.iter().map(|(id, disc, _)| {
+            let alternatives: Vec<_> = sources
+                .iter()
+                .filter(|(_, number, _)| number == disc)
+                .collect();
+            if alternatives.len() > 1 {
+                let version = alternatives
+                    .iter()
+                    .position(|(source, _, _)| source == id)
+                    .unwrap()
+                    + 1;
+                SharedString::from(format!("Disc {disc} · Version {version}"))
+            } else {
+                SharedString::from(format!("Disc {disc}"))
+            }
+        }))
         .collect::<Vec<_>>(),
     )));
+    ui.set_show_disc_selector(sources.len() > 1);
     state.selected = Some(index);
     ui.set_artist_view(false);
     ui.set_show_queue(false);
@@ -359,8 +426,7 @@ fn select(ui: &PlayerWindow, state: &mut State, index: usize) {
     ui.set_album_title(album.title.clone().into());
     ui.set_album_artist(album.artist.clone().into());
     ui.set_tracks(ModelRc::new(VecModel::from(
-        album
-            .tracks
+        tracks
             .iter()
             .map(|t| TrackRow {
                 title: t.title.clone().into(),
@@ -384,21 +450,22 @@ fn select(ui: &PlayerWindow, state: &mut State, index: usize) {
     ui.set_status(album.source_label.clone().into());
 }
 fn start(ui: &PlayerWindow, state: &mut State, index: usize) {
-    let Some(album) = state.selected.and_then(|i| state.library.albums.get(i)) else {
+    let Some(selected) = state.selected else {
         return;
     };
-    if index >= album.tracks.len() {
+    let tracks = displayed_tracks(state, selected);
+    if index >= tracks.len() {
         return;
     }
     if index == 0 && ui.get_album_ambiguous() {
         ui.set_status("Choose a source disc before playing this album".into());
         return;
     }
-    if let Some(reason) = album.tracks[index].playback_block() {
+    if let Some(reason) = tracks[index].playback_block() {
         ui.set_status(reason.into());
         return;
     }
-    state.playback.play_album(album.tracks.clone(), index);
+    state.playback.play_album(tracks, index);
     ui.set_status("Playing album".into());
 }
 
@@ -415,7 +482,20 @@ fn render_playback(ui: &PlayerWindow, state: &State, last_notice: &mut u64) {
     let upcoming = snapshot
         .up_next
         .iter()
+        .filter(|track| {
+            !snapshot
+                .unplayable
+                .iter()
+                .any(|failed| failed.track.id == track.id)
+        })
         .map(|track| SharedString::from(collector::queue_label(track)))
+        .chain(snapshot.unplayable.iter().map(|failed| {
+            SharedString::from(format!(
+                "{} · Currently unplayable: {}",
+                collector::queue_label(&failed.track),
+                failed.reason
+            ))
+        }))
         .collect::<Vec<_>>();
     use slint::Model;
     if ui.get_queued().iter().collect::<Vec<_>>() != upcoming {
@@ -425,9 +505,11 @@ fn render_playback(ui: &PlayerWindow, state: &State, last_notice: &mut u64) {
         state
             .selected
             .and_then(|i| state.library.albums.get(i))
-            .and_then(|album| {
+            .and_then(|_album| {
                 snapshot.current.as_ref().and_then(|current| {
-                    album.tracks.iter().position(|track| track.id == current.id)
+                    displayed_tracks(state, state.selected.unwrap())
+                        .iter()
+                        .position(|track| track.id == current.id)
                 })
             })
             .map_or(-1, |i| i as i32),
@@ -541,6 +623,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
         browser: browse::Browser::default(),
         library,
         selected: None,
+        selected_sources: Default::default(),
         catalog: catalog.clone(),
         folders: initial.folders,
         catalog_revision: initial.library_revision,
@@ -613,8 +696,8 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
         let state = state.clone();
         ui.on_play_album(move || {
             let s = state.borrow();
-            if let Some(album) = s.selected.and_then(|i| s.library.albums.get(i)) {
-                s.playback.play_album_start(album.tracks.clone());
+            if let Some(index) = s.selected {
+                s.playback.play_album_start(displayed_tracks(&s, index));
             }
         });
     }
@@ -644,8 +727,11 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
             let t = s
                 .selected
                 .and_then(|a| s.library.albums.get(a))
-                .and_then(|a| a.tracks.get(i as usize))
-                .cloned();
+                .and_then(|_| {
+                    displayed_tracks(&s, s.selected.unwrap())
+                        .get(i as usize)
+                        .cloned()
+                });
             if let Some(t) = t
                 && let Some(ui) = weak.upgrade()
             {
@@ -722,12 +808,23 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
                 let size = ui.window().size().to_logical(ui.window().scale_factor());
                 ui.set_wide(size.width > 720.0 * ui.get_text_scale());
                 ui.set_short(size.height < 420.0 * ui.get_text_scale());
+                let artwork_changed = artwork::poll();
                 file_load.poll();
                 collector.poll();
                 let mut s = state.borrow_mut();
                 browse::poll(&ui, &mut s);
                 render_catalog(&ui, &mut s, &mut last_catalog_notice);
                 render_playback(&ui, &s, &mut last_notice);
+                if artwork_changed
+                    && let Some(album) = s.selected.and_then(|index| s.library.albums.get(index))
+                {
+                    ui.set_album_art(
+                        s.artwork
+                            .get(&album.id.item)
+                            .and_then(|path| artwork::load(std::path::Path::new(path)))
+                            .unwrap_or_default(),
+                    );
+                }
             },
         );
     }
@@ -977,6 +1074,7 @@ mod tests {
             artwork: Default::default(),
             browser: browse::Browser::default(),
             selected: None,
+            selected_sources: Default::default(),
             folders: snapshot.folders,
             catalog_revision: snapshot.library_revision,
             catalog_replacement: snapshot.replacement_revision,
@@ -1542,6 +1640,7 @@ mod tests {
             artwork: Default::default(),
             browser: browse::Browser::default(),
             selected: None,
+            selected_sources: Default::default(),
             preferences: Preferences::default(),
         }));
         let ui = PlayerWindow::new().unwrap();
@@ -1963,6 +2062,7 @@ mod tests {
             browser: browse::Browser::default(),
             library: amp_library::demo_library(),
             selected: Some(0),
+            selected_sources: Default::default(),
             catalog: service.catalog(),
             folders: service.catalog().snapshot().folders,
             catalog_revision: 0,
@@ -2077,6 +2177,7 @@ mod tests {
             artwork: Default::default(),
             browser: Default::default(),
             selected: None,
+            selected_sources: Default::default(),
             preferences: initial.preferences,
         }));
         let ui = PlayerWindow::new().unwrap();
@@ -2145,6 +2246,7 @@ mod tests {
             artwork: Default::default(),
             browser: Default::default(),
             selected: None,
+            selected_sources: Default::default(),
             preferences: initial.preferences,
         }));
         let ui = PlayerWindow::new().unwrap();

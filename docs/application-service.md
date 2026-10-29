@@ -14,6 +14,14 @@ or appearance track retains only the remaining explicit queue. Playing a saved
 list replaces the previous queue. Clearing up next preserves the current track
 and automatic album continuation.
 
+Unreadable tracks emit sequence-scoped failure events and are skipped while
+already accepted audio drains normally. Playback snapshots retain these entries
+and their reasons for queue presentation; successful retries clear the failure.
+Natural completion is distinct from pause: Play restarts the retained sequence
+from its original starting track, while newly appended work becomes the next
+playback target. A revisioned render gate makes Pause immediate during blocking
+source preparation or reads.
+
 The worker consumes engine events and reads its clock independently of any view.
 It publishes a small presentation snapshot containing the current track, explicit
 queue, clock, output state and latest status notice. The queue snapshot is shared
@@ -111,6 +119,13 @@ presentation callbacks send asynchronous commands. Shutdown cancels outstanding
 jobs and joins the catalog owner. A blocked filesystem or HTTP call can finish
 later, but its completion cannot commit a catalog through a stopped owner.
 Response-cache writes may finish on the lookup worker's separate connection.
+
+`amp-app::downloads` owns download batch sequencing and admission independently
+of the UI's event polling. Providers implement persistence and transfers. Start
+and cancel transitions serialize so a new batch cannot reset cancellation before
+the old cancellation is durable; provider completion commits share the same
+database lock as cancellation. Only pending work resumes automatically at startup.
+Typed cancelled records require explicit retry and completed records are retained.
 
 ## Validation and remaining boundaries
 

@@ -20,6 +20,7 @@ pub(super) fn run<B: Backend>(
     let mut callbacks = 0;
     let mut last_callback = Instant::now();
     let mut tracks: Vec<Track> = vec![];
+    let mut failed_tracks = Vec::<amp_core::ItemId>::new();
     let mut index = 0;
     let mut reader: Option<Converted> = None;
     let mut reader_revision = 0;
@@ -27,6 +28,8 @@ pub(super) fn run<B: Backend>(
     let mut generation = 0;
     let mut pending = None;
     let mut exhausted = true;
+    let mut completed = false;
+    let mut sequence_start = 0;
     let mut resume_on_append = false;
     let mut queued_command = None;
     // Mirror at most one device buffer on the decoder worker. Keeping the last
@@ -147,6 +150,9 @@ pub(super) fn run<B: Backend>(
                     let audible = shared.track.load(Ordering::Relaxed);
                     let (updated, start) = edit(audible);
                     index = start.unwrap_or(audible);
+                    if start.is_some() {
+                        sequence_start = index;
+                    }
                     if start.is_none() {
                         requested_frame = shared.position.load(Ordering::Relaxed);
                     } else {
@@ -157,7 +163,9 @@ pub(super) fn run<B: Backend>(
                     edited = Some(reply);
                 }
                 Command::Replace(t, start, sequence) => {
+                    failed_tracks.clear();
                     replaced = Some(sequence);
+                    sequence_start = start;
                     if t.is_empty() {
                         tracks.clear();
                         index = 0;
@@ -179,13 +187,30 @@ pub(super) fn run<B: Backend>(
                         shared.playing.store(true, Ordering::Relaxed);
                     }
                 }
-                Command::Toggle => {
-                    shared.playing.fetch_xor(true, Ordering::Relaxed);
-                    reset = false;
-                }
-                Command::SetPlaying(playing) => {
+                Command::Toggle(revision) => {
+                    let playing = !shared.playing.load(Ordering::Relaxed);
                     shared.playing.store(playing, Ordering::Relaxed);
-                    reset = false;
+                    reset = playing && completed;
+                    if reset {
+                        index = sequence_start;
+                    }
+                    let _ = shared.transport.fetch_update(
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                        |state| (state >> 1 == revision).then_some(state & !1),
+                    );
+                }
+                Command::SetPlaying(playing, revision) => {
+                    shared.playing.store(playing, Ordering::Relaxed);
+                    reset = playing && completed;
+                    if reset {
+                        index = sequence_start;
+                    }
+                    let _ = shared.transport.fetch_update(
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                        |state| (state >> 1 == revision).then_some(state & !1),
+                    );
                 }
                 Command::Seek(seconds) => {
                     let s = if seconds.is_finite() {
@@ -274,6 +299,7 @@ pub(super) fn run<B: Backend>(
                     reset = false;
                     if exhausted && index < tracks.len() {
                         exhausted = false;
+                        completed = false;
                         if continue_stream && resume_on_append {
                             shared.playing.store(true, Ordering::Relaxed);
                             resume_on_append = false;
@@ -282,6 +308,7 @@ pub(super) fn run<B: Backend>(
                 }
             }
             if reset {
+                completed = false;
                 resume_buffer.clear();
                 paused_output = false;
                 generation += 1;
@@ -385,7 +412,16 @@ pub(super) fn run<B: Backend>(
             if let Some(track) = tracks.get(index) {
                 reader_revision = input_revision;
                 match Converted::new(track, position, rate, resolver.as_deref()) {
-                    Ok(r) => reader = Some(r),
+                    Ok(r) => {
+                        if failed_tracks.contains(&track.id) {
+                            failed_tracks.retain(|id| id != &track.id);
+                            let _ = errors.send(PlayerEvent::TrackPlayable {
+                                sequence: shared.sequence.load(Ordering::Acquire),
+                                index,
+                            });
+                        }
+                        reader = Some(r);
+                    }
                     Err(e) => {
                         if shared.shutdown.load(Ordering::Acquire) {
                             return;
@@ -397,12 +433,18 @@ pub(super) fn run<B: Backend>(
                             }
                             continue;
                         }
-                        let _ = errors.send(PlayerEvent::PlaybackError(format!(
-                            "{}: {e:#}",
-                            track.title
-                        )));
-                        exhausted = true;
-                        shared.playing.store(false, Ordering::Relaxed);
+                        if !failed_tracks.contains(&track.id) {
+                            failed_tracks.push(track.id.clone());
+                        }
+                        let _ = errors.send(PlayerEvent::TrackUnplayable {
+                            sequence: shared.sequence.load(Ordering::Acquire),
+                            index,
+                            reason: format!("{e:#}"),
+                        });
+                        index += 1;
+                        position = 0;
+                        // Keep accepted PCM and continue preparing later tracks.
+                        continue;
                     }
                 }
             } else {
@@ -415,6 +457,7 @@ pub(super) fn run<B: Backend>(
                 && shared.playing.swap(false, Ordering::Relaxed)
             {
                 resume_on_append = true;
+                completed = true;
             }
             thread::sleep(Duration::from_millis(3));
             continue;
@@ -449,11 +492,19 @@ pub(super) fn run<B: Backend>(
                         }
                         continue;
                     }
-                    let _ = errors.send(PlayerEvent::PlaybackError(format!(
-                        "Playback stopped: {e:#}"
-                    )));
-                    exhausted = true;
-                    shared.playing.store(false, Ordering::Relaxed);
+                    if let Some(track) = tracks.get(index)
+                        && !failed_tracks.contains(&track.id)
+                    {
+                        failed_tracks.push(track.id.clone());
+                    }
+                    let _ = errors.send(PlayerEvent::TrackUnplayable {
+                        sequence: shared.sequence.load(Ordering::Acquire),
+                        index,
+                        reason: format!("{e:#}"),
+                    });
+                    index += 1;
+                    position = 0;
+                    reader = None;
                 }
             }
         }

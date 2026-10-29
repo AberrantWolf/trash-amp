@@ -85,6 +85,18 @@ Native Mac tests use generated WAV/AAC/ALAC files with the same AVAssetReader
 implementation as iOS. They check bounded reads, channel/rate metadata, nonzero
 seek, EOF and AAC priming/padding. These tests need host CoreAudio codec services;
 a restricted execution sandbox may prevent decoding even generated files.
+In that environment, `afconvert` can report that `aac ` is an unknown format,
+and AVAssetReader can fail with AVFoundation error -11800 and underlying OSStatus
+-1, including for WAV input. These messages alone do not establish invalid
+fixtures or decoder settings. Compare `/usr/bin/afconvert -hf` inside and outside
+the restriction: AAC/ALAC disappear from its available formats when codec service
+access is blocked. Rerun the native tests with host service access rather than
+ignoring them or changing the requested audio format:
+
+```sh
+cargo test -p amp-apple-library --lib native::asset::tests -- --nocapture
+```
+
 Run the suite with access to those services:
 
 ```sh

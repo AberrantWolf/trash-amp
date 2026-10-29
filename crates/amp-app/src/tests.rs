@@ -19,9 +19,26 @@ struct FakeState {
     dropped: bool,
     hold_snapshot: bool,
     next_sequence: u64,
+    pause_leases: Arc<AtomicUsize>,
+    edit_gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    resume_gate_counts: Vec<usize>,
 }
 struct Fake(Arc<Mutex<FakeState>>);
+struct TestPauseLease(Arc<AtomicUsize>);
+impl Drop for TestPauseLease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
+}
 impl Engine for Fake {
+    fn render_pause(&self) -> Option<amp_audio::RenderPause> {
+        let leases = self.0.lock().unwrap().pause_leases.clone();
+        Some(Arc::new(move || {
+            leases.fetch_add(1, Ordering::AcqRel);
+            Box::new(TestPauseLease(leases.clone()))
+        }))
+    }
+
     fn set_processing(&self, settings: AudioProcessingSettings) {
         self.0.lock().unwrap().processing = settings;
     }
@@ -43,7 +60,12 @@ impl Engine for Fake {
         state.next_sequence
     }
     fn set_playing(&self, playing: bool) {
-        self.0.lock().unwrap().clock.playing = playing;
+        let mut state = self.0.lock().unwrap();
+        if playing {
+            let count = state.pause_leases.load(Ordering::Acquire);
+            state.resume_gate_counts.push(count);
+        }
+        state.clock.playing = playing;
     }
     fn toggle(&self) {
         let mut s = self.0.lock().unwrap();
@@ -73,6 +95,10 @@ impl Engine for Fake {
     }
     fn edit_queue(&self, edit: amp_audio::QueueEdit) -> Result<amp_audio::QueueUpdate> {
         let mut state = self.0.lock().unwrap();
+        if let Some((entered, release)) = state.edit_gate.take() {
+            entered.send(()).unwrap();
+            release.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
         let (tracks, start) = edit(state.clock.track);
         state.tracks = tracks.clone();
         state.next_sequence += 1;
@@ -337,6 +363,7 @@ fn metadata_changes_names_without_replacing_media_access_or_playback_order() {
         locator: "/wrong.wav".into(),
     };
     p.update_metadata(Album {
+        metadata: Default::default(),
         id: original.id.clone(),
         title: "Album".into(),
         artist: "Artist".into(),
@@ -458,6 +485,7 @@ fn native_album_artwork_updates_and_follows_background_queue_transitions() {
         output.lock().unwrap().push(state);
     })));
     let album = |name: &str, song: &str| Album {
+        metadata: Default::default(),
         id: ItemId {
             library: "test".into(),
             provider: "test".into(),
@@ -547,6 +575,7 @@ fn lock_screen_seeks_keep_track_and_album_metadata_in_every_publication() {
     p.refresh_catalog_metadata(
         Arc::new(Library {
             albums: vec![Album {
+                metadata: Default::default(),
                 id: ItemId {
                     library: "test".into(),
                     provider: "test".into(),
@@ -636,6 +665,7 @@ fn dropped_playlist_replaces_pending_tracks_and_ignores_catalog_name_updates() {
         Arc::new(Library {
             id: "catalog".into(),
             albums: vec![Album {
+                metadata: Default::default(),
                 id: catalog_track.id.clone(),
                 title: "Album".into(),
                 artist: "Artist".into(),
@@ -847,6 +877,7 @@ fn idle_selection_receives_availability_updates_without_a_ui_tick() {
     let library = Library {
         id: "test".into(),
         albums: vec![Album {
+            metadata: Default::default(),
             id: ItemId {
                 library: "test".into(),
                 provider: "test".into(),
@@ -917,4 +948,62 @@ fn processing_is_installed_before_first_play_and_updates_without_replacing_audio
     assert_eq!(state.replacements, 1);
     assert_eq!(playback.snapshot().seconds, before.seconds);
     assert_eq!(playback.snapshot().playing, before.playing);
+}
+
+#[test]
+fn skipped_track_failures_survive_progress_and_ignore_stale_sequences() {
+    let (service, fake) = setup();
+    let playback = service.playback();
+    playback.replace_queue(vec![track("first"), track("missing"), track("last")]);
+    settle(&playback);
+    let sequence = fake.lock().unwrap().clock.sequence;
+    fake.lock()
+        .unwrap()
+        .events
+        .push_back(PlayerEvent::TrackUnplayable {
+            sequence,
+            index: 1,
+            reason: "File not found".into(),
+        });
+    fake.lock().unwrap().clock.track = 2;
+    let snapshot = settle(&playback);
+    assert_eq!(snapshot.current.unwrap().id.item, "last");
+    assert_eq!(snapshot.unplayable.len(), 1);
+    assert_eq!(snapshot.unplayable[0].track.id.item, "missing");
+    assert_eq!(snapshot.unplayable[0].reason, "File not found");
+    playback.replace_queue(vec![track("replacement")]);
+    settle(&playback);
+    fake.lock()
+        .unwrap()
+        .events
+        .push_back(PlayerEvent::TrackUnplayable {
+            sequence,
+            index: 0,
+            reason: "Old failure".into(),
+        });
+    assert!(settle(&playback).unplayable.is_empty());
+}
+
+#[test]
+fn pause_gates_rendering_while_app_worker_waits_for_a_queue_edit() {
+    let (service, fake) = setup();
+    let playback = service.playback();
+    playback.play_track(track("playing"));
+    settle(&playback);
+    let (entered, waiting) = mpsc::channel();
+    let (release, gate) = mpsc::channel();
+    let leases = {
+        let mut state = fake.lock().unwrap();
+        state.edit_gate = Some((entered, gate));
+        state.pause_leases.clone()
+    };
+    playback.clear_queue();
+    waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+    playback.transport(Transport::Play); // An earlier command must not undo the gate.
+    playback.transport(Transport::Pause);
+    assert_eq!(leases.load(Ordering::Acquire), 1);
+    release.send(()).unwrap();
+    assert!(!settle(&playback).playing);
+    assert_eq!(leases.load(Ordering::Acquire), 0);
+    assert_eq!(fake.lock().unwrap().resume_gate_counts, [1]);
 }

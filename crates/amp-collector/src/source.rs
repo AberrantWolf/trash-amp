@@ -108,7 +108,7 @@ impl Adapter {
         let downloaded = self
             .downloads()?
             .into_iter()
-            .filter(|d| d.status == "complete")
+            .filter(|d| d.status == crate::DownloadStatus::Complete)
             .map(|d| retained_key(&d.remote))
             .collect::<BTreeSet<_>>();
         for track in library.albums.iter_mut().flat_map(|a| &mut a.tracks) {
@@ -192,7 +192,7 @@ mod tests {
                     track: track.clone(),
                     remote: remote.clone(),
                     bytes: 0,
-                    status: "complete".into(),
+                    status: crate::DownloadStatus::Complete,
                     error: None,
                     digest: String::new(),
                 },
@@ -201,6 +201,7 @@ mod tests {
         let snapshot = Snapshot {
             library: Library {
                 albums: vec![Album {
+                    metadata: Default::default(),
                     id: track.id.clone(),
                     title: "Album".into(),
                     artist: "Artist".into(),

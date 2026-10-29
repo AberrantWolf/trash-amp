@@ -67,6 +67,13 @@ Current grouping first gathers tracks by folder, tagged album title and explicit
 
 Metadata currently fills placeholders after local tags, CUE TITLE/PERFORMER and CD-TEXT. `amp-library::metadata` owns MusicBrainz query construction, exact audio TOC IDs, release/medium matching, response caching and provenance. It uses a bounded blocking HTTP client exclusively on a background worker. Disc-ID candidates must agree on names; file name searches require a single exact release/artist hit plus complete track counts and duration/title agreement. Embedded release IDs select medium positions explicitly. Fully named file albums need no requests.
 
+Album snapshots retain internal name origins for album and track names: source,
+generated fallback, MusicBrainz, or unspecified for legacy caches. Generated
+origins retain their original value so a cached correction is preserved. Refresh
+establishes origins from source tags; uncertain legacy non-placeholder names are
+preserved rather than guessed from filenames. This bookkeeping adds no metadata
+editing UI.
+
 The local scan publishes first. A cache pass runs before the network pass; an atomic preference disables network access, and scan generations discard stale callbacks when switching libraries. The UI changes individual rows and selected-track labels without changing playback order/access. HTTP responses live in `metadata_http` with positive/negative expiry; per-album matches live in `metadata_matches`, separate from the library snapshot. Stale cache results remain available offline. The catalog worker persists at completion and flushes accepted metadata before source changes or shutdown. These writes update the folder cache without reselecting it. The response cache also allows interrupted enrichment to resume on restart. Existing non-placeholder values are preserved, including values corrected in the cached snapshot. A dedicated user-override editor/model is still future work.
 
 Providers should remain independent of UI/platform library access. Future work includes GnuDB fallback, manual candidate selection, explicit overrides, additional descriptive fields and artwork (local art first, then Cover Art Archive). No audio uploads or source-file writes are involved.

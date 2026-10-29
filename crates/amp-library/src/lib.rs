@@ -313,7 +313,7 @@ impl FilesystemProvider {
         for (i, result) in results {
             let path = audio_paths[i];
             match result {
-                Ok((title, album_artist, tagged, track)) => {
+                Ok((title, album_artist, tagged, track, names)) => {
                     let parent = path.parent().unwrap().to_owned();
                     let key = (
                         parent.clone(),
@@ -324,6 +324,7 @@ impl FilesystemProvider {
                         tagged,
                         album_artist: album_artist.clone(),
                         album: Album {
+                            metadata: Default::default(),
                             id: id(
                                 &library.id,
                                 format!(
@@ -338,6 +339,17 @@ impl FilesystemProvider {
                             source_label: parent.display().to_string(),
                         },
                     });
+                    if tagged {
+                        fragment.album.metadata.names.title = NameOrigin::Source;
+                    } else if fragment.album.metadata.names.title != NameOrigin::Source {
+                        fragment.album.metadata.names.title =
+                            NameOrigin::Generated(fragment.album.title.clone());
+                    }
+                    fragment
+                        .album
+                        .metadata
+                        .tracks
+                        .insert(track.id.item.clone(), names);
                     fragment.album.tracks.push(track);
                 }
                 Err(e) => library.warnings.push(format!("{}: {e:#}", path.display())),
@@ -345,6 +357,7 @@ impl FilesystemProvider {
         }
         for mut fragment in merge_album_fragments(groups.into_values().collect()) {
             let album = &mut fragment.album;
+            let explicit_artist = fragment.album_artist.is_some();
             album.artist = fragment.album_artist.unwrap_or_else(|| {
                 let first = album
                     .tracks
@@ -361,6 +374,15 @@ impl FilesystemProvider {
                     "Various artists".into()
                 }
             });
+            // A common track credit is a source name; the compilation label and
+            // unknown-artist text are generated display fallbacks.
+            album.metadata.names.artist = if !explicit_artist
+                && (album.artist == "Various artists" || album.artist == "Unknown artist")
+            {
+                NameOrigin::Generated(album.artist.clone())
+            } else {
+                NameOrigin::Source
+            };
             album.tracks.sort_by(|a, b| {
                 (a.disc, a.number, &a.id.item).cmp(&(b.disc, b.number, &b.id.item))
             });
@@ -413,6 +435,11 @@ fn merge_album_fragments(fragments: Vec<AlbumFragment>) -> Vec<AlbumFragment> {
                 })
         };
         if let Some(existing) = candidates.iter_mut().find(compatible) {
+            existing
+                .album
+                .metadata
+                .tracks
+                .extend(fragment.album.metadata.tracks);
             existing.album.tracks.extend(fragment.album.tracks);
             if existing.album_artist.is_none() {
                 existing.album_artist = fragment.album_artist;
@@ -435,7 +462,7 @@ pub fn is_supported_audio_file(path: &Path) -> bool {
 
 /// Read local tags without opening a store or enriching/saving library metadata.
 pub fn local_file_track(path: &Path, session: &str) -> Result<Track> {
-    tagged_track(path, session).map(|(_, _, _, track)| track)
+    tagged_track(path, session).map(|(_, _, _, track, _)| track)
 }
 
 fn extension(path: &Path) -> String {
@@ -451,7 +478,10 @@ fn id(library: &str, item: String) -> ItemId {
         item,
     }
 }
-fn tagged_track(path: &Path, library: &str) -> Result<(String, Option<String>, bool, Track)> {
+fn tagged_track(
+    path: &Path,
+    library: &str,
+) -> Result<(String, Option<String>, bool, Track, NameOrigins)> {
     let file = Probe::open(path)?
         .options(lofty::config::ParseOptions::new().read_cover_art(false))
         .read()?;
@@ -464,6 +494,7 @@ fn tagged_track(path: &Path, library: &str) -> Result<(String, Option<String>, b
         .into_owned();
     let title = tag
         .and_then(|t| t.album())
+        .filter(|s| !s.trim().is_empty())
         .map(|s| s.into_owned())
         .unwrap_or(folder);
     let tagged = tag
@@ -484,6 +515,7 @@ fn tagged_track(path: &Path, library: &str) -> Result<(String, Option<String>, b
         id: id(library, locator.clone()),
         title: tag
             .and_then(|t| t.title())
+            .filter(|s| !s.trim().is_empty())
             .map(|s| s.into_owned())
             .unwrap_or_else(|| {
                 path.file_stem()
@@ -493,6 +525,7 @@ fn tagged_track(path: &Path, library: &str) -> Result<(String, Option<String>, b
             }),
         artist: tag
             .and_then(|t| t.artist())
+            .filter(|s| !s.trim().is_empty())
             .map(|s| s.into_owned())
             .unwrap_or_else(|| {
                 album_artist
@@ -504,7 +537,26 @@ fn tagged_track(path: &Path, library: &str) -> Result<(String, Option<String>, b
         duration_seconds: file.properties().duration().as_secs_f64(),
         access: MediaAccess::File { locator },
     };
-    Ok((title, album_artist, tagged, track))
+    let names = NameOrigins {
+        title: if tag
+            .and_then(|t| t.title())
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            NameOrigin::Source
+        } else {
+            NameOrigin::Generated(track.title.clone())
+        },
+        artist: if tag
+            .and_then(|t| t.artist())
+            .is_some_and(|s| !s.trim().is_empty())
+            || album_artist.is_some()
+        {
+            NameOrigin::Source
+        } else {
+            NameOrigin::Generated(track.artist.clone())
+        },
+    };
+    Ok((title, album_artist, tagged, track, names))
 }
 fn disc_album(
     path: &Path,
@@ -588,18 +640,22 @@ fn disc_album(
                 .map(|s| s.trim().trim_matches('"').to_owned())
         })
     };
-    let title = block
+    let source_title = block
         .and_then(|b| b.title.clone())
         .or_else(|| field("TITLE "))
-        .unwrap_or_else(|| {
-            path.file_stem()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned()
-        });
-    let artist = block
+        .filter(|s| !s.trim().is_empty());
+    let title = source_title.clone().unwrap_or_else(|| {
+        path.file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned()
+    });
+    let source_artist = block
         .and_then(|b| b.performer.clone())
         .or_else(|| field("PERFORMER "))
+        .filter(|s| !s.trim().is_empty());
+    let artist = source_artist
+        .clone()
         .unwrap_or_else(|| "Unknown artist".into());
     let cue_path = path
         .to_str()
@@ -628,7 +684,7 @@ fn disc_album(
             }
         }
     }
-    let tracks = layouts
+    let tracks: Vec<Track> = layouts
         .iter()
         .map(|l| Track {
             blocked_reason: None,
@@ -661,6 +717,48 @@ fn disc_album(
             },
         })
         .collect();
+    let metadata = AlbumMetadata {
+        names: NameOrigins {
+            title: if source_title.is_some() {
+                NameOrigin::Source
+            } else {
+                NameOrigin::Generated(title.clone())
+            },
+            artist: if source_artist.is_some() {
+                NameOrigin::Source
+            } else {
+                NameOrigin::Generated(artist.clone())
+            },
+        },
+        tracks: tracks
+            .iter()
+            .map(|track| {
+                let number = track.number as u8;
+                let cdtrack =
+                    block.and_then(|b| b.tracks.iter().find(|t| t.track_number == number));
+                let has_title = cdtrack.and_then(|t| t.title.as_ref()).is_some()
+                    || cue_names.get(&number).and_then(|n| n.0.as_ref()).is_some();
+                let has_artist = cdtrack.and_then(|t| t.performer.as_ref()).is_some()
+                    || cue_names.get(&number).and_then(|n| n.1.as_ref()).is_some()
+                    || source_artist.is_some();
+                (
+                    track.id.item.clone(),
+                    NameOrigins {
+                        title: if has_title {
+                            NameOrigin::Source
+                        } else {
+                            NameOrigin::Generated(track.title.clone())
+                        },
+                        artist: if has_artist {
+                            NameOrigin::Source
+                        } else {
+                            NameOrigin::Generated(track.artist.clone())
+                        },
+                    },
+                )
+            })
+            .collect(),
+    };
     let label = format!(
         "{}{}",
         if use_raw { "Redumper raw" } else { "BIN/CUE" },
@@ -672,6 +770,7 @@ fn disc_album(
     );
     Ok((
         Album {
+            metadata,
             id: id(library, cue_path),
             title,
             artist,
@@ -688,6 +787,7 @@ pub fn demo_library() -> Library {
         root: "Layout demo — generated albums, no audio".into(),
         albums: (0..2000)
             .map(|i| Album {
+                metadata: Default::default(),
                 id: id("demo", i.to_string()),
                 title: format!(
                     "{} {:04}",

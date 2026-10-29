@@ -1,6 +1,7 @@
 //! Application playback service. Commands, queue policy and engine monitoring do
 //! not depend on a window, event loop, provider UI or native media framework.
 pub mod catalog;
+pub mod downloads;
 pub mod files;
 
 pub mod sources;
@@ -37,10 +38,18 @@ pub struct Notice {
     pub message: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct UnplayableTrack {
+    pub track: Track,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub current: Option<Track>,
     pub up_next: Arc<[Track]>,
+    /// Failed entries retained for this sequence, including tracks already skipped.
+    pub unplayable: Arc<[UnplayableTrack]>,
     pub playing: bool,
     pub seconds: f64,
     pub level: f32,
@@ -69,6 +78,11 @@ pub type PreparePlayback = Arc<dyn Fn() -> Result<()> + Send + Sync>;
 /// Replaceable engine boundary. Platform-managed playback can implement its own
 /// engine without bringing a native framework into the application service.
 pub trait Engine: Send {
+    /// Optional immediate render gate, independent of the orchestration worker.
+    fn render_pause(&self) -> Option<amp_audio::RenderPause> {
+        None
+    }
+
     /// Apply output effects live without replacing the queue or resetting its clock.
     fn set_processing(&self, settings: AudioProcessingSettings);
     /// Return a replacement ID; snapshots echo it once that sequence is applied.
@@ -90,6 +104,10 @@ pub trait Engine: Send {
 }
 
 impl Engine for Player {
+    fn render_pause(&self) -> Option<amp_audio::RenderPause> {
+        Some(self.render_pause())
+    }
+
     fn set_processing(&self, settings: AudioProcessingSettings) {
         self.set_processing(settings);
     }
@@ -155,7 +173,7 @@ enum Command {
     ClearQueue,
     Metadata(Album),
     CatalogMetadata(Arc<Library>, Arc<BTreeMap<String, String>>),
-    Transport(Transport),
+    Transport(Transport, Option<Box<dyn Send>>),
     Observer(Option<NowPlayingObserver>),
     Shutdown,
     #[cfg(test)]
@@ -168,6 +186,7 @@ enum Command {
 pub struct Playback {
     commands: mpsc::Sender<Command>,
     snapshot: Arc<RwLock<Snapshot>>,
+    render_pause: Arc<RwLock<Option<amp_audio::RenderPause>>>,
 }
 impl Playback {
     pub fn snapshot(&self) -> Snapshot {
@@ -243,7 +262,14 @@ impl Playback {
         self.send(Command::CatalogMetadata(library, artwork));
     }
     pub fn transport(&self, command: Transport) {
-        self.send(Command::Transport(command));
+        let pause = matches!(command, Transport::Pause | Transport::Stop)
+            || (matches!(command, Transport::Toggle) && self.snapshot().playing);
+        let guard = if pause {
+            self.render_pause.read().unwrap().clone().map(|gate| gate())
+        } else {
+            None
+        };
+        self.send(Command::Transport(command, guard));
     }
     pub fn observe_now_playing(&self, observer: Option<NowPlayingObserver>) {
         self.send(Command::Observer(observer));
@@ -284,13 +310,19 @@ impl PlaybackService {
         let (commands, rx) = mpsc::channel();
         let snapshot = Arc::new(RwLock::new(Snapshot::default()));
         let shared = snapshot.clone();
+        let render_pause = Arc::new(RwLock::new(None));
+        let worker_pause = render_pause.clone();
         let worker = thread::Builder::new()
             .name("amp-app".into())
             .spawn(move || {
-                Worker::new(prepare, factory, shared).run(rx);
+                Worker::new(prepare, factory, shared, worker_pause).run(rx);
             })?;
         Ok(Self {
-            playback: Playback { commands, snapshot },
+            playback: Playback {
+                commands,
+                snapshot,
+                render_pause,
+            },
             worker: Some(worker),
         })
     }
@@ -351,6 +383,9 @@ struct Worker {
     albums: BTreeMap<TrackKey, Arc<NowPlayingAlbum>>,
     up_next: Arc<[Track]>,
     queue_dirty: bool,
+    unplayable: BTreeMap<TrackKey, String>,
+    unplayable_snapshot: Arc<[UnplayableTrack]>,
+    render_pause: Arc<RwLock<Option<amp_audio::RenderPause>>>,
 }
 type TrackKey = (String, String, String);
 fn track_key(track: &Track) -> TrackKey {
@@ -374,10 +409,12 @@ impl Worker {
         prepare: PreparePlayback,
         factory: EngineFactory,
         published: Arc<RwLock<Snapshot>>,
+        render_pause: Arc<RwLock<Option<amp_audio::RenderPause>>>,
     ) -> Self {
         Self {
             prepare,
             factory,
+            render_pause,
             resolver: None,
             engine: None,
             buffer_seconds: amp_core::default_audio_buffer_seconds(),
@@ -394,6 +431,8 @@ impl Worker {
             albums: BTreeMap::new(),
             up_next: Arc::from([]),
             queue_dirty: true,
+            unplayable: BTreeMap::new(),
+            unplayable_snapshot: Arc::from([]),
         }
     }
     fn run(mut self, rx: mpsc::Receiver<Command>) {
@@ -434,6 +473,7 @@ impl Worker {
         if let Some(engine) = self.engine.take() {
             engine.set_playing(false);
         }
+        *self.render_pause.write().unwrap() = None;
         self.clock.playing = false;
         self.clock.level = 0.0;
         self.poll();
@@ -657,7 +697,7 @@ impl Worker {
                 self.queue_dirty = true;
                 Ok(())
             }
-            Command::Transport(transport) => self.transport(transport),
+            Command::Transport(transport, _pause_guard) => self.transport(transport),
             Command::Observer(observer) => {
                 self.observer = observer;
                 self.last_media = None;
@@ -741,11 +781,14 @@ impl Worker {
         if self.engine.is_none() {
             let engine = (self.factory)(self.resolver.clone(), self.buffer_seconds)?;
             engine.set_processing(self.processing);
+            *self.render_pause.write().unwrap() = engine.render_pause();
             self.engine = Some(engine);
         }
         Ok(())
     }
     fn accept_edit(&mut self, update: amp_audio::QueueUpdate) {
+        self.unplayable
+            .retain(|key, _| update.tracks.iter().any(|track| &track_key(track) == key));
         self.expected_sequence = update.clock.sequence;
         self.clock = update.clock;
         self.queue.sequence = update.tracks;
@@ -810,6 +853,7 @@ impl Worker {
         }
         self.ensure_engine()?;
         self.expected_sequence = self.engine.as_ref().unwrap().play(tracks.clone(), start);
+        self.unplayable.clear();
         self.queue = Queue {
             sequence: tracks,
             pending: vec![],
@@ -906,6 +950,31 @@ impl Worker {
                     PlayerEvent::OutputUnavailable(error) | PlayerEvent::PlaybackError(error) => {
                         error
                     }
+                    PlayerEvent::TrackPlayable { sequence, index } => {
+                        if sequence == self.expected_sequence
+                            && let Some(track) = self.queue.sequence.get(index)
+                        {
+                            self.unplayable.remove(&track_key(track));
+                            self.queue_dirty = true;
+                        }
+                        continue;
+                    }
+                    PlayerEvent::TrackUnplayable {
+                        sequence,
+                        index,
+                        reason,
+                    } => {
+                        if sequence != self.expected_sequence {
+                            continue;
+                        }
+                        let Some(track) = self.queue.sequence.get(index) else {
+                            continue;
+                        };
+                        let message = format!("Skipping {}: {reason}", track.title);
+                        self.unplayable.insert(track_key(track), reason);
+                        self.queue_dirty = true;
+                        message
+                    }
                     PlayerEvent::OutputRecovered if self.clock.playing => {
                         "Audio output reconnected. Playing.".into()
                     }
@@ -918,12 +987,28 @@ impl Worker {
         }
         if self.queue_dirty {
             self.up_next = self.queue.remaining(self.clock.track).into();
+            self.unplayable_snapshot = self
+                .queue
+                .sequence
+                .iter()
+                .filter_map(|track| {
+                    self.unplayable
+                        .get(&track_key(track))
+                        .map(|reason| UnplayableTrack {
+                            track: track.clone(),
+                            reason: reason.clone(),
+                        })
+                })
+                .collect::<Vec<_>>()
+                .into();
+
             self.queue_dirty = false;
         }
         let current = self.queue.sequence.get(self.clock.track).cloned();
         let snapshot = Snapshot {
             current: current.clone(),
             up_next: self.up_next.clone(),
+            unplayable: self.unplayable_snapshot.clone(),
             playing: self.clock.playing,
             seconds: self.clock.seconds,
             level: self.clock.level,

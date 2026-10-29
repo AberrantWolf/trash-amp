@@ -106,13 +106,21 @@ pub struct RemoteTrack {
     pub position: u16,
     pub audio: Option<api::MusicTrackAvailability>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DownloadStatus {
+    Pending,
+    Complete,
+    Failed,
+    Cancelled,
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Download {
     pub id: String,
     pub track: Track,
     pub remote: RemoteTrack,
     pub bytes: u64,
-    pub status: String,
+    pub status: DownloadStatus,
     pub error: Option<String>,
     pub digest: String,
 }
@@ -135,6 +143,43 @@ pub struct Adapter {
     source_observer: Mutex<Option<amp_app::sources::SourceObserver>>,
     download_token: Mutex<Option<MediaCancellation>>,
 }
+impl amp_app::downloads::Backend for Adapter {
+    fn pending(&self) -> Result<Vec<Track>> {
+        Ok(self
+            .downloads()?
+            .into_iter()
+            .filter(|d| d.status == DownloadStatus::Pending)
+            .map(|d| d.track)
+            .collect())
+    }
+    fn reset_cancel(&self) {
+        self.reset_download_cancel();
+    }
+    fn cancelled(&self) -> bool {
+        self.downloads_cancel.load(Ordering::Acquire)
+    }
+    fn interrupt(&self) {
+        self.downloads_cancel.store(true, Ordering::Release);
+        if let Ok(token) = self.download_token.try_lock()
+            && let Some(token) = token.as_ref()
+        {
+            token.cancel();
+        }
+    }
+    fn cancel(&self) -> Result<()> {
+        self.cancel_downloads()
+    }
+    fn schedule(&self, tracks: &[Track]) -> Result<()> {
+        self.schedule(tracks)
+    }
+    fn download(&self, track: Track) -> Result<()> {
+        self.download(track)
+    }
+    fn remove(&self, track: &Track) -> Result<()> {
+        self.remove_download(track)
+    }
+}
+
 fn connection_id(key: ConnectionKey) -> String {
     format!("{}/{}", key.server_id, key.user_id)
 }
@@ -512,6 +557,7 @@ impl Adapter {
                         }
                     }
                     snapshot.library.albums.push(Album {
+                        metadata: Default::default(),
                         id: ItemId {
                             library: connection_id(key),
                             provider: "collector".into(),
@@ -601,7 +647,7 @@ impl Adapter {
                 .ok()?
                 .into_iter()
                 .find(|d| {
-                    d.status == "complete"
+                    d.status == DownloadStatus::Complete
                         && d.remote.key == key
                         && d.remote.item == item
                         && d.remote.collection == list.list.collection_id
@@ -658,7 +704,7 @@ impl Adapter {
     }
     fn retained_download(&self, remote: &RemoteTrack) -> Result<Option<Download>> {
         Ok(self.downloads()?.into_iter().find(|d| {
-            d.status == "complete"
+            d.status == DownloadStatus::Complete
                 && d.remote.key == remote.key
                 && d.remote.collection == remote.collection
                 && d.remote.capture == remote.capture
@@ -695,11 +741,36 @@ impl Adapter {
     pub fn set_budget(&self, bytes: u64) -> Result<()> {
         self.put("setting", "budget", &bytes)
     }
-    pub fn cancel_downloads(&self) {
+    pub fn cancel_downloads(&self) -> Result<()> {
+        // Stop the transfer before waiting for persistence. The same database lock
+        // orders cancellation against reservation and final completion writes.
         self.downloads_cancel.store(true, Ordering::Release);
         if let Some(token) = self.download_token.lock().unwrap().as_ref() {
             token.cancel()
         }
+        let mut db = self.db.lock().unwrap();
+        let transaction = db.transaction()?;
+        let mut pending = Vec::new();
+        {
+            let mut stmt =
+                transaction.prepare("SELECT value FROM records WHERE kind='download'")?;
+            for row in stmt.query_map([], |r| r.get::<_, String>(0))? {
+                let mut record: Download = serde_json::from_str(&row?)?;
+                if record.status == DownloadStatus::Pending {
+                    record.status = DownloadStatus::Cancelled;
+                    record.error = Some("Download cancelled".into());
+                    pending.push(record);
+                }
+            }
+        }
+        for record in pending {
+            transaction.execute(
+                "UPDATE records SET value=?1 WHERE kind='download' AND id=?2",
+                params![serde_json::to_string(&record)?, record.id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
     pub fn reset_download_cancel(&self) {
         self.downloads_cancel.store(false, Ordering::Release)
@@ -724,7 +795,7 @@ impl Adapter {
                 track: track.clone(),
                 remote: remote.clone(),
                 bytes: length.0,
-                status: "pending".into(),
+                status: DownloadStatus::Pending,
                 error: None,
                 digest: digest.hex.clone(),
             });
@@ -734,6 +805,9 @@ impl Adapter {
         }
         let mut db = self.db.lock().unwrap();
         let transaction = db.transaction()?;
+        if self.downloads_cancel.load(Ordering::Acquire) {
+            bail!("Download cancelled")
+        }
         use rusqlite::OptionalExtension;
         let mut existing = std::collections::BTreeMap::new();
         {
@@ -747,7 +821,7 @@ impl Adapter {
         for record in planned {
             if existing
                 .get(&record.id)
-                .is_none_or(|d| d.status != "complete")
+                .is_none_or(|d| d.status != DownloadStatus::Complete)
             {
                 existing.insert(record.id.clone(), record);
             }
@@ -775,7 +849,7 @@ impl Adapter {
         if fs2::available_space(&self.root)?
             < existing
                 .values()
-                .filter(|d| d.status != "complete")
+                .filter(|d| d.status != DownloadStatus::Complete)
                 .map(|d| d.bytes)
                 .sum::<u64>()
                 .saturating_add(256 * 1024 * 1024)
@@ -799,18 +873,21 @@ impl Adapter {
             bail!("Unsupported download digest")
         };
         let id = download_id(&remote)?;
-        let mut record = Download {
+        let record = Download {
             id: id.clone(),
             track,
             remote: remote.clone(),
             bytes: length.0,
-            status: "pending".into(),
+            status: DownloadStatus::Pending,
             error: None,
             digest: digest.hex.clone(),
         };
         // Serialize reservation with every other admission; explicit downloads are never evicted.
         {
             let db = self.db.lock().unwrap();
+            if self.downloads_cancel.load(Ordering::Acquire) {
+                bail!("Download cancelled")
+            }
             use rusqlite::OptionalExtension;
             let old: Option<String> = db
                 .query_row(
@@ -821,7 +898,7 @@ impl Adapter {
                 .optional()?;
             if let Some(old) = old {
                 let old: Download = serde_json::from_str(&old)?;
-                if old.status == "complete" {
+                if old.status == DownloadStatus::Complete {
                     return Ok(());
                 }
             }
@@ -907,22 +984,32 @@ impl Adapter {
             Ok(())
         })();
         *self.download_token.lock().unwrap() = None;
-        match result {
-            Ok(()) => {
-                record.status = "complete".into();
-                record.error = None
-            }
-            Err(e) => {
-                record.status = "failed".into();
-                record.error = Some(e.to_string());
-                let _ = std::fs::remove_file(temp);
-                self.put("download", &id, &record)?;
-                return Err(e);
-            }
-        }
-        self.put("download", &id, &record)?;
+        self.finish_download(record, &temp, result)?;
         self.notify_availability(remote.key);
         Ok(())
+    }
+    fn finish_download(&self, mut record: Download, temp: &Path, result: Result<()>) -> Result<()> {
+        // Cancellation and successful completion linearize under this lock. If
+        // cancellation won, even a just-renamed file must not become complete.
+        let db = self.db.lock().unwrap();
+        let result = if self.downloads_cancel.load(Ordering::Acquire) {
+            record.status = DownloadStatus::Cancelled;
+            Err(anyhow::anyhow!("Download cancelled"))
+        } else {
+            record.status = if result.is_ok() {
+                DownloadStatus::Complete
+            } else {
+                DownloadStatus::Failed
+            };
+            result
+        };
+        record.error = result.as_ref().err().map(ToString::to_string);
+        if result.is_err() {
+            let _ = std::fs::remove_file(temp);
+            let _ = std::fs::remove_file(self.root.join("audio").join(&record.id));
+        }
+        db.execute("INSERT INTO records VALUES ('download',?1,?2) ON CONFLICT(kind,id) DO UPDATE SET value=excluded.value",params![record.id,serde_json::to_string(&record)?])?;
+        result
     }
     pub fn remove_download(&self, track: &Track) -> Result<()> {
         let remote = parse_remote(track)?;
@@ -1360,11 +1447,78 @@ mod tests {
         assert!(a.schedule(&[t.clone(), other.clone()]).is_err());
         assert!(a.downloads().unwrap().is_empty());
         a.schedule(std::slice::from_ref(&t)).unwrap();
-        assert_eq!(a.downloads().unwrap()[0].status, "pending");
+        assert_eq!(a.downloads().unwrap()[0].status, DownloadStatus::Pending);
         assert!(a.schedule(&[other]).is_err());
         assert_eq!(a.downloads().unwrap().len(), 1);
         a.remove_download(&t).unwrap();
         assert!(a.downloads().unwrap().is_empty());
+    }
+    #[test]
+    fn cancellation_is_durable_for_the_whole_batch_and_late_completion_cannot_revive_it() {
+        let root = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        let a = Adapter::with_credentials(root.path(), secrets.clone()).unwrap();
+        let complete = track(key(), b"complete");
+        let active = track(key(), b"active");
+        let tail = track(key(), b"tail");
+        a.schedule(&[complete.clone(), active.clone(), tail.clone()])
+            .unwrap();
+        let mut completed = a
+            .downloads()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.track.id == complete.id)
+            .unwrap();
+        completed.status = DownloadStatus::Complete;
+        a.put("download", &completed.id, &completed).unwrap();
+        let active_record = a
+            .downloads()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.track.id == active.id)
+            .unwrap();
+        // A successful transfer that has just renamed its file still loses to an
+        // earlier cancel, and must neither revive its record nor leave an orphan.
+        let final_path = a.root.join("audio").join(&active_record.id);
+        std::fs::write(&final_path, b"active").unwrap();
+        a.cancel_downloads().unwrap();
+        assert!(
+            a.finish_download(active_record, &root.path().join("unused.part"), Ok(()))
+                .is_err()
+        );
+        assert!(!final_path.exists());
+        assert!(a.download(tail.clone()).is_err());
+        drop(a);
+        let a = Adapter::with_credentials(root.path(), secrets).unwrap();
+        let records = a.downloads().unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|d| d.status == DownloadStatus::Cancelled)
+                .count(),
+            2
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|d| d.status == DownloadStatus::Complete)
+                .count(),
+            1
+        );
+        assert!(
+            amp_app::downloads::Backend::pending(a.as_ref())
+                .unwrap()
+                .is_empty()
+        );
+        // Only an explicit retry schedules cancelled work again.
+        a.reset_download_cancel();
+        a.schedule(std::slice::from_ref(&tail)).unwrap();
+        assert_eq!(
+            amp_app::downloads::Backend::pending(a.as_ref())
+                .unwrap()
+                .len(),
+            1
+        );
     }
     #[test]
     fn completed_audio_is_retained_offline_and_corruption_fails_closed() {
@@ -1376,7 +1530,7 @@ mod tests {
         a.schedule(std::slice::from_ref(&t)).unwrap();
         let mut d = a.downloads().unwrap().pop().unwrap();
         std::fs::write(a.root.join("audio").join(&d.id), data).unwrap();
-        d.status = "complete".into();
+        d.status = DownloadStatus::Complete;
         a.put("download", &d.id, &d).unwrap();
         let mut reader = a.resolve(&t).unwrap();
         let mut actual = vec![];

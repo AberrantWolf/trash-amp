@@ -83,6 +83,7 @@ fn catalog(records: Vec<Record>, artwork: BTreeMap<String, String>) -> ExternalC
         let album = albums
             .entry(record.album_id.clone())
             .or_insert_with(|| Album {
+                metadata: Default::default(),
                 id: id(record.album_id.clone()),
                 title: record.album.clone(),
                 artist: record.album_artist.clone(),

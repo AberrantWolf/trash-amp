@@ -17,6 +17,7 @@ fn library(id: &str, title: &str) -> Library {
         root: format!("/offline/{id}"),
         warnings: vec![],
         albums: vec![Album {
+            metadata: Default::default(),
             id: identity.clone(),
             title: title.into(),
             artist: "Artist".into(),

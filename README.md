@@ -88,6 +88,9 @@ only for this session.
 - Streaming Symphonia decoding and seek, CUE/BIN and current redumper audio PCM through junk-libs, CPAL output, and Rubato resampling when needed.
 - Keyless MusicBrainz metadata retrieval, a persistent local response cache, and background name updates.
 - Transient album playback order and up-next controls, with Tracks / Up next tabs.
+- Unreadable tracks are skipped automatically without cutting off buffered music;
+  Up next retains skipped tracks with an unavailable reason for the current queue.
+  Play after the queue finishes restarts from its original starting track.
 - A draggable desktop album divider; double-click to reset. Its width survives phone/desktop layout switches within the window.
 - Albums / Artists browsing, persisted locally; artist entries retain complete album-artist credits and show album counts.
 - Live library search across artists, albums, and tracks, with accent-insensitive multi-word matching, grouped previews, and full result lists.
@@ -142,6 +145,11 @@ The local library appears before online lookups finish. Disc lookups take priori
 
 Missing album titles, artist credits and track names are filled; existing non-placeholder names win. Matching editions must agree on album identity; when translated editions disagree on track names, only unanimous fields are applied and the album is marked ambiguous. Updated albums show MusicBrainz in their source label. CUE track TITLE/PERFORMER and CD-TEXT names are read locally first. Playback locations, track order and sample boundaries do not change.
 
+New scans retain internal name origins so generated folder/file labels can be
+filled without overwriting real tags, even when a tag happens to match a filename.
+Corrections to cached fallback names are preserved. Older caches remain readable;
+refresh a folder to establish origins for names whose source is uncertain.
+
 Responses, negative results and match provenance stay in the local SQLite database. Positive responses are reused for 30 days, missing results for seven days, and stale cached results remain usable offline. A network failure stops that lookup pass while local playback remains available. No source files are written. The saved library and response cache survive restart. Cover art, genres/year fields, fingerprinting and a manual match/correction UI remain future work.
 
 API rules: [MusicBrainz API](https://musicbrainz.org/doc/MusicBrainz_API). Disc identity: [MusicBrainz disc ID calculation](https://musicbrainz.org/doc/Disc_ID_Calculation).
@@ -155,6 +163,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 See [architecture](docs/architecture.md), [release gates](docs/release-gates.md), and [prototype validation](docs/validation.md).
+On macOS, native audio tests require access to host codec services; restricted
+execution sandboxes can block even generated WAV decoding. See the
+[native test environment diagnostics](docs/device-music-library.md#validation-and-remaining-qualification).
 
 ## junk-libs development
 

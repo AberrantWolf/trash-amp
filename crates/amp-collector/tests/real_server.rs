@@ -601,7 +601,10 @@ async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
     })
     .await
     .unwrap();
-    assert_eq!(adapter.downloads().unwrap()[0].status, "complete");
+    assert_eq!(
+        adapter.downloads().unwrap()[0].status,
+        amp_collector::DownloadStatus::Complete
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -663,7 +666,7 @@ async fn digital_flac_mp3_stream_seek_download_and_offline_reopen() {
             .downloads()
             .unwrap()
             .iter()
-            .filter(|d| d.status == "complete")
+            .filter(|d| d.status == amp_collector::DownloadStatus::Complete)
             .count(),
         2
     );
@@ -858,7 +861,10 @@ fn direct_https_adapter_fixture() {
     assert!(decoder.read_frames(1024).unwrap().is_some());
     adapter.schedule(std::slice::from_ref(&track)).unwrap();
     adapter.download(track.clone()).unwrap();
-    assert_eq!(adapter.downloads().unwrap()[0].status, "complete");
+    assert_eq!(
+        adapter.downloads().unwrap()[0].status,
+        amp_collector::DownloadStatus::Complete
+    );
     adapter.remove(key).unwrap();
     assert_eq!(adapter.connection_state(key), ConnectionState::Disconnected);
     let mut decoder =

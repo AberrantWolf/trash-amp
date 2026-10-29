@@ -228,6 +228,7 @@ mod tests {
     }
     fn album(key: &str, title: &str, artist: &str, tracks: &[(&str, &str)]) -> Album {
         Album {
+            metadata: Default::default(),
             id: id(key),
             title: title.into(),
             artist: artist.into(),

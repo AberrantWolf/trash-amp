@@ -1115,3 +1115,145 @@ fn enabled_crossfeed_rebuilds_at_new_output_rate_and_keeps_latest_paused_setting
         );
     }
 }
+
+#[test]
+fn ordinary_pause_stops_buffer_consumption_while_a_read_is_blocked() {
+    let (_dir, mut track) = tests::fixture(44_100, 44_100 * 40);
+    let MediaAccess::File { locator } = &track.access else {
+        unreachable!()
+    };
+    let gate = Arc::new(NetworkGate::default());
+    let resolver = Arc::new(NetworkResolver {
+        bytes: std::fs::read(locator).unwrap(),
+        gate: gate.clone(),
+        opens: AtomicUsize::new(0),
+    });
+    track.access = MediaAccess::Managed {
+        provider: "network-test".into(),
+        item: "track".into(),
+    };
+    let harness =
+        Harness::with_resolver(Some(Device::new("car", 44_100)), None, true, Some(resolver));
+    harness.player.play(vec![track], 0);
+    let output = harness.session(0);
+    output.wait_frames(output::buffer_capacity(44_100, true));
+    *gate.blocked.lock().unwrap() = true;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !gate.entered.load(Ordering::Acquire) && Instant::now() < deadline {
+        output.render(4_410);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(gate.entered.load(Ordering::Acquire));
+    assert!(harness.player.snapshot().playing);
+    harness.player.set_playing(false);
+    assert!(!harness.player.snapshot().playing);
+    let position = harness.player.snapshot().seconds;
+    assert!(output.render(4_410).iter().all(|sample| *sample == 0.0));
+    assert_eq!(harness.player.snapshot().seconds, position);
+    gate.release();
+    wait(|| !output.alive.load(Ordering::Acquire));
+    assert!(!harness.player.snapshot().playing);
+    assert_eq!(harness.devices.lock().unwrap().sessions.len(), 1);
+}
+
+#[test]
+fn unreadable_tracks_are_skipped_without_discarding_healthy_buffered_audio() {
+    let (_dir, track) = tests::fixture(44_100, 100);
+    let mut missing = track.clone();
+    missing.title = "Missing".into();
+    missing.access = MediaAccess::File {
+        locator: "/nonexistent/trash-amp-missing.wav".into(),
+    };
+    let harness = Harness::new(Some(Device::new("first", 44_100)));
+    let session = harness.session(0);
+    let sequence = harness.player.play(vec![track.clone(), missing, track], 0);
+    session.wait_frames(200);
+    assert!(harness.player.snapshot().playing);
+    let event = harness.player.event().unwrap();
+    assert!(
+        matches!(event, PlayerEvent::TrackUnplayable { sequence: s, index: 1, .. } if s == sequence)
+    );
+    let samples = session.render(200);
+    for (index, pair) in samples.chunks_exact(2).enumerate() {
+        assert_eq!(pair[0], (index % 100) as f32 / 32_768.0);
+    }
+    assert_eq!(harness.player.snapshot().track, 2);
+    wait(|| !harness.player.snapshot().playing);
+}
+
+#[test]
+fn play_after_completion_restarts_original_start_but_append_targets_new_tracks() {
+    let (_dir, track) = tests::fixture(44_100, 100);
+    let harness = Harness::new(Some(Device::new("first", 44_100)));
+    let session = harness.session(0);
+    harness.player.play(vec![track.clone(); 3], 1);
+    session.wait_frames(200);
+    session.render(200);
+    wait(|| !harness.player.snapshot().playing);
+    harness.player.set_playing(true);
+    wait(|| harness.player.snapshot().playing);
+    session.wait_frames(200);
+    session.render(1);
+    assert_eq!(harness.player.snapshot().track, 1);
+    session.render(199);
+    wait(|| !harness.player.snapshot().playing);
+    harness.player.append(vec![track]);
+    harness.player.set_playing(true);
+    session.wait_frames(100);
+    session.render(100);
+    assert_eq!(harness.player.snapshot().track, 3);
+}
+
+#[test]
+fn temporary_failure_is_cleared_when_completed_sequence_is_retried_successfully() {
+    let (dir, mut track) = tests::fixture(44_100, 100);
+    let MediaAccess::File { locator } = &track.access else {
+        unreachable!()
+    };
+    let bytes = std::fs::read(locator).unwrap();
+    let missing = dir.path().join("temporarily-missing.wav");
+    track.access = MediaAccess::File {
+        locator: missing.to_string_lossy().into_owned(),
+    };
+    let harness = Harness::new(Some(Device::new("first", 44_100)));
+    let session = harness.session(0);
+    harness.player.play(vec![track], 0);
+    let mut failed = false;
+    wait(|| {
+        if matches!(
+            harness.player.event(),
+            Some(PlayerEvent::TrackUnplayable { .. })
+        ) {
+            failed = true;
+        }
+        failed && !harness.player.snapshot().playing
+    });
+    std::fs::write(missing, bytes).unwrap();
+    harness.player.set_playing(true);
+    session.wait_frames(100);
+    assert!(matches!(
+        harness.player.event(),
+        Some(PlayerEvent::TrackPlayable { index: 0, .. })
+    ));
+    assert!(session.render(100).iter().any(|sample| *sample != 0.0));
+}
+
+#[test]
+fn orchestration_pause_lease_preserves_pcm_until_ordered_pause_is_installed() {
+    let (_dir, track) = tests::fixture(44_100, 100);
+    let harness = Harness::new(Some(Device::new("first", 44_100)));
+    let session = harness.session(0);
+    harness.player.play(vec![track], 0);
+    session.wait_frames(100);
+    session.render(7);
+    let lease = harness.player.render_pause()();
+    assert!(!harness.player.snapshot().playing);
+    assert_eq!(session.render(20), vec![0.0; 40]);
+    assert_eq!(harness.player.shared.position.load(Ordering::Relaxed), 7);
+    harness.player.set_playing(false);
+    drop(lease);
+    assert!(!harness.player.snapshot().playing);
+    harness.player.set_playing(true);
+    wait(|| harness.player.snapshot().playing);
+    assert_eq!(session.render(1)[0], 7.0 / 32_768.0);
+}

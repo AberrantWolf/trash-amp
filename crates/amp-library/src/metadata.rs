@@ -1,7 +1,7 @@
 //! Keyless, read-only MusicBrainz enrichment. Network work belongs on a worker thread.
 //! Local metadata wins; ambiguous releases are recorded but never chosen arbitrarily.
 use crate::{Store, normalized};
-use amp_core::{Album, Library, MediaAccess, Track};
+use amp_core::{Album, Library, MediaAccess, NameOrigin, Track};
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use junk_libs_disc::{cue_audio::CueAudioDisc, layout::TrackKind, redumper};
@@ -82,10 +82,10 @@ fn query_for(album: &Album) -> Result<Option<Query>> {
     // Fully named file albums have nothing to fill in this metadata slice.
     if album.tracks.iter().all(|t| {
         matches!(t.access, MediaAccess::File { .. })
-            && !missing_track_title(t)
-            && !unknown(&t.artist)
-    }) && !unknown(&album.title)
-        && !unknown(&album.artist)
+            && !missing_track_title(album, t)
+            && !missing_track_artist(album, t)
+    }) && !missing(&album.metadata.names.title, &album.title)
+        && !missing(&album.metadata.names.artist, &album.artist)
     {
         return Ok(None);
     }
@@ -148,9 +148,9 @@ fn query_for(album: &Album) -> Result<Option<Query>> {
                 )
                 .read()?;
             if let Some(id) = file
-                .primary_tag()
-                .or_else(|| file.first_tag())
-                .and_then(|t| t.get_string(ItemKey::MusicBrainzReleaseId))
+                .tags()
+                .iter()
+                .find_map(|t| t.get_string(ItemKey::MusicBrainzReleaseId))
                 && mbid(id)
             {
                 return Ok(Some(Query::Release(id.to_owned())));
@@ -408,7 +408,7 @@ fn candidate(album: &Album, release: &Value, query: &Query) -> Option<Names> {
             if !t.duration_seconds.is_finite()
                 || t.duration_seconds <= 0.0
                 || (length - t.duration_seconds).abs() > 2.0
-                || (!missing_track_title(t) && normalized(&t.title) != normalized(rt))
+                || (!missing_track_title(album, t) && normalized(&t.title) != normalized(rt))
             {
                 return None;
             }
@@ -483,31 +483,44 @@ fn choose(album: &Album, query: &Query, response: &Value) -> MatchRecord {
 fn unknown(s: &str) -> bool {
     s.trim().is_empty() || normalized(s).starts_with("unknown ")
 }
-fn missing_track_title(t: &Track) -> bool {
-    unknown(&t.title)
-        || t.title == format!("Track {}", t.number)
-        || match &t.access {
-            MediaAccess::File { locator } => Path::new(locator)
-                .file_stem()
-                .is_some_and(|s| s.to_string_lossy() == t.title),
-            _ => false,
-        }
+fn missing(origin: &NameOrigin, value: &str) -> bool {
+    match origin {
+        NameOrigin::Generated(original) => original == value,
+        NameOrigin::Unspecified => unknown(value),
+        NameOrigin::Source | NameOrigin::MusicBrainz => false,
+    }
+}
+fn missing_track_title(album: &Album, t: &Track) -> bool {
+    missing(
+        album
+            .metadata
+            .tracks
+            .get(&t.id.item)
+            .map(|n| &n.title)
+            .unwrap_or(&NameOrigin::Unspecified),
+        &t.title,
+    )
+}
+fn missing_track_artist(album: &Album, t: &Track) -> bool {
+    missing(
+        album
+            .metadata
+            .tracks
+            .get(&t.id.item)
+            .map(|n| &n.artist)
+            .unwrap_or(&NameOrigin::Unspecified),
+        &t.artist,
+    )
 }
 fn apply(album: &mut Album, names: &Names) -> bool {
     let before = serde_json::to_string(album).unwrap();
-    let fallback = album.tracks.first().is_some_and(|t| match &t.access {
-        MediaAccess::DiscTrack { cue, .. } | MediaAccess::RedumperTrack { anchor: cue, .. } => {
-            Path::new(cue)
-                .file_stem()
-                .is_some_and(|s| s.to_string_lossy() == album.title)
-        }
-        _ => false,
-    });
-    if unknown(&album.title) || fallback {
+    if missing(&album.metadata.names.title, &album.title) {
         album.title = names.title.clone();
+        album.metadata.names.title = NameOrigin::MusicBrainz;
     }
-    if unknown(&album.artist) {
+    if missing(&album.metadata.names.artist, &album.artist) {
         album.artist = names.artist.clone();
+        album.metadata.names.artist = NameOrigin::MusicBrainz;
     }
     for t in &mut album.tracks {
         if let Some(n) = names
@@ -515,11 +528,32 @@ fn apply(album: &mut Album, names: &Names) -> bool {
             .iter()
             .find(|n| n.disc == t.disc && n.number == t.number)
         {
-            if !n.title.is_empty() && missing_track_title(t) {
-                t.title = n.title.clone();
+            let origins = album.metadata.tracks.get(&t.id.item);
+            let fill_title = !n.title.is_empty()
+                && missing(
+                    origins
+                        .map(|n| &n.title)
+                        .unwrap_or(&NameOrigin::Unspecified),
+                    &t.title,
+                );
+            let fill_artist = !n.artist.is_empty()
+                && missing(
+                    origins
+                        .map(|n| &n.artist)
+                        .unwrap_or(&NameOrigin::Unspecified),
+                    &t.artist,
+                );
+            if !fill_title && !fill_artist {
+                continue;
             }
-            if !n.artist.is_empty() && unknown(&t.artist) {
+            let origins = album.metadata.tracks.entry(t.id.item.clone()).or_default();
+            if fill_title {
+                t.title = n.title.clone();
+                origins.title = NameOrigin::MusicBrainz;
+            }
+            if fill_artist {
                 t.artist = n.artist.clone();
+                origins.artist = NameOrigin::MusicBrainz;
             }
         }
     }
@@ -708,7 +742,8 @@ mod tests {
     use amp_core::{ItemId, Track};
     use std::cell::Cell;
     fn album() -> Album {
-        Album {
+        let mut album = Album {
+            metadata: Default::default(),
             id: ItemId {
                 library: "test".into(),
                 provider: "filesystem".into(),
@@ -738,7 +773,19 @@ mod tests {
                     },
                 })
                 .collect(),
+        };
+        album.metadata.names.title = NameOrigin::Generated(album.title.clone());
+        album.metadata.names.artist = NameOrigin::Generated(album.artist.clone());
+        for track in &album.tracks {
+            album.metadata.tracks.insert(
+                track.id.item.clone(),
+                amp_core::NameOrigins {
+                    title: NameOrigin::Generated(track.title.clone()),
+                    artist: NameOrigin::Generated(track.artist.clone()),
+                },
+            );
         }
+        album
     }
     fn release(id: &str, title: &str) -> Value {
         json!({"id":id,"title":title,"artist-credit":[{"name":"The Artist","joinphrase":""}],
@@ -760,6 +807,105 @@ mod tests {
             }
             Ok(self.value.clone())
         }
+    }
+    #[test]
+    fn missing_album_tag_uses_release_id_and_fills_folder_fallback() {
+        use amp_core::LibraryProvider;
+        use lofty::{
+            config::WriteOptions,
+            prelude::{Accessor, TagExt},
+            tag::{Tag, TagType},
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let release_id = "12345678-1234-1234-1234-123456789abc";
+        for number in 1..=2 {
+            let path = dir.path().join(format!("{number}.wav"));
+            let mut wav = hound::WavWriter::create(
+                &path,
+                hound::WavSpec {
+                    channels: 2,
+                    sample_rate: 44100,
+                    bits_per_sample: 16,
+                    sample_format: hound::SampleFormat::Int,
+                },
+            )
+            .unwrap();
+            for _ in 0..88200 {
+                wav.write_sample(0i16).unwrap();
+            }
+            wav.finalize().unwrap();
+            let mut tag = Tag::new(TagType::Id3v2);
+            tag.set_title(format!("Local title {number}"));
+            tag.set_artist("Local artist".into());
+            tag.set_track(number);
+            let mut tag = lofty::id3::v2::Id3v2Tag::from(tag);
+            tag.insert(lofty::id3::v2::Frame::UserText(
+                lofty::id3::v2::ExtendedTextFrame::new(
+                    lofty::TextEncoding::UTF8,
+                    "MusicBrainz Album Id",
+                    release_id,
+                ),
+            ));
+            tag.save_to_path(&path, WriteOptions::default()).unwrap();
+        }
+        let library = crate::FilesystemProvider {
+            root: dir.path().into(),
+            preferences: Default::default(),
+        }
+        .scan(&|| false)
+        .unwrap();
+        let mut a = library.albums[0].clone();
+        assert!(matches!(a.metadata.names.title, NameOrigin::Generated(_)));
+        let Some(Query::Release(id)) = query_for(&a).unwrap() else {
+            panic!("release ID was skipped")
+        };
+        assert_eq!(id, release_id);
+        let names = candidate(
+            &a,
+            &release(release_id, "The actual album"),
+            &Query::Release(id),
+        )
+        .unwrap();
+        assert!(apply(&mut a, &names));
+        assert_eq!(a.title, "The actual album");
+        assert_eq!(a.metadata.names.title, NameOrigin::MusicBrainz);
+        assert_eq!(a.tracks[0].title, "Local title 1");
+        assert_eq!(a.artist, "Local artist");
+        let restored: Album = serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
+        assert_eq!(restored.metadata.names.title, NameOrigin::MusicBrainz);
+    }
+    #[test]
+    fn provenance_preserves_literal_tags_corrections_and_uncertain_legacy_names() {
+        let names = candidate(
+            &album(),
+            &release("one", "Online album"),
+            &Query::Disc("test-id".into()),
+        )
+        .unwrap();
+        let mut tagged = album();
+        tagged.metadata.names.title = NameOrigin::Source;
+        tagged
+            .metadata
+            .tracks
+            .get_mut(&tagged.tracks[0].id.item)
+            .unwrap()
+            .title = NameOrigin::Source;
+        apply(&mut tagged, &names);
+        assert_eq!(tagged.title, "disc");
+        assert_eq!(tagged.tracks[0].title, "Track 1");
+        let mut corrected = album();
+        corrected.title = "A local correction".into();
+        corrected.tracks[0].title = "Corrected song".into();
+        apply(&mut corrected, &names);
+        assert_eq!(corrected.title, "A local correction");
+        assert_eq!(corrected.tracks[0].title, "Corrected song");
+        let mut legacy = serde_json::to_value(album()).unwrap();
+        legacy.as_object_mut().unwrap().remove("metadata");
+        let mut legacy: Album = serde_json::from_value(legacy).unwrap();
+        apply(&mut legacy, &names);
+        assert_eq!(legacy.title, "disc");
+        assert_eq!(legacy.tracks[0].title, "Track 1");
+        assert_eq!(legacy.artist, "The Artist");
     }
     #[test]
     fn musicbrainz_documented_disc_id_vector() {

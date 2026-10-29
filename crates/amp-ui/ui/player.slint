@@ -25,6 +25,7 @@ export component PlayerWindow inherits Window {
     in property <string> loading-path;
     in property <bool> drop-hovered;
     in property <bool> adhoc-queue;
+    in property <bool> show-disc-selector;
     callback cancel-file-load();
     in property <ConnectionKind> connection-kind;
     icon: @image-url("../../../assets/macos/trash-amp.png");
@@ -536,7 +537,7 @@ export component PlayerWindow inherits Window {
                         artist(name) => { root.open-artist(name); keyboard.focus(); }
                     }
                 }
-                if !root.artist-view && root.collector-active && !(root.show-queue && root.adhoc-queue && !root.artist-view): ComboBox { model: root.album-sources; current-index <=> root.album-source-index; selected(_) => { root.album-source-selected(self.current-index); } }
+                if root.show-disc-selector && !root.artist-view && root.collector-active && !(root.show-queue && root.adhoc-queue && !root.artist-view): ComboBox { model: root.album-sources; current-index <=> root.album-source-index; selected(_) => { root.album-source-selected(self.current-index); } }
                 if !root.artist-view && !(root.show-queue && root.adhoc-queue && !root.artist-view): HorizontalLayout {
                     spacing: 6px; alignment: start;
                     IconButton { label: "Play album"; icon: @image-url("icons/play.svg"); enabled: root.tracks.length > 0 && !root.album-ambiguous; clicked => { root.play-album(); } }

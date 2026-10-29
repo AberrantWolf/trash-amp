@@ -88,11 +88,36 @@ impl Track {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Album {
+    /// Internal name provenance. Older snapshots leave this unspecified until refreshed.
+    #[serde(default)]
+    pub metadata: AlbumMetadata,
     pub id: ItemId,
     pub title: String,
     pub artist: String,
     pub tracks: Vec<Track>,
     pub source_label: String,
+}
+
+/// A generated name remembers its original value so a correction to a cached
+/// name is never mistaken for a replaceable fallback.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NameOrigin {
+    #[default]
+    Unspecified,
+    Source,
+    Generated(String),
+    MusicBrainz,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NameOrigins {
+    pub title: NameOrigin,
+    pub artist: NameOrigin,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AlbumMetadata {
+    pub names: NameOrigins,
+    /// Track item IDs are scoped by their containing album.
+    pub tracks: std::collections::BTreeMap<String, NameOrigins>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

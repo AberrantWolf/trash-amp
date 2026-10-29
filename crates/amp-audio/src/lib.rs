@@ -44,6 +44,9 @@ struct Frame {
 struct Shared {
     clock_writer: AtomicBool,
     playing: AtomicBool,
+    // High bits order transport requests; low bit gates rendering immediately.
+    transport: AtomicU64,
+    pause_leases: AtomicUsize,
     generation: AtomicU64,
     track: AtomicUsize,
     position: AtomicU64,
@@ -104,6 +107,15 @@ pub enum PlayerEvent {
     OutputUnavailable(String),
     OutputRecovered,
     PlaybackError(String),
+    TrackPlayable {
+        sequence: u64,
+        index: usize,
+    },
+    TrackUnplayable {
+        sequence: u64,
+        index: usize,
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -129,8 +141,8 @@ enum Command {
     Edit(QueueEdit, u64, mpsc::Sender<Vec<Track>>),
     Replace(Vec<Track>, usize, u64),
     Seek(f64),
-    Toggle,
-    SetPlaying(bool),
+    Toggle(u64),
+    SetPlaying(bool, u64),
     Next,
     Previous,
     Append(Vec<Track>, bool),
@@ -144,6 +156,16 @@ pub trait MediaResolver: Send + Sync {
     }
     fn cancel(&self);
 }
+/// Acquiring a guard stops rendering until it is dropped. Application owners
+/// retain it while a Pause command waits behind blocking queue edits.
+pub type RenderPause = Arc<dyn Fn() -> Box<dyn Send> + Send + Sync>;
+struct PauseLease(Arc<Shared>);
+impl Drop for PauseLease {
+    fn drop(&mut self) {
+        self.0.pause_leases.fetch_sub(1, Ordering::Release);
+    }
+}
+
 pub struct Player {
     resolver: Option<Arc<dyn MediaResolver>>,
     commands: mpsc::Sender<Command>,
@@ -231,11 +253,34 @@ impl Player {
             .processing
             .store(processing::pack(settings), Ordering::Release);
     }
+    pub fn render_pause(&self) -> RenderPause {
+        let shared = self.shared.clone();
+        Arc::new(move || {
+            shared.pause_leases.fetch_add(1, Ordering::AcqRel);
+            shared.level.store(0, Ordering::Relaxed);
+            Box::new(PauseLease(shared.clone()))
+        })
+    }
+    fn request_transport(&self, pause: bool) -> u64 {
+        let previous = self
+            .shared
+            .transport
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                Some(((state >> 1).wrapping_add(1) << 1) | (state & 1) | u64::from(pause))
+            })
+            .unwrap();
+        if pause {
+            self.shared.level.store(0, Ordering::Relaxed);
+        }
+        (previous >> 1).wrapping_add(1)
+    }
     pub fn toggle(&self) {
-        let _ = self.commands.send(Command::Toggle);
+        let revision = self.request_transport(self.snapshot().playing);
+        let _ = self.commands.send(Command::Toggle(revision));
     }
     pub fn set_playing(&self, playing: bool) {
-        let _ = self.commands.send(Command::SetPlaying(playing));
+        let revision = self.request_transport(!playing);
+        let _ = self.commands.send(Command::SetPlaying(playing, revision));
     }
     pub fn seek(&self, seconds: f64) {
         let _input_change = self.changing_input();
@@ -287,7 +332,9 @@ impl Player {
                 2 => OutputState::Unavailable,
                 _ => OutputState::Connecting,
             },
-            playing: self.shared.playing.load(Ordering::Relaxed),
+            playing: self.shared.playing.load(Ordering::Relaxed)
+                && self.shared.transport.load(Ordering::Acquire) & 1 == 0
+                && self.shared.pause_leases.load(Ordering::Acquire) == 0,
             track: self.shared.track.load(Ordering::Relaxed),
             seconds: self.shared.position.load(Ordering::Relaxed) as f64
                 / f64::from(self.shared.sample_rate.load(Ordering::Acquire).max(1)),
@@ -301,7 +348,8 @@ impl Player {
                 PlayerEvent::OutputUnavailable(error) | PlayerEvent::PlaybackError(error) => {
                     return Some(error);
                 }
-                PlayerEvent::OutputRecovered => {}
+                PlayerEvent::TrackUnplayable { reason, .. } => return Some(reason),
+                PlayerEvent::OutputRecovered | PlayerEvent::TrackPlayable { .. } => {}
             }
         }
         None

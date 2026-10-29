@@ -215,6 +215,8 @@ pub(super) fn render<T: cpal::SizedSample + cpal::FromSample<f32>>(
         let frame = if !health.failed.load(Ordering::Acquire)
             && !shared.shutdown.load(Ordering::Relaxed)
             && shared.playing.load(Ordering::Relaxed)
+            && shared.transport.load(Ordering::Acquire) & 1 == 0
+            && shared.pause_leases.load(Ordering::Acquire) == 0
         {
             match consumer.pop() {
                 Ok(frame) if frame.generation == generation => {
