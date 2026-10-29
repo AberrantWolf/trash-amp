@@ -258,19 +258,13 @@ fn select(ui: &PlayerWindow, state: &mut State, index: usize) {
             .tracks
             .iter()
             .map(|t| TrackRow {
-                title: format!(
-                    "{}{}",
-                    t.title,
-                    match t.availability {
-                        amp_core::Availability::Downloaded => " · Downloaded",
-                        amp_core::Availability::Available if t.id.provider == "collector" =>
-                            " · Streamable",
-                        amp_core::Availability::Available => "",
-                        amp_core::Availability::Preparing => " · Preparing",
-                        amp_core::Availability::Unavailable => " · Unavailable",
-                        amp_core::Availability::Unsupported => " · Unsupported",
-                    }
-                )
+                title: t.title.clone().into(),
+                status: match t.availability {
+                    amp_core::Availability::Available | amp_core::Availability::Downloaded => "",
+                    amp_core::Availability::Preparing => "Preparing",
+                    amp_core::Availability::Unavailable => "Unavailable",
+                    amp_core::Availability::Unsupported => "Unsupported",
+                }
                 .into(),
                 duration: time(t.duration_seconds),
                 number: format!("{:02}", t.number).into(),
@@ -380,6 +374,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     let ui = PlayerWindow::new()?;
     ui.set_home(true);
     ui.set_can_open_folder(folder_picker.is_some());
+    ui.set_touch_input(cfg!(any(target_os = "ios", target_os = "android")));
     ui.global::<ButtonHints>()
         .set_hover_tooltips(!cfg!(any(target_os = "ios", target_os = "android")));
     if folder_picker.is_none() {
@@ -752,8 +747,9 @@ mod tests {
     slint::slint! {
         import { TrackItem } from "ui/track-item.slint";
         export component TrackHarness inherits Window {
+            in property <bool> tap-to-play;
             callback play(); callback select(); callback enqueue();
-            TrackItem { width: 100%; height: 48px; track: {title: "A track", number: "01", duration: "3:00"};
+            TrackItem { width: 100%; height: 48px; tap-to-play: root.tap-to-play; track: {title: "A track", number: "01", duration: "3:00"};
                 play => { root.play(); } select => { root.select(); } enqueue => { root.enqueue(); }
             }
         }
@@ -876,6 +872,7 @@ mod tests {
             title: "First track".into(),
             number: "01".into(),
             duration: "3:00".into(),
+            ..Default::default()
         }])));
         ui.show().unwrap();
         for width in [330., 390.] {
@@ -1289,6 +1286,7 @@ mod tests {
                     title: format!("Track {i}").into(),
                     number: format!("{i:02}").into(),
                     duration: "3:00".into(),
+                    ..Default::default()
                 })
                 .collect::<Vec<_>>(),
         )));
@@ -1468,6 +1466,84 @@ mod tests {
         i_slint_backend_testing::mock_elapsed_time(Duration::from_secs(1));
         click(18.0);
         assert_eq!(played.get(), 2);
+    }
+    #[test]
+    fn mobile_row_plays_on_release_without_a_double_tap() {
+        use slint::platform::{PointerEventButton, WindowEvent};
+        use std::cell::Cell;
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = TrackHarness::new().unwrap();
+        ui.set_tap_to_play(true);
+        ui.window().set_size(slint::LogicalSize::new(390.0, 48.0));
+        let played = Rc::new(Cell::new(0));
+        let count = played.clone();
+        ui.on_play(move || count.set(count.get() + 1));
+        ui.show().unwrap();
+        let position = slint::LogicalPosition::new(150.0, 24.0);
+        for expected in 1..=2 {
+            ui.window().dispatch_event(WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Left,
+            });
+            assert_eq!(played.get(), expected - 1, "pressing alone must not play");
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(30));
+            ui.window().dispatch_event(WindowEvent::PointerReleased {
+                position,
+                button: PointerEventButton::Left,
+            });
+            assert_eq!(
+                played.get(),
+                expected,
+                "one play command per tap, including a double tap"
+            );
+            i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(50));
+        }
+    }
+    #[test]
+    fn mobile_playlist_tap_uses_the_displayed_entry_position() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::platform::{PointerEventButton, WindowEvent};
+        use std::cell::Cell;
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(390.0, 740.0));
+        ui.set_wide(false);
+        ui.set_lists_open(true);
+        ui.set_list_rows(ModelRc::new(VecModel::from(vec![
+            BrowserRow {
+                kind: 1,
+                title: "Unavailable track".into(),
+                status: "Unavailable".into(),
+                ..Default::default()
+            },
+            BrowserRow {
+                kind: 1,
+                title: "Play from here".into(),
+                ..Default::default()
+            },
+        ])));
+        let start = Rc::new(Cell::new(-1));
+        let selected = start.clone();
+        ui.on_play_list_from(move |index| selected.set(index));
+        ui.show().unwrap();
+        let row = ElementHandle::find_by_accessible_label(&ui, "Play from here ")
+            .next()
+            .unwrap();
+        let position = slint::LogicalPosition::new(
+            row.absolute_position().x + 80.,
+            row.absolute_position().y + 20.,
+        );
+        ui.window().dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        i_slint_backend_testing::mock_elapsed_time(Duration::from_millis(30));
+        ui.window().dispatch_event(WindowEvent::PointerReleased {
+            position,
+            button: PointerEventButton::Left,
+        });
+        assert_eq!(start.get(), 1);
+        assert_eq!(ui.get_list_entry(), 1);
     }
     #[test]
     fn keyboard_transport_and_sort_preserve_album_selection() {

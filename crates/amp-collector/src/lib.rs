@@ -564,41 +564,47 @@ impl Adapter {
         Ok(snapshot)
     }
     pub fn list_tracks(&self, key: ConnectionKey, list: &api::CollectionListView) -> Vec<Track> {
-        list.entries
-            .items
-            .iter()
-            .filter_map(|entry| {
-                let item = entry.item_id?;
-                if let Some(audio) = &entry.audio {
-                    Some(remote_track(key, item, list.list.collection_id, "", audio))
-                } else if let Some(ids::ListTarget::MusicTrack {
-                    capture_id,
-                    source_representation_id,
-                    track_position,
-                    ..
-                }) = &entry.source
-                {
-                    self.downloads()
-                        .ok()?
-                        .into_iter()
-                        .find(|d| {
-                            d.status == "complete"
-                                && d.remote.key == key
-                                && d.remote.item == item
-                                && d.remote.collection == list.list.collection_id
-                                && d.remote.capture == *capture_id
-                                && d.remote.source == *source_representation_id
-                                && d.remote.position == *track_position
-                        })
-                        .map(|mut d| {
-                            d.track.availability = amp_core::Availability::Downloaded;
-                            d.track
-                        })
-                } else {
-                    None
-                }
-            })
+        (0..list.entries.items.len())
+            .filter_map(|index| self.list_track(key, list, index))
             .collect()
+    }
+    /// Resolve a displayed entry without shifting positions past unavailable entries.
+    pub fn list_track(
+        &self,
+        key: ConnectionKey,
+        list: &api::CollectionListView,
+        index: usize,
+    ) -> Option<Track> {
+        let entry = list.entries.items.get(index)?;
+        let item = entry.item_id?;
+        if let Some(audio) = &entry.audio {
+            Some(remote_track(key, item, list.list.collection_id, "", audio))
+        } else if let Some(ids::ListTarget::MusicTrack {
+            capture_id,
+            source_representation_id,
+            track_position,
+            ..
+        }) = &entry.source
+        {
+            self.downloads()
+                .ok()?
+                .into_iter()
+                .find(|d| {
+                    d.status == "complete"
+                        && d.remote.key == key
+                        && d.remote.item == item
+                        && d.remote.collection == list.list.collection_id
+                        && d.remote.capture == *capture_id
+                        && d.remote.source == *source_representation_id
+                        && d.remote.position == *track_position
+                })
+                .map(|mut d| {
+                    d.track.availability = amp_core::Availability::Downloaded;
+                    d.track
+                })
+        } else {
+            None
+        }
     }
     pub async fn submit(&self, command: ListCommand) -> Result<api::CollectionListSummary> {
         self.put("command", &command.receipt, &command)?;
@@ -1234,6 +1240,69 @@ mod tests {
             "Artist",
             &row,
         )
+    }
+    #[test]
+    fn list_track_positions_include_unavailable_entries_and_repeated_tracks() {
+        let root = tempfile::tempdir().unwrap();
+        let adapter =
+            Adapter::with_credentials(root.path(), Arc::new(MemorySecrets::default())).unwrap();
+        let key = key();
+        let first = track(key, b"first");
+        let second = track(key, b"second");
+        let remote = parse_remote(&first).unwrap();
+        let entry = |track: Option<&Track>, position| {
+            let remote = track.map(|t| parse_remote(t).unwrap());
+            api::PresentedListEntry {
+                source: None,
+                audio: remote.as_ref().and_then(|r| r.audio.clone()),
+                id: ids::ListEntryId::new(),
+                position,
+                item_id: remote.map(|r| r.item),
+                title: "Track".into(),
+                album: None,
+                artist: None,
+                disc_position: None,
+                track_position: None,
+                artwork: None,
+                availability: api::ListEntryAvailability::Entry,
+            }
+        };
+        let list = api::CollectionListView {
+            list: api::CollectionListSummary {
+                id: ids::CollectionListId::new(),
+                collection_id: remote.collection,
+                revision: ids::Revision(1),
+                name: "Playlist".into(),
+                kind: ids::CollectionListKind::MusicTracks,
+                entry_count: 5,
+                can_edit: true,
+            },
+            entries: ids::Page {
+                items: vec![
+                    entry(None, 0),
+                    entry(Some(&first), 1),
+                    entry(None, 2),
+                    entry(Some(&second), 3),
+                    entry(Some(&first), 4),
+                ],
+                next_cursor: None,
+            },
+        };
+        assert!(adapter.list_track(key, &list, 0).is_none());
+        assert!(adapter.list_track(key, &list, 2).is_none());
+        assert!(adapter.list_track(key, &list, 5).is_none());
+        let resolved = adapter.list_tracks(key, &list);
+        assert_eq!(resolved.len(), 3);
+        assert_eq!(
+            adapter.list_track(key, &list, 3).unwrap().id,
+            resolved[1].id
+        );
+        assert_eq!(
+            adapter.list_track(key, &list, 4).unwrap().id,
+            resolved[0].id
+        );
+        assert_eq!(resolved[0].id, resolved[2].id);
+        assert_ne!(resolved[0].id, resolved[1].id);
     }
     #[test]
     fn snapshots_isolate_servers_accounts_and_survive_restart() {

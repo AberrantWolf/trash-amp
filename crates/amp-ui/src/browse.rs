@@ -115,6 +115,7 @@ fn row(entry: &Entry, compact: bool) -> BrowserRow {
         } else {
             SharedString::default()
         },
+        ..Default::default()
     }
 }
 fn label(title: String, kind: i32) -> BrowserRow {
@@ -385,6 +386,38 @@ fn play_one(ui: &PlayerWindow, s: &mut State, target: &Target) {
     s.playback.play_track(track);
     ui.set_status("Playing track".into());
 }
+fn context_tracks(s: &State, detail: bool, index: usize) -> Vec<Track> {
+    // Resolve a whole result list in one pass over the catalog rather than
+    // searching every album again for every row in a large result set.
+    fn key(id: &amp_core::ItemId) -> (&str, &str, &str) {
+        (&id.library, &id.provider, &id.item)
+    }
+    let tracks = s
+        .library
+        .albums
+        .iter()
+        .flat_map(|album| {
+            album
+                .tracks
+                .iter()
+                .map(move |track| ((key(&album.id), key(&track.id)), track))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let rows = if detail {
+        &s.browser.detail_rows
+    } else {
+        &s.browser.rows
+    };
+    rows.iter()
+        .skip(index)
+        .filter_map(|action| match action {
+            Action::Open(Target::Track { album, track }) => {
+                tracks.get(&(key(album), key(track))).map(|t| (*t).clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
 pub(super) fn enqueue_track(ui: &PlayerWindow, s: &mut State, track: Track) {
     s.playback.enqueue(track);
     ui.set_status("Added to up next".into());
@@ -399,6 +432,18 @@ fn action(ui: &PlayerWindow, s: &mut State, detail: bool, i: i32, verb: i32) {
     .cloned();
     match action {
         Some(Action::Open(target)) => match verb {
+            3 if matches!(target, Target::Track { .. }) && ui.get_tap_to_play() => {
+                s.browser.pending_open = None;
+                s.browser.selected_result = Some(target);
+                if !detail {
+                    ui.set_browser_selected(i);
+                }
+                let tracks = context_tracks(s, detail, i as usize);
+                if !tracks.is_empty() {
+                    s.playback.play_list(tracks);
+                    ui.set_status("Playing from track".into());
+                }
+            }
             1 => {
                 if s.browser.pending_open.is_some() {
                     open(ui, s, target.clone());
@@ -801,10 +846,13 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
     #[test]
-    fn pending_pointer_navigation_preserves_source_and_can_be_cancelled() {
+    fn desktop_detail_pointer_navigation_preserves_source_and_can_be_cancelled() {
         let (ui, state, path, _service) = setup("pointer");
-        ui.set_wide(false);
         results(&ui, &mut state.borrow_mut(), "movement");
+        {
+            let mut s = state.borrow_mut();
+            s.browser.detail_rows = s.browser.rows.clone();
+        }
         let i = state
             .borrow()
             .browser
@@ -812,7 +860,7 @@ mod tests {
             .iter()
             .position(|a| matches!(a, Action::Open(Target::Track { .. })))
             .unwrap();
-        ui.invoke_browse_action(false, i as i32, 3);
+        ui.invoke_browse_action(true, i as i32, 3);
         assert!(ui.get_show_library());
         assert!(state.borrow().browser.pending_open.is_some());
         let target = state
@@ -829,17 +877,101 @@ mod tests {
         assert_eq!(state.borrow().browser.selected_result, Some(target));
         assert!(state.borrow().playback.snapshot().current.is_none());
         ui.invoke_back();
-        ui.invoke_browse_action(false, i as i32, 3);
+        ui.invoke_browse_action(true, i as i32, 3);
         assert!(state.borrow().browser.pending_open.is_some());
         ui.set_home(true);
         poll(&ui, &mut state.borrow_mut());
         assert!(state.borrow().browser.pending_open.is_none());
         assert!(ui.get_home() && ui.get_show_library());
         ui.set_home(false);
-        ui.invoke_browse_action(false, i as i32, 3);
+        ui.invoke_browse_action(true, i as i32, 3);
         ui.set_search_text("changed".into());
         ui.invoke_search_changed();
         assert!(state.borrow().browser.pending_open.is_none());
+        drop(state);
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn mobile_tap_plays_the_remaining_visible_tracks_in_order() {
+        let (ui, state, path, _service) = setup("mobile-play");
+        ui.set_wide(false);
+        let (targets, expected) = {
+            let s = state.borrow();
+            let album = &s.library.albums[0];
+            let indices = [2, 0, 4];
+            (
+                indices.map(|i| Target::Track {
+                    album: album.id.clone(),
+                    track: album.tracks[i].id.clone(),
+                }),
+                indices.map(|i| album.tracks[i].id.clone()),
+            )
+        };
+        {
+            let mut s = state.borrow_mut();
+            s.browser.rows = vec![
+                Action::Open(targets[0].clone()),
+                Action::None,
+                Action::Open(targets[1].clone()),
+                Action::More(2),
+                Action::Open(targets[2].clone()),
+            ];
+            s.browser.detail_rows = vec![
+                Action::Open(targets[2].clone()),
+                Action::Open(targets[0].clone()),
+            ];
+            s.library.albums.reverse();
+            let tracks = context_tracks(&s, false, 2);
+            assert_eq!(
+                tracks.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+                expected[1..]
+            );
+            let tracks = context_tracks(&s, true, 0);
+            assert_eq!(
+                tracks.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+                [expected[2].clone(), expected[0].clone()]
+            );
+        }
+        ui.invoke_browse_action(false, 2, 3);
+        assert!(state.borrow().browser.pending_open.is_none());
+        assert!(
+            ui.get_show_library(),
+            "keep the visible playback context open"
+        );
+        assert_eq!(ui.get_browser_selected(), 2);
+        assert_eq!(ui.get_status(), "Playing from track");
+        // A mobile host retains tap behavior in landscape, independently of width.
+        ui.set_wide(true);
+        ui.set_touch_input(true);
+        ui.invoke_browse_action(true, 0, 3);
+        assert!(state.borrow().browser.pending_open.is_none());
+        drop(state);
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn track_titles_are_plain_and_only_unplayable_states_have_labels() {
+        use amp_core::Availability;
+        use slint::Model;
+        let (ui, state, path, _service) = setup("availability");
+        let cases = [
+            (Availability::Available, ""),
+            (Availability::Downloaded, ""),
+            (Availability::Preparing, "Preparing"),
+            (Availability::Unavailable, "Unavailable"),
+            (Availability::Unsupported, "Unsupported"),
+        ];
+        let mut s = state.borrow_mut();
+        for (track, (availability, _)) in s.library.albums[0].tracks.iter_mut().zip(&cases) {
+            track.availability = availability.clone();
+            track.id.provider = "collector".into();
+        }
+        select(&ui, &mut s, 0);
+        for (i, (_, status)) in cases.iter().enumerate() {
+            let row = ui.get_tracks().row_data(i).unwrap();
+            assert_eq!(row.title, s.library.albums[0].tracks[i].title);
+            assert_eq!(row.status, *status);
+        }
+        drop(s);
         drop(state);
         let _ = std::fs::remove_file(path);
     }

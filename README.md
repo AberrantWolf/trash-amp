@@ -66,6 +66,7 @@ The initial build downloads Slint/Skia dependencies and can take several minutes
 - Live library search across artists, albums, and tracks, with accent-insensitive multi-word matching, grouped previews, and full result lists.
 - Artist pages with primary albums and compact album-grouped guest appearances; Back restores search and browsing positions.
 - Desktop single-click selection, double-click/hover-button playback, and a current-track marker.
+- Mobile single-tap playback from a track through the remaining album, playlist, or visible track results. Playable tracks have no availability label; exceptions use smaller, muted text.
 - Space to play/pause and Left/Right to go previous/next when browsing. Focused controls retain their native keyboard behavior; Enter plays a selected track. Previous restarts after three seconds.
 - OS media keys and Now Playing metadata through Souvlaki (macOS integrated; Windows/Linux still need platform validation).
 - Audio read-ahead defaults to 15 seconds. Settings → General offers a saved 3–60 second buffer; restart the app to apply changes. Larger buffers help cover cellular stalls but use more memory. iOS pauses on output disconnection and audio interruptions, keeping the transport button in sync when returning to the app.
@@ -100,7 +101,9 @@ Search matches all query words across the applicable metadata fields, ignoring c
 
 On desktop the field stays above the sidebar; on phone layouts it sits above playback controls in the library view. Cmd/Ctrl+F focuses search. Escape leaves text editing without clearing the query. Back restores the query, selection, and scroll position. Clearing search returns to the selected browser mode while keeping open details. Search is not saved across restarts.
 
-Selecting a track opens its album and highlights it without playing. Play, double-click, or Enter on a search/artist track plays that song followed by the remaining explicit queue. Album-view playback continues through the album. Add to queue does not navigate or start playback. Where selecting a track replaces its row, pointer navigation waits briefly to distinguish a double-click; keyboard and accessibility selection navigate immediately.
+On desktop, selecting a track opens its album and highlights it without playing. Play, double-click, or Enter on a search/artist track plays that song followed by the remaining explicit queue. Album-view playback continues through the album. Where desktop selection replaces its row, pointer navigation waits briefly to distinguish a double-click; keyboard and accessibility selection navigate immediately.
+
+On mobile, tapping a track starts playback immediately and continues through the remaining tracks in the album, playlist, or visible search/artist results, in their displayed order. Unplayable playlist entries are skipped; tapping an unplayable entry leaves playback unchanged. Add to queue does not navigate or start playback.
 
 Existing saved album-artist sorting preferences become Artists browsing automatically. The library cache and provider/media identities remain compatible. Search does not test media availability; playback reports unavailable sources as before.
 

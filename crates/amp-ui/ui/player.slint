@@ -50,7 +50,7 @@ export component PlayerWindow inherits Window {
     in property <bool> album-ambiguous;
     callback album-source-selected(int);
     callback connect-server(); callback cancel-connect(); callback refresh-server(); callback remove-server();
-    callback list-command(int); callback play-list(bool); callback download-action(int); callback save-budget();
+    callback list-command(int); callback play-list(bool); callback play-list-from(int); callback download-action(int); callback save-budget();
     title: "Trash Amp";
     in property <string> application-version;
     preferred-width: 980px; preferred-height: 680px; min-width: 330px; min-height: 230px; max-width: 10000px; max-height: 10000px;
@@ -120,6 +120,8 @@ export component PlayerWindow inherits Window {
     changed width => { root.viewport-width = self.width; }
     private property <length> desktop-library-width: min(max(220px * root.text-scale, root.library-width * root.text-scale * 1px), root.viewport-width * 0.45);
     in property <bool> wide: true;
+    in property <bool> touch-input;
+    out property <bool> tap-to-play: root.touch-input || !root.wide;
     in property <bool> short: false;
     changed short => { if root.short { root.search-editing = false; } }
     changed settings => { if root.settings { root.search-editing = false; root.lists-open = false; root.home = false; } }
@@ -269,8 +271,9 @@ export component PlayerWindow inherits Window {
                 }
                 ListView {
                     min-height: 180px; vertical-stretch: 1;
-                    for item[i] in root.list-rows: BrowserItem { item: item; selected: i == root.list-entry;
-                        activate => { root.list-entry = i; } pointer-activate => { root.list-entry = i; }
+                    for item[i] in root.list-rows: BrowserItem { item: item; selected: i == root.list-entry; tap-to-play: root.tap-to-play;
+                        activate => { root.list-entry = i; if root.tap-to-play { root.play-list-from(i); } }
+                        pointer-activate => { root.list-entry = i; if root.tap-to-play { root.play-list-from(i); } }
                     }
                 }
             }
@@ -402,7 +405,7 @@ export component PlayerWindow inherits Window {
                     height: parent.height - 72px - search-bar.height;
                     viewport-y <=> root.browser-y;
                     for item[i] in root.browser-rows: BrowserItem {
-                        item: item; text-scale: root.text-scale; selected: root.browser-selected == i;
+                        item: item; text-scale: root.text-scale; selected: root.browser-selected == i; tap-to-play: root.tap-to-play;
                         activate => { root.browse-action(false, i, 0); keyboard.focus(); }
                         pointer-activate => { root.browse-action(false, i, 3); keyboard.focus(); }
                         play => { root.browse-action(false, i, 1); }
@@ -457,7 +460,7 @@ export component PlayerWindow inherits Window {
                     min-height: 0px; preferred-height: 0px; vertical-stretch: 1;
                     viewport-y <=> root.detail-y;
                     for item[i] in root.artist-rows: BrowserItem {
-                        item: item; text-scale: root.text-scale; show-album: false;
+                        item: item; text-scale: root.text-scale; show-album: false; tap-to-play: root.tap-to-play;
                         activate => { root.browse-action(true, i, 0); keyboard.focus(); }
                         pointer-activate => { root.browse-action(true, i, 3); keyboard.focus(); }
                         play => { root.browse-action(true, i, 1); }
@@ -497,7 +500,7 @@ export component PlayerWindow inherits Window {
                     viewport-y <=> root.track-y;
                         min-height: 0px; preferred-height: 0px; vertical-stretch: 1;
                     for track[i] in root.tracks: TrackItem {
-                        track: track; text-scale: root.text-scale;
+                        track: track; text-scale: root.text-scale; tap-to-play: root.tap-to-play;
                         selected: i == root.selected-track; current: i == root.active-track;
                         select => { root.selected-track = i; root.album-track-selected(); keyboard.focus(); }
                         play => { root.play-track(i); keyboard.focus(); }

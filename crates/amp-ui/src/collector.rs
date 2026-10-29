@@ -260,17 +260,14 @@ fn render_list(ui: &PlayerWindow, view: &View, adapter: &Adapter) {
                     .unwrap_or_default(),
                 kind: 1,
                 title: e.title.clone().into(),
-                subtitle: format!(
-                    "{} · {}",
-                    e.album.as_deref().unwrap_or(""),
-                    if downloads.iter().any(|d| d.status == "complete" && Some(d.remote.key) == view.selected && d.remote.collection == list.list.collection_id && matches!(&e.source, Some(ids::ListTarget::MusicTrack { capture_id, source_representation_id, track_position, .. }) if *capture_id == d.remote.capture && *source_representation_id == d.remote.source && *track_position == d.remote.position)) { "Downloaded" } else { match e.availability {
-                        api::ListEntryAvailability::Available { .. } => "Streamable",
+                subtitle: e.album.as_deref().unwrap_or("").into(),
+                status: (if downloads.iter().any(|d| d.status == "complete" && Some(d.remote.key) == view.selected && d.remote.collection == list.list.collection_id && matches!(&e.source, Some(ids::ListTarget::MusicTrack { capture_id, source_representation_id, track_position, .. }) if *capture_id == d.remote.capture && *source_representation_id == d.remote.source && *track_position == d.remote.position)) { "" } else { match e.availability {
+                        api::ListEntryAvailability::Available { .. } => "",
                         api::ListEntryAvailability::Preparing => "Preparing",
                         api::ListEntryAvailability::NeedsPreparation => "Needs preparation",
                         api::ListEntryAvailability::Entry => "Entry",
                         _ => "Unavailable",
-                    }}
-                )
+                    }})
                 .into(),
                 ..Default::default()
             })
@@ -634,6 +631,38 @@ impl Controller {
                     return;
                 }
                 render_list(&ui, &view, &a);
+            });
+        }
+        {
+            let a = adapter.clone();
+            let view = view.clone();
+            let state = state.clone();
+            let weak = ui.as_weak();
+            ui.on_play_list_from(move |index| {
+                let Some(ui) = weak.upgrade() else { return };
+                let view = view.borrow();
+                let Some(key) = view.selected else { return };
+                let Some(list) = view.list.and_then(|i| view.snapshot.as_ref()?.lists.get(i))
+                else {
+                    return;
+                };
+                let Ok(index) = usize::try_from(index) else {
+                    return;
+                };
+                let playable = |t: &Track| a.downloaded(t) || (view.online && a.can_play(t));
+                let Some(first) = a.list_track(key, list, index).filter(playable) else {
+                    ui.set_connection_status("This entry is not playable".into());
+                    return;
+                };
+                let tracks = std::iter::once(first)
+                    .chain(
+                        (index + 1..list.entries.items.len())
+                            .filter_map(|i| a.list_track(key, list, i))
+                            .filter(playable),
+                    )
+                    .collect();
+                state.borrow().playback.play_list(tracks);
+                ui.set_connection_status("Playing list from track".into());
             });
         }
         {

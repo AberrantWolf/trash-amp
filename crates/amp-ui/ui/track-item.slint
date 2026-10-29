@@ -1,18 +1,23 @@
 import { Theme } from "theme.slint";
 import { IconButton } from "icon-button.slint";
-export struct TrackRow { title: string, duration: string, number: string }
+export struct TrackRow { title: string, status: string, duration: string, number: string }
 export component TrackItem inherits Rectangle {
     in property <TrackRow> track;
     in property <float> text-scale: 1;
     in property <bool> selected;
     in property <bool> current;
+    in property <bool> tap-to-play;
     callback select(); callback play(); callback enqueue();
     height: 48px * root.text-scale;
     accessible-role: list-item;
-    accessible-label: root.track.title + (root.current ? ", current track" : "");
+    accessible-label: root.track.title + (root.track.status != "" ? ", " + root.track.status : "") + (root.current ? ", current track" : "");
     accessible-action-default => { root.play(); }
     background: root.selected ? Theme.selection : (row.has-hover || play-touch.has-hover ? Theme.hover : transparent);
-    row := TouchArea { x: 42px; width: parent.width - 90px; clicked => { root.select(); } double-clicked => { root.play(); } }
+    row := TouchArea {
+        x: 42px; width: parent.width - 90px;
+        clicked => { root.select(); if root.tap-to-play { root.play(); } }
+        double-clicked => { if !root.tap-to-play { root.play(); } }
+    }
     HorizontalLayout {
         spacing: 10px;
         Rectangle {
@@ -25,7 +30,11 @@ export component TrackItem inherits Rectangle {
                 clicked => { root.play(); }
             }
         }
-        Text { text: root.track.title; color: Theme.text; overflow: elide; vertical-alignment: center; }
+        VerticalLayout {
+            alignment: center; spacing: 1px;
+            Text { text: root.track.title; color: Theme.text; font-size: 14px * root.text-scale; overflow: elide; vertical-alignment: center; }
+            if root.track.status != "": Text { text: root.track.status; color: Theme.muted; font-size: 11px * root.text-scale; overflow: elide; }
+        }
         Text { text: root.track.duration; color: Theme.muted; width: 44px; vertical-alignment: center; }
         IconButton { label: "Add " + root.track.title + " to up next"; icon: @image-url("icons/queue.svg"); clicked => { root.enqueue(); } }
     }

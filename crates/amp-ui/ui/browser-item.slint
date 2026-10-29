@@ -1,10 +1,11 @@
 import { Theme } from "theme.slint";
 import { IconButton } from "icon-button.slint";
-export struct BrowserRow { artwork: image, kind: int, title: string, artist: string, subtitle: string, duration: string }
+export struct BrowserRow { artwork: image, kind: int, title: string, artist: string, subtitle: string, status: string, duration: string }
 export component BrowserItem inherits Rectangle {
     in property <BrowserRow> item;
     in property <float> text-scale: 1;
     in property <bool> selected;
+    in property <bool> tap-to-play;
     in property <bool> show-album: true;
     callback activate(); callback pointer-activate(); callback play(); callback enqueue(); callback artist(string);
     height: (item.kind == 0 || item.kind == 5 || item.kind == 4 || item.kind == 6 ? 32px : item.kind == 3 ? (root.show-album ? 106px : 86px) : 66px) * text-scale;
@@ -15,8 +16,8 @@ export component BrowserItem inherits Rectangle {
         width: 100%; height: 100%;
         enabled: root.item.kind != 0 && root.item.kind != 6;
         accessible-role: list-item;
-        accessible-label: root.item.title + " " + root.item.subtitle;
-        accessible-action-default => { root.activate(); }
+        accessible-label: root.item.title + " " + root.item.subtitle + (root.item.status != "" ? ", " + root.item.status : "");
+        accessible-action-default => { if root.item.kind == 3 && root.tap-to-play { root.pointer-activate(); } else { root.activate(); } }
         key-pressed(event) => {
             if (event.text == Key.Return) { if root.item.kind == 3 { root.play(); } else { root.activate(); } return accept; }
             return reject;
@@ -25,7 +26,7 @@ export component BrowserItem inherits Rectangle {
         touch := TouchArea {
             enabled: root.item.kind != 0 && root.item.kind != 6;
             clicked => { focus.focus(); if root.item.kind == 3 { root.pointer-activate(); } else { root.activate(); } }
-            double-clicked => { if root.item.kind == 3 { root.play(); } }
+            double-clicked => { if root.item.kind == 3 && !root.tap-to-play { root.play(); } }
         }
         Image { source: root.item.artwork; x: 6px; y: 6px; width: 40px; height: 40px; image-fit: contain; }
         VerticalLayout {
@@ -37,6 +38,7 @@ export component BrowserItem inherits Rectangle {
             if root.item.kind == 1 || root.item.kind == 2: Text {
                 text: root.item.subtitle; color: Theme.muted; overflow: elide; font-size: 12px * root.text-scale;
             }
+            if root.item.status != "": Text { text: root.item.status; color: Theme.muted; overflow: elide; font-size: 11px * root.text-scale; }
             if root.item.kind == 3: Rectangle {
                 height: 17px * root.text-scale;
                 artist-focus := FocusScope {
