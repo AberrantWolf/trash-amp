@@ -63,6 +63,34 @@ ordinary pauses freeze it, and uninterrupted track boundaries retain it.
 
 One browsing source is active at a time; the catalog owner persists its stable source ID independently of UI/provider presentation. Provider media resolvers remain registered for the lifetime of playback, so queued items survive browsing-source changes. One folder library is active at a time. Each canonical folder path has its own catalog in `folder_libraries`, and `state.active_folder` records the last selected folder. Legacy `state.library` snapshots migrate transactionally on open. Selecting a saved folder loads its catalog without filesystem access; explicit refresh rescans it. Failed scans preserve the saved catalog. Cache stays on local storage; source media is read-only.
 
+Filesystem refreshes carry directory coverage to the catalog owner. A complete
+listing can prove a missing file or subtree was deleted; failed or partial
+listings cannot. Known file/directory type replacements also prove that the old
+file or subtree is gone. Reconciliation uses the active local catalog when its
+folder matches, including changes whose cache write failed; other folders use
+their saved snapshot. It
+adds readable tracks, keeps last-known metadata when probes fail, and preserves
+unchecked tracks without changing playback availability. Existing album overlap
+keeps partially checked album groups together without duplicate track identities.
+Coverage is transient; the saved snapshot contains scan uncertainty, diagnostics,
+change counts, and the source identity. New recognizable files with unreadable
+tags get filename fallbacks, while unrecognized data is reported without adding
+invented audio entries.
+
+Source-level I/O errors or a changed/unreadable root suppress all removals from
+the refresh, including deletion evidence collected earlier. macOS compares the
+mounted network source and mount location, and persistent volume UUIDs for local
+drives. Separately mounted sources inside the selected folder have their own
+saved identity checks. Results beneath a changed nested mount are discarded, so
+a replacement drive cannot overwrite names at colliding paths or add unrelated
+music. Readable results elsewhere can still be accepted. `/Volumes` fallbacks are
+rejected even for old snapshots without source identity. A different mounted
+source cannot become the new baseline through repeated refreshes. A healthy
+refresh clears uncertainty and can apply confirmed deletions. The UI displays
+scan labels independently of playback status and a persistent nonmodal summary
+with details and retry. Metadata enrichment avoids paths that the scan could not
+inspect.
+
 Current grouping first gathers tracks by folder, tagged album title and explicit album artist (never by individual track artist). It then merges same-title tagged fragments across folders when their explicit album artists do not conflict and their disc/track slots do not overlap. Missing track numbers fall back to track-title conflicts. Mixed track artists display as Various artists unless an album artist is specified. Untagged folder names alone do not justify cross-folder merging. This deliberately permits title-based fallback for artist-first collections, with some ambiguity when unrelated albums lack identifying tags. Tracks sort by disc/track. Refreshing a folder rescans with this rule; reopening a saved folder retains its cached grouping until refreshed.
 
 Metadata currently fills placeholders after local tags, CUE TITLE/PERFORMER and CD-TEXT. `amp-library::metadata` owns MusicBrainz query construction, exact audio TOC IDs, release/medium matching, response caching and provenance. It uses a bounded blocking HTTP client exclusively on a background worker. Disc-ID candidates must agree on names; file name searches require a single exact release/artist hit plus complete track counts and duration/title agreement. Embedded release IDs select medium positions explicitly. Fully named file albums need no requests.

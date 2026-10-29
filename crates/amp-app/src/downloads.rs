@@ -198,6 +198,7 @@ mod tests {
     }
     fn track(title: &str) -> Track {
         Track {
+            scan_status: None,
             blocked_reason: None,
             availability: Default::default(),
             source: None,

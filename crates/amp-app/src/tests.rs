@@ -128,6 +128,7 @@ impl Drop for Fake {
 }
 fn track(name: &str) -> Track {
     Track {
+        scan_status: None,
         blocked_reason: None,
         id: ItemId {
             library: "test".into(),
@@ -497,6 +498,7 @@ fn native_album_artwork_updates_and_follows_background_queue_transitions() {
         source_label: String::new(),
     };
     let library = Arc::new(Library {
+        scan: None,
         id: "test".into(),
         albums: vec![album("First album", "one"), album("No cover", "two")],
         ..Default::default()
@@ -574,6 +576,7 @@ fn lock_screen_seeks_keep_track_and_album_metadata_in_every_publication() {
     let output = received.clone();
     p.refresh_catalog_metadata(
         Arc::new(Library {
+            scan: None,
             albums: vec![Album {
                 metadata: Default::default(),
                 id: ItemId {
@@ -663,6 +666,7 @@ fn dropped_playlist_replaces_pending_tracks_and_ignores_catalog_name_updates() {
     catalog_track.title = "Catalog title".into();
     p.refresh_catalog_metadata(
         Arc::new(Library {
+            scan: None,
             id: "catalog".into(),
             albums: vec![Album {
                 metadata: Default::default(),
@@ -875,6 +879,7 @@ fn idle_selection_receives_availability_updates_without_a_ui_tick() {
     let mut updated = original;
     updated.blocked_reason = Some(amp_core::PlaybackBlockReason::Protected);
     let library = Library {
+        scan: None,
         id: "test".into(),
         albums: vec![Album {
             metadata: Default::default(),

@@ -2,7 +2,7 @@
 use crate::sources::{AccessStatus, RefreshKind, SourceChange, SourceDescriptor, SourceProvider};
 use crate::{Notice, Playback};
 use amp_core::{Album, Library, Preferences};
-use amp_library::{FilesystemProvider, SavedFolder, ScanProgress, Store};
+use amp_library::{FilesystemProvider, SavedFolder, ScanProgress, ScanResult, Store};
 use anyhow::Result;
 use std::{
     collections::BTreeMap,
@@ -201,6 +201,17 @@ pub trait Backend: Send + Sync {
         cancelled: &dyn Fn() -> bool,
         progress: &mut dyn FnMut(ScanProgress),
     ) -> Result<Library>;
+    /// Existing injected providers can still return an authoritative snapshot.
+    fn scan_with_coverage(
+        &self,
+        root: PathBuf,
+        preferences: Preferences,
+        cancelled: &dyn Fn() -> bool,
+        progress: &mut dyn FnMut(ScanProgress),
+    ) -> Result<ScanResult> {
+        self.scan(root, preferences, cancelled, progress)
+            .map(ScanResult::complete)
+    }
     fn enrich(
         &self,
         library: &mut Library,
@@ -220,6 +231,15 @@ impl Backend for LocalBackend {
         progress: &mut dyn FnMut(ScanProgress),
     ) -> Result<Library> {
         FilesystemProvider { root, preferences }.scan_with_progress(cancelled, progress)
+    }
+    fn scan_with_coverage(
+        &self,
+        root: PathBuf,
+        preferences: Preferences,
+        cancelled: &dyn Fn() -> bool,
+        progress: &mut dyn FnMut(ScanProgress),
+    ) -> Result<ScanResult> {
+        FilesystemProvider { root, preferences }.scan_with_coverage(cancelled, progress)
     }
     fn enrich(
         &self,
@@ -352,7 +372,7 @@ enum Command {
         mpsc::Sender<Result<bool>>,
     ),
     Progress(u64, ScanProgress),
-    Scanned(u64, Result<Library>),
+    Scanned(u64, Result<ScanResult>),
     Metadata(u64, Album),
     Enriched(u64, Result<()>),
     Shutdown,
@@ -393,6 +413,16 @@ struct Worker {
     notice_revision: u64,
     metadata_dirty: bool,
 }
+
+fn scan_baseline(state: &Snapshot, store: &Store, id: &str) -> Result<Option<Arc<Library>>> {
+    // A published scan can be newer than its cache after a save failure. Its
+    // known tracks must still survive a later incomplete refresh.
+    if state.source == Source::Local && state.library.id == id {
+        return Ok(Some(state.library.clone()));
+    }
+    store.library_by_id(id).map(|library| library.map(Arc::new))
+}
+
 impl Worker {
     fn current(&self, v: u64) -> bool {
         self.generation.current() == v
@@ -897,7 +927,7 @@ impl Worker {
                         let mut last =
                             std::time::Instant::now() - std::time::Duration::from_secs(1);
                         let mut total = None;
-                        let result = backend.scan(
+                        let result = backend.scan_with_coverage(
                             root,
                             preferences,
                             &|| generation.current() != v,
@@ -929,7 +959,9 @@ impl Worker {
             Command::Scanned(v, result) if self.current(v) => {
                 self.state.scanning = false;
                 match result {
-                    Ok(library) => {
+                    Ok(scan) => {
+                        let previous = scan_baseline(&self.state, &self.store, &scan.library.id)?;
+                        let library = scan.reconcile(previous.as_deref());
                         let saved = self.store.save_library_snapshot(&library);
                         if let Ok(folders) = self.store.saved_folders() {
                             self.state.folders = folders.into();
@@ -937,12 +969,19 @@ impl Worker {
                         for warning in &library.warnings {
                             eprintln!("{warning}");
                         }
-                        let status = format!(
-                            "{} files • {} albums • {} scan warnings • checking metadata…",
-                            self.state.progress.and_then(|n| n.total).unwrap_or(0),
-                            library.albums.len(),
-                            library.warnings.len()
-                        );
+                        let status = library
+                            .scan
+                            .as_ref()
+                            .filter(|scan| scan.incomplete)
+                            .map(|scan| scan.message())
+                            .unwrap_or_else(|| {
+                                format!(
+                                    "{} files • {} albums • {} scan warnings • checking metadata…",
+                                    self.state.progress.and_then(|n| n.total).unwrap_or(0),
+                                    library.albums.len(),
+                                    library.warnings.len()
+                                )
+                            });
                         let folder = library.id.clone();
                         let selection =
                             if saved.is_ok() && !library.root.is_empty() && library.id != "demo" {

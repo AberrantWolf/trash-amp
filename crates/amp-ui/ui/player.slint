@@ -100,6 +100,9 @@ export component PlayerWindow inherits Window {
     in property <float> level;
     in property <bool> scanning;
     in property <float> scan-progress;
+    in property <string> scan-summary;
+    in property <string> scan-details;
+    in-out property <bool> scan-details-open;
     in property <[BrowserRow]> browser-rows;
     in property <[BrowserRow]> artist-rows;
     in property <bool> artist-view;
@@ -589,6 +592,34 @@ export component PlayerWindow inherits Window {
         if root.loading-files: FileLoadingStatus {
             message: root.loading-message; path: root.loading-path; compact: root.short;
             cancelled => { root.cancel-file-load(); }
+        }
+        if root.scan-summary != "" && !root.settings && !root.lists-open: Rectangle {
+            vertical-stretch: 0;
+            background: Theme.surface;
+            border-radius: 6px;
+            accessible-role: groupbox;
+            accessible-label: "Folder refresh status";
+            VerticalLayout {
+                padding: 8px; spacing: 4px;
+                Text { text: root.scan-summary; color: Theme.muted; wrap: word-wrap; font-size: 12px * root.text-scale; accessible-live-region: polite; }
+                HorizontalLayout {
+                    spacing: 8px;
+                    Button { text: root.scan-details-open ? "Hide details" : "View details"; clicked => { root.scan-details-open = !root.scan-details-open; } }
+                    Button { text: root.scanning ? "Refreshing…" : "Retry refresh"; enabled: !root.scanning; clicked => { root.refresh-folder(); } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                if root.scan-details-open: ScrollView {
+                    height: min(140px, root.height / 4);
+                    content-height: max(self.visible-height, scan-detail-text.preferred-height);
+                    scan-detail-text := Text {
+                        width: parent.width;
+                        text: root.scan-details;
+                        color: Theme.muted;
+                        wrap: word-wrap;
+                        font-size: 12px * root.text-scale;
+                    }
+                }
+            }
         }
         Rectangle {
             height: 104px * root.text-scale;

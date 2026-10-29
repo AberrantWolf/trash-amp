@@ -49,6 +49,7 @@ pub struct Entry {
     pub seconds: f64,
     pub album_count: usize,
     pub playback_block: Option<&'static str>,
+    pub scan_status: Option<String>,
     fields: Vec<String>,
 }
 impl Entry {
@@ -101,6 +102,7 @@ impl CatalogIndex {
                 seconds: 0.0,
                 album_count: 0,
                 playback_block: None,
+                scan_status: None,
                 fields: vec![normalized(&album.title), normalized(&album.artist)],
             };
             index.albums.push(entry);
@@ -116,6 +118,7 @@ impl CatalogIndex {
                     seconds: 0.0,
                     album_count: 0,
                     playback_block: None,
+                    scan_status: None,
                     fields: vec![normalized(name)],
                 });
                 a.album_count += usize::from(album_credit);
@@ -135,6 +138,10 @@ impl CatalogIndex {
                     seconds: track.duration_seconds,
                     album_count: 0,
                     playback_block: track.playback_block(),
+                    scan_status: track
+                        .scan_status
+                        .as_ref()
+                        .map(|status| status.label().to_owned()),
                     fields: vec![
                         normalized(&track.title),
                         normalized(&track.artist),
@@ -237,6 +244,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(i, (title, artist))| Track {
+                    scan_status: None,
                     blocked_reason: None,
                     availability: Default::default(),
                     source: None,

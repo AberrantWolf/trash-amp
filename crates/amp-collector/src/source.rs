@@ -165,6 +165,7 @@ mod tests {
             audio: None,
         };
         let track = Track {
+            scan_status: None,
             blocked_reason: None,
             availability: amp_core::Availability::Unavailable,
             source: None,
@@ -200,6 +201,7 @@ mod tests {
             .unwrap();
         let snapshot = Snapshot {
             library: Library {
+                scan: None,
                 albums: vec![Album {
                     metadata: Default::default(),
                     id: track.id.clone(),

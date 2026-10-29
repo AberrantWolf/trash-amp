@@ -1,5 +1,8 @@
 //! Filesystem is one library provider; SQLite is always stored on the local device.
+pub mod coverage;
 pub mod metadata;
+mod reconcile;
+pub use reconcile::ScanResult;
 
 use amp_core::*;
 use anyhow::{Context, Result, bail};
@@ -14,7 +17,6 @@ use std::{
     collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
 };
-use walkdir::WalkDir;
 
 pub struct Store(Connection);
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,6 +186,14 @@ impl FilesystemProvider {
         cancelled: &dyn Fn() -> bool,
         progress: &mut dyn FnMut(ScanProgress),
     ) -> Result<Library> {
+        self.scan_with_coverage(cancelled, progress)
+            .map(|scan| scan.reconcile(None))
+    }
+    pub fn scan_with_coverage(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+        progress: &mut dyn FnMut(ScanProgress),
+    ) -> Result<ScanResult> {
         let root = self
             .root
             .canonicalize()
@@ -196,30 +206,13 @@ impl FilesystemProvider {
             .context("Library path must be valid UTF-8")?
             .to_owned();
         let mut library = Library {
+            scan: None,
             id: root_string.clone(),
             root: root_string,
             ..Library::default()
         };
-        let mut paths = Vec::new();
-        for entry in WalkDir::new(&root).follow_links(false) {
-            if cancelled() {
-                bail!("Scan cancelled")
-            }
-            match entry {
-                Ok(e) if e.file_type().is_file() => {
-                    paths.push(e.into_path());
-                    if paths.len() % 128 == 0 {
-                        progress(ScanProgress {
-                            discovered: paths.len(),
-                            completed: 0,
-                            total: None,
-                        });
-                    }
-                }
-                Err(e) => library.warnings.push(e.to_string()),
-                _ => {}
-            }
-        }
+        let mut coverage = coverage::enumerate(&root, cancelled, progress)?;
+        let mut paths: Vec<_> = coverage.files.iter().cloned().collect();
         paths.sort();
         let total = paths.len();
         let mut completed = 0;
@@ -247,7 +240,10 @@ impl FilesystemProvider {
                     claimed.extend(files);
                     library.albums.push(album);
                 }
-                Err(e) => library.warnings.push(format!("{}: {e:#}", path.display())),
+                Err(e) => {
+                    coverage.record_probe_failure(path, &e);
+                    library.warnings.push(format!("{}: {e:#}", path.display()));
+                }
             }
             progress(ScanProgress {
                 discovered: total,
@@ -278,7 +274,13 @@ impl FilesystemProvider {
                     while !stop.load(Ordering::Relaxed) {
                         let i = next.fetch_add(1, Ordering::Relaxed);
                         let Some(path) = paths.get(i) else { break };
-                        if tx.send((i, tagged_track(path, id))).is_err() {
+                        let result = tagged_track(path, id);
+                        if result.as_ref().err().is_some_and(coverage::source_failure) {
+                            // Stop scheduling reads after a source-level failure;
+                            // already completed work can still be reconciled.
+                            stop.store(true, Ordering::Release);
+                        }
+                        if tx.send((i, result)).is_err() {
                             break;
                         }
                     }
@@ -312,6 +314,19 @@ impl FilesystemProvider {
         })?;
         for (i, result) in results {
             let path = audio_paths[i];
+            let result: Result<_> = match result {
+                Ok(track) => Ok(track),
+                Err(error) => {
+                    coverage.record_probe_failure(path, &error);
+                    library
+                        .warnings
+                        .push(format!("{}: {error:#}", path.display()));
+                    match fallback_file_track(path, &library.id, &error.to_string()) {
+                        Some(track) => Ok(track),
+                        None => continue,
+                    }
+                }
+            };
             match result {
                 Ok((title, album_artist, tagged, track, names)) => {
                     let parent = path.parent().unwrap().to_owned();
@@ -393,10 +408,17 @@ impl FilesystemProvider {
         });
         progress(ScanProgress {
             discovered: total,
-            completed: total,
+            completed,
             total: Some(total),
         });
-        Ok(library)
+        coverage.check_source();
+        if cancelled() {
+            bail!("Scan cancelled");
+        }
+        Ok(ScanResult {
+            library,
+            coverage: Some(coverage),
+        })
     }
 }
 /// Folder/artist boundaries are evidence, not album identity. Merge complementary
@@ -478,10 +500,45 @@ fn id(library: &str, item: String) -> ItemId {
         item,
     }
 }
-fn tagged_track(
-    path: &Path,
-    library: &str,
-) -> Result<(String, Option<String>, bool, Track, NameOrigins)> {
+type TaggedTrack = (String, Option<String>, bool, Track, NameOrigins);
+
+// A failed tag read should not hide a recognizable new audio file. Unknown
+// headers and inaccessible files are reported without inventing playable items.
+fn fallback_file_track(path: &Path, library: &str, reason: &str) -> Option<TaggedTrack> {
+    let probe = Probe::new(std::io::BufReader::new(std::fs::File::open(path).ok()?))
+        .guess_file_type()
+        .ok()?;
+    probe.file_type()?;
+    let locator = path.to_str()?.to_owned();
+    let title = path.file_stem()?.to_string_lossy().into_owned();
+    let album = path.parent()?.file_name()?.to_string_lossy().into_owned();
+    let names = NameOrigins {
+        title: NameOrigin::Generated(title.clone()),
+        artist: NameOrigin::Generated("Unknown artist".into()),
+    };
+    Some((
+        album,
+        None,
+        false,
+        Track {
+            scan_status: Some(ScanStatus::MetadataUnreadable {
+                reason: reason.into(),
+            }),
+            blocked_reason: None,
+            availability: Default::default(),
+            source: None,
+            id: id(library, locator.clone()),
+            title,
+            artist: "Unknown artist".into(),
+            number: 0,
+            disc: 1,
+            duration_seconds: 0.0,
+            access: MediaAccess::File { locator },
+        },
+        names,
+    ))
+}
+fn tagged_track(path: &Path, library: &str) -> Result<TaggedTrack> {
     let file = Probe::open(path)?
         .options(lofty::config::ParseOptions::new().read_cover_art(false))
         .read()?;
@@ -509,6 +566,7 @@ fn tagged_track(
         .context("Track path must be valid UTF-8")?
         .to_owned();
     let track = Track {
+        scan_status: None,
         blocked_reason: None,
         availability: Default::default(),
         source: None,
@@ -687,6 +745,7 @@ fn disc_album(
     let tracks: Vec<Track> = layouts
         .iter()
         .map(|l| Track {
+            scan_status: None,
             blocked_reason: None,
             availability: Default::default(),
             source: None,
@@ -783,6 +842,7 @@ fn disc_album(
 
 pub fn demo_library() -> Library {
     Library {
+        scan: None,
         id: "demo".into(),
         root: "Layout demo — generated albums, no audio".into(),
         albums: (0..2000)
@@ -809,6 +869,7 @@ pub fn demo_library() -> Library {
                 source_label: "Generated layout fixture".into(),
                 tracks: (1..=10)
                     .map(|n| Track {
+                        scan_status: None,
                         blocked_reason: None,
                         availability: Default::default(),
                         source: None,
@@ -834,15 +895,70 @@ pub fn demo_library() -> Library {
 mod tests {
     use super::*;
     #[test]
+    fn failed_metadata_reads_keep_known_tracks_but_do_not_invent_audio_from_extensions() {
+        let directory = tempfile::tempdir().unwrap();
+        write_track(
+            directory.path(),
+            "album/song.wav",
+            Some("Known album"),
+            "Artist",
+            1,
+            None,
+        );
+        let provider = FilesystemProvider {
+            root: directory.path().into(),
+            preferences: Default::default(),
+        };
+        let original = provider
+            .scan_with_coverage(&|| false, &mut |_| {})
+            .unwrap()
+            .reconcile(None);
+        let path = directory.path().join("album/song.wav");
+        std::fs::write(&path, b"not an audio header").unwrap();
+        std::fs::write(directory.path().join("pretend.wav"), b"also not audio").unwrap();
+        assert!(fallback_file_track(&path, &original.id, "bad tags").is_none());
+        let refreshed = provider
+            .scan_with_coverage(&|| false, &mut |_| {})
+            .unwrap()
+            .reconcile(Some(&original));
+        assert_eq!(refreshed.albums.len(), 1);
+        let track = &refreshed.albums[0].tracks[0];
+        assert_eq!(track.title, "Song 1");
+        assert!(matches!(
+            track.scan_status,
+            Some(ScanStatus::MetadataUnreadable { .. })
+        ));
+        assert!(track.playback_block().is_none());
+        assert_eq!(refreshed.scan.as_ref().unwrap().added, 0);
+        assert_eq!(refreshed.scan.as_ref().unwrap().removed, 0);
+        write_track(
+            directory.path(),
+            "album/song.wav",
+            Some("Known album"),
+            "Artist",
+            1,
+            None,
+        );
+        std::fs::remove_file(directory.path().join("pretend.wav")).unwrap();
+        let repaired = provider
+            .scan_with_coverage(&|| false, &mut |_| {})
+            .unwrap()
+            .reconcile(Some(&refreshed));
+        assert!(repaired.albums[0].tracks[0].scan_status.is_none());
+        assert!(!repaired.scan.unwrap().incomplete);
+    }
+    #[test]
     fn refreshing_an_inactive_catalog_does_not_select_it() {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(&directory.path().join("cache.sqlite3")).unwrap();
         let mut a = Library {
+            scan: None,
             id: "a".into(),
             root: "/offline/a".into(),
             ..Default::default()
         };
         let b = Library {
+            scan: None,
             id: "b".into(),
             root: "/offline/b".into(),
             ..Default::default()
@@ -976,6 +1092,7 @@ mod tests {
         );
         store
             .save_library(&Library {
+                scan: None,
                 id: "a".into(),
                 root: "/missing/a".into(),
                 ..Library::default()
@@ -983,6 +1100,7 @@ mod tests {
             .unwrap();
         store
             .save_library(&Library {
+                scan: None,
                 id: "b".into(),
                 root: "/missing/b".into(),
                 ..Library::default()
@@ -1022,6 +1140,7 @@ mod tests {
         let path = dir.path().join("db");
         let store = Store::open(&path).unwrap();
         let legacy = Library {
+            scan: None,
             id: "old".into(),
             root: "/offline/music".into(),
             ..Library::default()

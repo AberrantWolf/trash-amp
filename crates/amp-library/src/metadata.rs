@@ -635,6 +635,16 @@ fn enrich_with(
     for discs in [true, false] {
         let mut work = Vec::new();
         for (index, album) in library.albums.iter_mut().enumerate() {
+            // Do not reopen paths that this refresh could not inspect. This is
+            // metadata policy only; scan uncertainty never blocks playback.
+            if library
+                .scan
+                .as_ref()
+                .is_some_and(|scan| scan.source_disconnected)
+                || album.tracks.iter().any(|track| track.scan_status.is_some())
+            {
+                continue;
+            }
             let is_disc = album.tracks.first().is_some_and(|t| {
                 matches!(
                     t.access,
@@ -754,6 +764,7 @@ mod tests {
             source_label: "BIN/CUE".into(),
             tracks: (1..=2)
                 .map(|number| Track {
+                    scan_status: None,
                     blocked_reason: None,
                     availability: Default::default(),
                     source: None,
@@ -1154,6 +1165,7 @@ mod tests {
         };
         let store = Store::open(&dir.path().join("cache.db")).unwrap();
         let original = Library {
+            scan: None,
             albums: vec![a],
             ..Library::default()
         };

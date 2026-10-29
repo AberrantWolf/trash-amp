@@ -107,6 +107,7 @@ fn row(entry: &Entry, compact: bool) -> BrowserRow {
             _ => entry.artist.clone().into(),
         },
         status: entry.playback_block.unwrap_or_default().into(),
+        scan_status: entry.scan_status.clone().unwrap_or_default().into(),
         duration: if kind == 3 {
             time(entry.seconds)
         } else {
@@ -1029,6 +1030,55 @@ mod tests {
             assert_eq!(row.title, s.library.albums[0].tracks[i].title);
             assert_eq!(row.status, *status);
         }
+        drop(s);
+        drop(state);
+        let _ = std::fs::remove_file(path);
+    }
+    #[test]
+    fn scan_uncertainty_is_displayed_without_blocking_queue_actions() {
+        use amp_core::{Availability, ScanStatus};
+        use slint::Model;
+        let (ui, state, path, _service) = setup("scan-status");
+        let mut s = state.borrow_mut();
+        s.library.albums.truncate(1);
+        let track = &mut s.library.albums[0].tracks[0];
+        track.availability = Availability::Available;
+        track.scan_status = Some(ScanStatus::Unverified {
+            path: "/Volumes/Music/Album".into(),
+            reason: "Permission denied".into(),
+        });
+        let track = track.clone();
+        select(&ui, &mut s, 0);
+        let displayed = ui.get_tracks().row_data(0).unwrap();
+        assert_eq!(displayed.status, "");
+        assert_eq!(displayed.scan_status, "Not verified");
+        assert_eq!(track.playback_block(), None);
+        rebuild(&ui, &mut s, false);
+        results(&ui, &mut s, &track.title);
+        let search_track = s
+            .browser
+            .results
+            .tracks
+            .iter()
+            .find(
+                |entry| matches!(&entry.target, Target::Track { track: id, .. } if id == &track.id),
+            )
+            .unwrap();
+        let search_row = row(search_track, false);
+        assert_eq!(search_row.status, "");
+        assert_eq!(search_row.scan_status, "Not verified");
+        enqueue_track(&ui, &mut s, track.clone());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while s.playback.snapshot().up_next.is_empty() {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(s.playback.snapshot().up_next[0].id, track.id);
+        s.library.albums[0].tracks[0].availability = Availability::Unavailable;
+        select(&ui, &mut s, 0);
+        let displayed = ui.get_tracks().row_data(0).unwrap();
+        assert_eq!(displayed.status, "Unavailable");
+        assert_eq!(displayed.scan_status, "Not verified");
         drop(s);
         drop(state);
         let _ = std::fs::remove_file(path);

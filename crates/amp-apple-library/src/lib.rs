@@ -91,6 +91,7 @@ fn catalog(records: Vec<Record>, artwork: BTreeMap<String, String>) -> ExternalC
                 tracks: Vec::new(),
             });
         album.tracks.push(Track {
+            scan_status: None,
             id: id(record.id.clone()),
             title: record.title,
             artist: record.artist,
@@ -119,6 +120,7 @@ fn catalog(records: Vec<Record>, artwork: BTreeMap<String, String>) -> ExternalC
         online: None,
         source: SOURCE.into(),
         library: Library {
+            scan: None,
             id: SOURCE.into(),
             root: String::new(),
             albums: albums.into_values().collect(),

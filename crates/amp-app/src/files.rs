@@ -295,6 +295,7 @@ mod tests {
     use super::*;
     fn fake(path: &Path, session: &str) -> anyhow::Result<Track> {
         Ok(Track {
+            scan_status: None,
             id: amp_core::ItemId {
                 library: session.into(),
                 provider: "filesystem".into(),

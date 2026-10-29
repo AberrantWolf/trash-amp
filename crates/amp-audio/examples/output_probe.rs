@@ -24,6 +24,7 @@ fn main() -> anyhow::Result<()> {
     let player = Player::new()?;
     player.play(
         vec![Track {
+            scan_status: None,
             blocked_reason: None,
             availability: Default::default(),
             source: None,

@@ -12,11 +12,11 @@ serde.workspace = true
 junk-libs-disc.workspace = true
 lofty = "0.25"
 rusqlite = { version = "0.33", features = ["bundled"] }
-walkdir = "2"
 ureq = "3.4"
 httpdate = "1"
 sha1 = "0.10"
 base64 = "0.22"
+libc = "0.2"
 [dev-dependencies]
 tempfile = "3"
 hound = "3"

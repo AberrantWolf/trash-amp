@@ -649,6 +649,7 @@ mod tests {
         }
         w.finalize().unwrap();
         let track = Track {
+            scan_status: None,
             blocked_reason: None,
             availability: Default::default(),
             source: None,

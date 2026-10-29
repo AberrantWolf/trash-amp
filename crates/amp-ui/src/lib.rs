@@ -208,6 +208,16 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
         folder_choices(ui, state);
     }
     ui.set_source_status(snapshot.source_message.clone().unwrap_or_default().into());
+    if state.catalog_revision != snapshot.library_revision || ui.get_scan_summary().is_empty() {
+        render_scan_status(
+            ui,
+            if snapshot.source == CatalogSource::Local {
+                snapshot.library.scan.as_ref()
+            } else {
+                None
+            },
+        );
+    }
     ui.set_scanning(snapshot.scanning);
     ui.set_scan_progress(
         snapshot
@@ -246,6 +256,7 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
                             || a.artist != b.artist
                             || a.availability != b.availability
                             || a.blocked_reason != b.blocked_reason
+                            || a.scan_status != b.scan_status
                     })
             });
         let selected_track_id = state.selected.and_then(|index| {
@@ -306,6 +317,29 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
         *last_notice = notice.revision;
         ui.set_status(notice.message.into());
     }
+}
+fn render_scan_status(ui: &PlayerWindow, summary: Option<&amp_core::ScanSummary>) {
+    let Some(summary) = summary.filter(|summary| summary.incomplete) else {
+        ui.set_scan_summary(SharedString::default());
+        ui.set_scan_details(SharedString::default());
+        ui.set_scan_details_open(false);
+        return;
+    };
+    ui.set_scan_summary(summary.message().into());
+    let mut details = format!(
+        "{} tracks added · {} tracks removed · {} tracks not verified\nYou can still try playing tracks that weren’t verified.",
+        summary.added, summary.removed, summary.unverified,
+    );
+    for issue in summary.issues.iter().take(200) {
+        details.push_str(&format!("\n\n{}\n{}", issue.path, issue.reason));
+    }
+    if summary.issues.len() > 200 {
+        details.push_str(&format!(
+            "\n\n{} more locations couldn’t be checked.",
+            summary.issues.len() - 200
+        ));
+    }
+    ui.set_scan_details(details.into());
 }
 fn album_key(album: &amp_core::Album) -> String {
     serde_json::to_string(&album.id).expect("album identity is serializable")
@@ -430,6 +464,12 @@ fn select(ui: &PlayerWindow, state: &mut State, index: usize) {
             .iter()
             .map(|t| TrackRow {
                 title: t.title.clone().into(),
+                scan_status: t
+                    .scan_status
+                    .as_ref()
+                    .map(|s| s.label())
+                    .unwrap_or_default()
+                    .into(),
                 status: t
                     .blocked_reason
                     .map(|reason| reason.message())
@@ -985,6 +1025,80 @@ impl TestServices {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incomplete_scan_banner_keeps_details_and_retry_separate_from_playback_notices() {
+        use i_slint_backend_testing::ElementHandle;
+        use std::cell::Cell;
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.set_wide(false);
+        ui.set_home(true);
+        ui.window().set_size(slint::LogicalSize::new(390., 740.));
+        let summary = amp_core::ScanSummary {
+            incomplete: true,
+            source_disconnected: true,
+            added: 12,
+            unverified: 42,
+            issues: vec![amp_core::ScanIssue {
+                path: "/Volumes/Music/Album".into(),
+                reason: "Connection lost".into(),
+            }],
+            ..Default::default()
+        };
+        render_scan_status(&ui, Some(&summary));
+        ui.set_status("Playing album".into());
+        assert!(ui.get_scan_summary().contains("no tracks removed"));
+        assert!(ui.get_scan_details().contains("/Volumes/Music/Album"));
+        assert!(ui.get_scan_details().contains("Connection lost"));
+        assert!(!ui.get_scan_details().contains("retained"));
+        let retries = Rc::new(Cell::new(0));
+        let count = retries.clone();
+        ui.on_refresh_folder(move || count.set(count.get() + 1));
+        ui.show().unwrap();
+        ElementHandle::find_by_accessible_label(&ui, "View details")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert!(ui.get_scan_details_open());
+        ElementHandle::find_by_accessible_label(&ui, "Retry refresh")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert_eq!(retries.get(), 1);
+        assert_eq!(ui.get_error_message(), "");
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "Play")
+                .next()
+                .unwrap()
+                .accessible_enabled()
+                .unwrap()
+        );
+        for width in [330., 390.] {
+            for scale in [1., 1.6] {
+                ui.window().set_size(slint::LogicalSize::new(width, 740.));
+                ui.set_text_scale(scale);
+                slint::platform::update_timers_and_animations();
+                for label in ["Hide details", "Retry refresh", "Play"] {
+                    let action = ElementHandle::find_by_accessible_label(&ui, label)
+                        .next()
+                        .unwrap();
+                    let position = action.absolute_position();
+                    let size = action.size();
+                    assert!(
+                        position.x >= 0. && position.x + size.width <= width,
+                        "{label} fits the window width"
+                    );
+                    assert!(
+                        position.y >= 0. && position.y + size.height <= 740.,
+                        "{label} fits the window height"
+                    );
+                }
+            }
+        }
+        render_scan_status(&ui, None);
+        assert_eq!(ui.get_scan_summary(), "");
+        assert!(!ui.get_scan_details_open());
+    }
     slint::slint! {
         import { TransportSeek } from "ui/transport-seek.slint";
         export component SeekHarness inherits Window {

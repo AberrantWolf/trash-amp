@@ -490,6 +490,7 @@ impl Adapter {
         check(cancelled)?;
         let mut snapshot = Snapshot {
             library: Library {
+                scan: None,
                 id: connection_id(key),
                 root: connection_id(key),
                 ..Default::default()
@@ -1053,6 +1054,7 @@ fn remote_track(
         audio: Some(row.clone()),
     };
     Track {
+        scan_status: None,
         blocked_reason: None,
         availability: match row.state {
             api::MusicTrackAvailabilityState::Available { .. } => amp_core::Availability::Available,
@@ -1417,6 +1419,7 @@ mod tests {
         for (key, name) in [(first, "one"), (second, "two"), (third, "three")] {
             let snapshot = Snapshot {
                 library: Library {
+                    scan: None,
                     id: connection_id(key),
                     root: name.into(),
                     ..Default::default()

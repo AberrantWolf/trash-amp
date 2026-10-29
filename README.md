@@ -58,6 +58,16 @@ a failed scan keeps the saved catalog. Playback still requires the source files
 to be available. The last selected folder is restored on startup when using the
 local source. Existing single-library caches migrate automatically.
 
+Refresh removes a cached track only when a complete directory listing proves it
+is gone. Folders that couldn’t be checked keep their previous entries, marked
+**Not verified**. A failed tag read keeps the previous names and shows
+**Couldn’t read metadata**. These scan labels do not block playback. If the source
+disconnects during refresh, readable additions can still appear but **no tracks
+are removed**. On macOS the scanner also checks mount identity, so an empty
+unmounted NAS directory cannot replace its saved catalog. An incomplete-refresh
+banner offers **View details** and **Retry refresh** and survives reopening the
+saved folder. A successful refresh clears the scan labels.
+
 The initial build downloads Slint/Skia dependencies and can take several minutes. A Rust toolchain and macOS Xcode command-line tools are required. The lockfile pins the development dependency set. Other targets have not yet been validated.
 
 ## Drop files to play

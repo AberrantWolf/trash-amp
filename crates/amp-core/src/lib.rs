@@ -38,6 +38,9 @@ pub struct SourceCoordinates {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
+    /// Refresh uncertainty never determines whether playback may be attempted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_status: Option<ScanStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<PlaybackBlockReason>,
     #[serde(default)]
@@ -51,6 +54,64 @@ pub struct Track {
     pub disc: u32,
     pub duration_seconds: f64,
     pub access: MediaAccess,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScanStatus {
+    Unverified { path: String, reason: String },
+    MetadataUnreadable { reason: String },
+}
+impl ScanStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unverified { .. } => "Not verified",
+            Self::MetadataUnreadable { .. } => "Couldn’t read metadata",
+        }
+    }
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Unverified { reason, .. } | Self::MetadataUnreadable { reason } => reason,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanIssue {
+    pub path: String,
+    pub reason: String,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScanSummary {
+    pub source_identity: Option<String>,
+    /// Mounted source boundaries within the selected folder, including its root.
+    #[serde(default)]
+    pub mounts: std::collections::BTreeMap<String, String>,
+    pub incomplete: bool,
+    pub source_disconnected: bool,
+    pub added: usize,
+    pub removed: usize,
+    pub unverified: usize,
+    pub issues: Vec<ScanIssue>,
+}
+impl ScanSummary {
+    pub fn message(&self) -> String {
+        if self.source_disconnected {
+            format!(
+                "Refresh interrupted — source unavailable; no tracks removed. {} tracks added.",
+                self.added
+            )
+        } else if self.incomplete {
+            format!(
+                "Refresh incomplete · {} tracks added · {} tracks removed. Some folders or files couldn’t be checked.",
+                self.added, self.removed
+            )
+        } else {
+            format!(
+                "Refresh complete · {} tracks added · {} tracks removed",
+                self.added, self.removed
+            )
+        }
+    }
 }
 
 /// A provider explains why an otherwise browsable item cannot be played.
@@ -122,6 +183,8 @@ pub struct AlbumMetadata {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Library {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan: Option<ScanSummary>,
     pub id: String,
     pub root: String,
     pub albums: Vec<Album>,

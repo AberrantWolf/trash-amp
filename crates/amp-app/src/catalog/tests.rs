@@ -13,6 +13,7 @@ fn library(id: &str, title: &str) -> Library {
         item: "album".into(),
     };
     Library {
+        scan: None,
         id: id.into(),
         root: format!("/offline/{id}"),
         warnings: vec![],
@@ -23,6 +24,7 @@ fn library(id: &str, title: &str) -> Library {
             artist: "Artist".into(),
             source_label: "Local".into(),
             tracks: vec![Track {
+                scan_status: None,
                 blocked_reason: None,
                 id: ItemId {
                     item: "track".into(),
@@ -140,6 +142,193 @@ fn read(catalog: &Catalog) -> Snapshot {
 }
 
 #[test]
+fn partial_refresh_preserves_active_tracks_newer_than_the_saved_cache() {
+    use amp_library::coverage::{Coverage, DirectoryCoverage};
+    let mut saved = library("folder", "Saved song");
+    saved.albums[0].tracks[0].access = MediaAccess::File {
+        locator: format!("{}/saved.wav", saved.root),
+    };
+    let other = library("other", "Other folder");
+    let harness = Harness::simple(&[saved.clone(), other.clone()]);
+    let mut state = read(&harness.handle());
+    state.source = Source::Local;
+    let mut current = saved.clone();
+    let mut added = current.albums[0].tracks[0].clone();
+    added.id.item = "new-song".into();
+    added.title = "New song whose cache write failed".into();
+    added.access = MediaAccess::File {
+        locator: format!("{}/new.wav", current.root),
+    };
+    current.albums[0].tracks.push(added);
+    state.library = Arc::new(current);
+    let store = harness.store();
+    assert_eq!(
+        store.library_by_id(&saved.id).unwrap().unwrap().albums[0]
+            .tracks
+            .len(),
+        1
+    );
+    let baseline = scan_baseline(&state, &store, &saved.id).unwrap().unwrap();
+    let coverage = Coverage {
+        root: saved.root.clone().into(),
+        directories: [(
+            PathBuf::from(&saved.root),
+            DirectoryCoverage {
+                complete: false,
+                children: Default::default(),
+            },
+        )]
+        .into(),
+        files: Default::default(),
+        failures: Default::default(),
+        mounts: Default::default(),
+        issues: vec![amp_core::ScanIssue {
+            path: saved.root.clone(),
+            reason: "Permission denied".into(),
+        }],
+        source_disconnected: false,
+        source_identity: None,
+    };
+    let refreshed = ScanResult {
+        library: Library {
+            id: saved.id.clone(),
+            root: saved.root.clone(),
+            ..Default::default()
+        },
+        coverage: Some(coverage),
+    }
+    .reconcile(Some(&baseline));
+    assert_eq!(refreshed.albums[0].tracks.len(), 2);
+    assert!(
+        refreshed.albums[0]
+            .tracks
+            .iter()
+            .any(|track| track.title == "New song whose cache write failed")
+    );
+    assert!(
+        refreshed.albums[0]
+            .tracks
+            .iter()
+            .all(|track| track.scan_status.is_some() && track.playback_block().is_none())
+    );
+    assert_eq!(
+        scan_baseline(&state, &store, &other.id)
+            .unwrap()
+            .unwrap()
+            .albums[0]
+            .title,
+        "Other folder"
+    );
+    state.source = Source::External("unrelated-provider".into());
+    assert_eq!(
+        scan_baseline(&state, &store, &saved.id)
+            .unwrap()
+            .unwrap()
+            .albums[0]
+            .tracks
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn incomplete_refresh_reconciles_with_the_saved_folder_and_survives_restart() {
+    use amp_library::coverage::{Coverage, DirectoryCoverage};
+    struct CoveredBackend(Mutex<Option<ScanResult>>);
+    impl Backend for CoveredBackend {
+        fn scan(
+            &self,
+            _: PathBuf,
+            _: Preferences,
+            _: &dyn Fn() -> bool,
+            _: &mut dyn FnMut(ScanProgress),
+        ) -> Result<Library> {
+            unreachable!("the owner must request coverage")
+        }
+        fn scan_with_coverage(
+            &self,
+            _: PathBuf,
+            _: Preferences,
+            _: &dyn Fn() -> bool,
+            _: &mut dyn FnMut(ScanProgress),
+        ) -> Result<ScanResult> {
+            Ok(self.0.lock().unwrap().take().unwrap())
+        }
+        fn enrich(
+            &self,
+            _: &mut Library,
+            _: &Store,
+            _: &dyn Fn() -> bool,
+            _: &dyn Fn() -> bool,
+            _: &mut dyn FnMut(&Album),
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+    let mut saved = library("folder", "Known song");
+    let path = PathBuf::from(&saved.root).join("album/song.wav");
+    saved.albums[0].tracks[0].access = MediaAccess::File {
+        locator: path.to_string_lossy().into(),
+    };
+    let coverage = Coverage {
+        mounts: Default::default(),
+        root: saved.root.clone().into(),
+        directories: [(
+            PathBuf::from(&saved.root),
+            DirectoryCoverage {
+                complete: false,
+                children: Default::default(),
+            },
+        )]
+        .into(),
+        files: Default::default(),
+        failures: Default::default(),
+        issues: vec![amp_core::ScanIssue {
+            path: saved.root.clone(),
+            reason: "Permission denied".into(),
+        }],
+        source_disconnected: false,
+        source_identity: Some("fixture-source".into()),
+    };
+    let scan = ScanResult {
+        library: Library {
+            id: saved.id.clone(),
+            root: saved.root.clone(),
+            ..Default::default()
+        },
+        coverage: Some(coverage),
+    };
+    let harness = Harness::new(
+        &[saved.clone()],
+        Arc::new(CoveredBackend(Mutex::new(Some(scan)))),
+    );
+    harness.handle().scan_folder(saved.root.clone().into());
+    wait(|| {
+        harness
+            .store()
+            .library()
+            .unwrap()
+            .is_some_and(|library| library.scan.is_some())
+    });
+    let reopened = harness.store().library().unwrap().unwrap();
+    let track = &reopened.albums[0].tracks[0];
+    assert_eq!(track.title, "Known song");
+    assert!(track.scan_status.is_some());
+    assert!(track.playback_block().is_none());
+    assert_eq!(reopened.scan.as_ref().unwrap().removed, 0);
+    assert!(reopened.scan.as_ref().unwrap().incomplete);
+    let snapshot = read(&harness.handle());
+    assert!(snapshot.library.scan.as_ref().unwrap().incomplete);
+    let cache = harness.cache.clone();
+    drop(harness.catalog);
+    let playback = PlaybackService::new(Arc::new(|| Ok(()))).unwrap();
+    let restarted = CatalogService::open(&cache, playback.playback()).unwrap();
+    let snapshot = restarted.catalog().bootstrap_snapshot().unwrap();
+    assert!(snapshot.library.albums[0].tracks[0].scan_status.is_some());
+    assert!(snapshot.library.scan.as_ref().unwrap().incomplete);
+}
+
+#[test]
 fn scan_enrichment_and_queue_metadata_persist_without_a_presentation_consumer() {
     let scanned = library("scan", "Scanned");
     let harness = Harness::new(
@@ -217,7 +406,10 @@ fn source_switch_flushes_accepted_metadata_but_rejects_late_scan_and_metadata() 
         "Accepted"
     );
     // Simulate a scanner and an in-flight lookup returning after the selection changed.
-    handle.send(Command::Scanned(old, Ok(library("late", "Late scan"))));
+    handle.send(Command::Scanned(
+        old,
+        Ok(ScanResult::complete(library("late", "Late scan"))),
+    ));
     handle.send(Command::Metadata(
         old,
         library("a", "Late metadata").albums.remove(0),

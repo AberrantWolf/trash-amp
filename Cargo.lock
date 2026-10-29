@@ -288,6 +288,7 @@ dependencies = [
  "hound",
  "httpdate",
  "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98)",
+ "libc",
  "lofty",
  "rusqlite",
  "serde",
@@ -295,7 +296,6 @@ dependencies = [
  "sha1",
  "tempfile",
  "ureq",
- "walkdir",
 ]
 
 [[package]]
