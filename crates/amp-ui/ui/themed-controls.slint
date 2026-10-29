@@ -18,7 +18,7 @@ export component Slider inherits Rectangle {
         x: 10px; y: (parent.height - self.height) / 2;
         width: max(0px, parent.width - 20px); height: 4px;
         border-radius: 2px; background: Theme.divider;
-        Rectangle { width: parent.width * root.fraction; height: 100%; border-radius: 2px; background: Theme.accent; }
+        Rectangle { x: 0px; width: parent.width * root.fraction; height: 100%; border-radius: 2px; background: Theme.accent; }
     }
     Rectangle {
         x: root.fraction * max(0px, parent.width - 20px);
