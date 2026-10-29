@@ -253,6 +253,8 @@ pub struct Preferences {
     pub browse_artists: bool,
     pub dump_preference: DumpPreference,
     pub automatic_metadata: bool,
+    #[serde(default)]
+    pub acoustid_api_key: String,
     pub reduced_motion: bool,
     pub text_scale: f32,
     #[serde(default)]
@@ -274,6 +276,7 @@ impl Default for Preferences {
             browse_artists: false,
             dump_preference: DumpPreference::Redumper,
             automatic_metadata: true,
+            acoustid_api_key: String::new(),
             reduced_motion: false,
             text_scale: 1.0,
             color_mode: ColorMode::Dark,

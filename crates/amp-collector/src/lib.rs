@@ -323,6 +323,32 @@ impl Adapter {
         self.notify_availability(key);
         Ok(())
     }
+    /// Open the server-owned curator workflow without forwarding native secrets
+    /// into a browser URL. Browser sign-in and server exposure remain authoritative.
+    pub fn album_matching_url(&self, album: &ItemId) -> Result<ServerUrl> {
+        if album.provider != "collector" {
+            bail!("This is not a Collector album");
+        }
+        let item: ids::ItemId = album.item.parse()?;
+        let connection = self
+            .connections()?
+            .into_iter()
+            .find(|c| connection_id(c.key) == album.library && !c.removed)
+            .context("Reconnect this album's server first")?;
+        let client = self.client(connection.key)?;
+        let snapshot = self
+            .snapshot(connection.key)?
+            .context("Refresh this server's library first")?;
+        let collection = snapshot
+            .album_collections
+            .get(&album.item)
+            .context("Refresh this album's server library first")?;
+        let mut url = client.api_url("library-care/metadata")?;
+        url.query_pairs_mut()
+            .append_pair("collection", &collection.to_string())
+            .append_pair("item", &item.to_string());
+        Ok(url)
+    }
     pub fn client(&self, key: ConnectionKey) -> Result<EnrolledClient> {
         Ok(EnrolledClient::from_storage(self.secrets.as_ref(), key)?)
     }

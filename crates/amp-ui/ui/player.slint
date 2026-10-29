@@ -13,6 +13,7 @@ import { FileLoadingStatus } from "file-loading-status.slint";
 import { ErrorDialog } from "error-dialog.slint";
 import { ConnectionIndicator, ConnectionKind } from "connection-indicator.slint";
 export { ConnectionKind }
+export struct AlbumMatchRow { artwork: image, title:string, artist:string, detail:string, tracks:string, release:string, applicable:bool }
 export component PlayerWindow inherits Window {
     in-out property <string> error-title: "Connection failed";
     in-out property <string> error-message;
@@ -134,6 +135,16 @@ export component PlayerWindow inherits Window {
     in-out property <bool> reduced-motion;
     in-out property <bool> prefer-raw: true;
     in-out property <bool> automatic-metadata: true;
+    in-out property <string> acoustid-api-key;
+    in property <bool> album-matching-busy;
+    in property <bool> album-matching-available;
+    in-out property <bool> album-matching-open;
+    in-out property <int> album-matching-version: -1;
+    in property <string> album-matching-status;
+    in property <[AlbumMatchRow]> album-matching-rows;
+    callback find-album-matches();
+    callback cancel-album-matching();
+    callback apply-album-match(string);
     in-out property <bool> settings;
     // Launch routing is supplied by the host; returning Home preserves browse state.
     in-out property <bool> home;
@@ -201,7 +212,7 @@ export component PlayerWindow inherits Window {
         }
         if root.home: Rectangle {
             accessible-role: groupbox; accessible-label: "Home page";
-            background: Theme.surface; border-radius: 6px;
+            background: Theme.raised; border-radius: 6px;
             home-scroll := ScrollView {
                 mouse-drag-pan-enabled: true;
                 width: 100%; height: 100%;
@@ -274,7 +285,7 @@ export component PlayerWindow inherits Window {
             }
         }
         if root.lists-open: Rectangle {
-            background: Theme.surface; border-radius: 6px;
+            background: Theme.raised; border-radius: 6px;
             collector-scroll := ScrollView {
                 mouse-drag-pan-enabled: true;
                 width: 100%; height: 100%;
@@ -354,6 +365,10 @@ export component PlayerWindow inherits Window {
                             toggled => { root.preferences-changed(); } }
                         CheckBox { text: "Automatic metadata from MusicBrainz"; checked <=> root.automatic-metadata;
                             toggled => { root.preferences-changed(); } }
+                        Text { text: "AcoustID application key for local album matching"; color: Theme.text; wrap: word-wrap; }
+                        LineEdit { text <=> root.acoustid-api-key; accessible-label: "AcoustID application key";
+                            edited => { root.preferences-changed(); } }
+                        Text { text: "Matching is explicit: it sends audio fingerprints and durations, never audio files. Register an application key at acoustid.org."; color: Theme.muted; wrap: word-wrap; }
                         HorizontalLayout {
                             Text { text: "Audio buffer: " + root.audio-buffer-seconds + " s"; color: Theme.text; }
                             Slider { minimum: 3; maximum: 60; step: 1; value: root.audio-buffer-seconds;
@@ -445,7 +460,7 @@ export component PlayerWindow inherits Window {
                 max-width: root.wide ? root.desktop-library-width : 10000px;
                 min-width: root.wide ? root.desktop-library-width : 0px;
                 horizontal-stretch: root.wide ? 0 : 1;
-                background: Theme.surface; border-radius: 6px;
+                background: Theme.raised; border-radius: 6px;
                 HorizontalLayout {
                     x: 8px; y: 8px; width: parent.width - 16px; height: 44px; spacing: 6px;
                     IconButton { label: "Home"; icon: @image-url("icons/home.svg"); clicked => { root.home = true; keyboard.focus(); } }
@@ -549,6 +564,10 @@ export component PlayerWindow inherits Window {
                     if root.collector-active: IconButton { label: "Remove download"; icon: @image-url("icons/remove-download.svg"); clicked => { root.download-action(1); } }
                     if !root.wide: Rectangle { horizontal-stretch: 1; }
                     if !root.wide: IconButton { label: "Home"; icon: @image-url("icons/home.svg"); clicked => { root.home = true; keyboard.focus(); } }
+                }
+                if !root.artist-view && !(root.show-queue && root.adhoc-queue) && root.album-matching-available && root.selected-album >= 0: Button {
+                    text: root.collector-active ? "Review matching in Collector" : "Find matching albums";
+                    clicked => { root.album-matching-open = true; root.find-album-matches(); }
                 }
                 if !root.artist-view: HorizontalLayout {
                     spacing: 0px;
@@ -683,4 +702,42 @@ export component PlayerWindow inherits Window {
         title: root.error-title; message: root.error-message;
         dismissed => { root.error-message = ""; }
     }
+    if root.album-matching-open: Rectangle {
+        x: max(8px, (root.width - self.width) / 2); y: 12px;
+        width: min(root.width - 16px, 760px); height: root.height - 24px;
+        background: Theme.raised; border-color: Theme.muted; border-width: 1px; border-radius: 8px;
+        VerticalLayout {
+            padding: 12px; spacing: 8px;
+            HorizontalLayout {
+                Text { text: "Matching local albums"; color: Theme.text; font-weight: 600; font-size: 20px * root.text-scale; wrap: word-wrap; horizontal-stretch: 1; }
+                Button { text: "Close"; clicked => { root.album-matching-open = false; } }
+            }
+            Text { text: root.album-matching-status; color: Theme.text; wrap: word-wrap; }
+            Text { text: "Review coverage and track assignments. These are identity suggestions, not catalog verification. Existing names and original files are preserved."; color: Theme.muted; wrap: word-wrap; }
+            if root.album-matching-busy: Button { text: "Cancel matching"; clicked => { root.cancel-album-matching(); } }
+            ScrollView {
+                vertical-stretch: 1; min-height: 0px;
+                VerticalLayout {
+                    spacing: 12px;
+                    for candidate in root.album-matching-rows: Rectangle {
+                        background: Theme.raised; border-radius: 4px;
+                        HorizontalLayout {
+                            padding: 8px; spacing: 10px;
+                            Image { source: candidate.artwork; width: 64px; height: 64px; image-fit: contain; }
+                            VerticalLayout {
+                                Text { text: candidate.title; color: Theme.text; font-weight: 600; wrap: word-wrap; }
+                                Text { text: candidate.artist; color: Theme.text; wrap: word-wrap; }
+                                Text { text: candidate.detail; color: Theme.muted; wrap: word-wrap; }
+                                Text { text: candidate.tracks; color: Theme.text; wrap: word-wrap; }
+                                Button { text: candidate.applicable ? "Use this album" : "Needs manual mapping";
+                                    enabled: candidate.applicable && !root.album-matching-busy;
+                                    clicked => { root.apply-album-match(candidate.release); } }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
 }

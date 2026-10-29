@@ -1,5 +1,6 @@
 //! Filesystem is one library provider; SQLite is always stored on the local device.
 pub mod coverage;
+pub mod matching;
 pub mod metadata;
 mod reconcile;
 pub use reconcile::ScanResult;

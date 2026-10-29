@@ -170,6 +170,105 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
     if snapshot.generation != state.catalog.generation().current() {
         return;
     }
+    let version = snapshot.matching_version.min(i32::MAX as u64) as i32;
+    if ui.get_album_matching_version() != version
+        || ui.get_album_matching_busy() != snapshot.matching_busy
+    {
+        ui.set_album_matching_version(version);
+        ui.set_album_matching_busy(snapshot.matching_busy);
+        let mut rows = Vec::new();
+        let mut status = if snapshot.matching_busy {
+            "Reading audio and searching providers…".to_owned()
+        } else {
+            snapshot
+                .notice
+                .as_ref()
+                .map(|n| n.message.clone())
+                .unwrap_or_else(|| "Choose an album, then find matching releases.".to_owned())
+        };
+        if let Some(review) = &snapshot.matching_review {
+            status = format!(
+                "{}: {} possible releases{}{}",
+                review.album.title,
+                review.matches.len(),
+                if review.truncated {
+                    " · incomplete search (candidate budget reached)"
+                } else {
+                    ""
+                },
+                review
+                    .artwork_error
+                    .as_ref()
+                    .map(|e| format!(" · artwork: {e}"))
+                    .unwrap_or_default()
+            );
+            for candidate in &review.matches {
+                let mut mappings: Vec<_> = candidate.mappings.iter().collect();
+                mappings.sort_by_key(|mapping| (mapping.medium, mapping.position));
+                let tracks = mappings
+                    .iter()
+                    .map(|m| {
+                        let file = review
+                            .album
+                            .tracks
+                            .iter()
+                            .find(|t| t.id.item == m.key)
+                            .map(|t| t.title.as_str())
+                            .unwrap_or("File");
+                        let title = candidate
+                            .release
+                            .media
+                            .iter()
+                            .find(|d| d.position == Some(m.medium))
+                            .and_then(|d| d.tracks.iter().find(|t| t.position == m.position))
+                            .map(|t| t.title.as_str())
+                            .unwrap_or("Untitled");
+                        format!("{file} → disc {}, track {}: {title}", m.medium, m.position)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let applicable = candidate.complete_tracklist
+                    && !candidate.ambiguous_mapping
+                    && candidate.duration_conflicts == 0
+                    && candidate.mappings.len() == review.album.tracks.len()
+                    && candidate.release_tracks == review.album.tracks.len();
+                rows.push(AlbumMatchRow {
+                    artwork: review
+                        .covers
+                        .get(&candidate.release.id)
+                        .and_then(|p| slint::Image::load_from_path(std::path::Path::new(p)).ok())
+                        .unwrap_or_default(),
+                    title: candidate.release.title.clone().into(),
+                    artist: candidate.release.artist.clone().into(),
+                    detail: format!(
+                        "{} / {} files matched · {} release tracks{}{}",
+                        candidate.mappings.len(),
+                        candidate.local_tracks,
+                        candidate.release_tracks,
+                        if candidate.ambiguous_mapping {
+                            " · ambiguous assignment"
+                        } else {
+                            ""
+                        },
+                        if candidate.duration_conflicts > 0 {
+                            " · duration conflicts"
+                        } else {
+                            ""
+                        }
+                    )
+                    .into(),
+                    tracks: tracks.into(),
+                    release: candidate.release.id.clone().into(),
+                    applicable,
+                });
+            }
+        }
+        if let Some(error) = &snapshot.matching_error {
+            status = error.clone();
+        }
+        ui.set_album_matching_status(status.into());
+        ui.set_album_matching_rows(ModelRc::new(VecModel::from(rows)));
+    }
     if !snapshot.sources.is_empty() {
         ui.set_sources(ModelRc::new(VecModel::from(
             snapshot
@@ -384,6 +483,14 @@ fn select(ui: &PlayerWindow, state: &mut State, index: usize) {
     let Some(album) = state.library.albums.get(index) else {
         return;
     };
+    ui.set_album_matching_available(
+        album.id.provider == "collector"
+            || state.catalog.snapshot().source == CatalogSource::Local
+                && album
+                    .tracks
+                    .iter()
+                    .all(|track| matches!(track.access, amp_core::MediaAccess::File { .. })),
+    );
     let sources = disc_sources(album);
     let key = album_key(album);
     if let Some(selected) = state.selected_sources.get(&key)
@@ -649,6 +756,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     ui.set_reduced_motion(preferences.reduced_motion);
     ui.set_prefer_raw(preferences.dump_preference == DumpPreference::Redumper);
     ui.set_automatic_metadata(preferences.automatic_metadata);
+    ui.set_acoustid_api_key(preferences.acoustid_api_key.clone().into());
     ui.set_text_scale(preferences.text_scale);
     ui.set_audio_buffer_seconds(preferences.audio_buffer_seconds.clamp(3, 60) as i32);
     playback.set_buffer_seconds(preferences.audio_buffer_seconds);
@@ -678,6 +786,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     browse::rebuild(&ui, &mut state.borrow_mut(), true);
     browse::wire(&ui, &state);
     let generation = catalog.generation();
+    let matching_adapter = collector.clone();
     let mut collector =
         collector::Controller::new(&ui, &state, collector, generation.clone(), open_url)?;
     folder_choices(&ui, &state.borrow());
@@ -729,6 +838,59 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
                 let mut s = state.borrow_mut();
                 browse::clear_track_context(&mut s);
                 start(&ui, &mut s, i as usize)
+            }
+        });
+    }
+    {
+        let find_state = state.clone();
+        let find_ui = ui.as_weak();
+        ui.on_find_album_matches(move || {
+            let s = find_state.borrow();
+            if let Some(album) = s.selected.and_then(|i| s.library.albums.get(i)) {
+                if album.id.provider == "collector" {
+                    if let Some(ui) = find_ui.upgrade() {
+                        ui.set_album_matching_open(false);
+                    }
+                    let adapter = matching_adapter.clone();
+                    let id = album.id.clone();
+                    let weak = find_ui.clone();
+                    std::thread::spawn(move || match adapter.album_matching_url(&id) {
+                        Ok(url) => open_url(
+                            url.as_str(),
+                            Box::new(move |result| {
+                                if let Err(error) = result {
+                                    let _ = slint::invoke_from_event_loop(move || {
+                                        if let Some(ui) = weak.upgrade() {
+                                            ui.set_error_message(error.into());
+                                        }
+                                    });
+                                }
+                            }),
+                        ),
+                        Err(error) => {
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = weak.upgrade() {
+                                    ui.set_error_message(error.to_string().into());
+                                }
+                            });
+                        }
+                    });
+                } else {
+                    s.catalog.find_album_matches(album.id.clone());
+                }
+            }
+        });
+        let catalog = catalog.clone();
+        ui.on_cancel_album_matching(move || catalog.cancel_album_matching());
+        let state = state.clone();
+        let weak = ui.as_weak();
+        ui.on_apply_album_match(move |release| {
+            if let Some(ui) = weak.upgrade() {
+                let s = state.borrow();
+                s.catalog.apply_album_match(
+                    ui.get_album_matching_version().max(0) as u64,
+                    release.to_string(),
+                );
             }
         });
     }
@@ -807,6 +969,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
                     ui.get_audio_buffer_seconds().clamp(3, 60) as u32;
                 s.preferences.reduced_motion = ui.get_reduced_motion();
                 s.preferences.automatic_metadata = ui.get_automatic_metadata();
+                s.preferences.acoustid_api_key = ui.get_acoustid_api_key().trim().to_owned();
                 s.preferences.dump_preference = if ui.get_prefer_raw() {
                     DumpPreference::Redumper
                 } else {
@@ -959,6 +1122,11 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     if args.iter().any(|a| a == "--select-first") {
         ui.set_home(false);
         select(&ui, &mut state.borrow_mut(), 0);
+    }
+    // Exercise the real local matching command in reproducible native rendering QA.
+    if args.iter().any(|arg| arg == "--review-matches") {
+        ui.set_album_matching_open(true);
+        ui.invoke_find_album_matches();
     }
     if let Some(path) = args
         .iter()
@@ -1136,6 +1304,87 @@ mod tests {
             out property <[color]> surfaces: [Theme.canvas, Theme.surface, Theme.raised, Theme.transport];
             out property <color> text: Theme.text;
             out property <color> selection: Theme.selection;
+        }
+    }
+    #[test]
+    fn local_album_review_controls_reopen_cancel_and_accept_only_applicable_rows() {
+        use i_slint_backend_testing::ElementHandle;
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(390., 844.));
+        ui.set_selected_album(0);
+        ui.set_album_matching_available(true);
+        ui.set_album_title("Untagged folder".into());
+        ui.set_album_matching_busy(true);
+        ui.show().unwrap();
+        let requested = Rc::new(RefCell::new(0));
+        let count = requested.clone();
+        ui.on_find_album_matches(move || *count.borrow_mut() += 1);
+        let activate = |label| {
+            ElementHandle::find_by_accessible_label(&ui, label)
+                .next()
+                .unwrap()
+                .invoke_accessible_default_action();
+            slint::platform::update_timers_and_animations();
+        };
+        activate("Find matching albums");
+        assert!(ui.get_album_matching_open());
+        activate("Close");
+        assert!(!ui.get_album_matching_open());
+        activate("Find matching albums");
+        assert_eq!(*requested.borrow(), 2, "pending work remains reopenable");
+        let cancelled = Rc::new(RefCell::new(false));
+        let value = cancelled.clone();
+        ui.on_cancel_album_matching(move || *value.borrow_mut() = true);
+        activate("Cancel matching");
+        assert!(*cancelled.borrow());
+        ui.set_album_matching_busy(false);
+        ui.set_album_matching_rows(ModelRc::new(VecModel::from(vec![
+            AlbumMatchRow {
+                title: "Complete release".into(),
+                release: "chosen".into(),
+                tracks: "01.flac → disc 1, track 1".into(),
+                applicable: true,
+                ..Default::default()
+            },
+            AlbumMatchRow {
+                title: "Partial release".into(),
+                applicable: false,
+                ..Default::default()
+            },
+        ])));
+        slint::platform::update_timers_and_animations();
+        let partial = ElementHandle::find_by_accessible_label(&ui, "Needs manual mapping")
+            .next()
+            .unwrap();
+        assert_eq!(partial.accessible_enabled(), Some(false));
+        let chosen = Rc::new(RefCell::new(String::new()));
+        let value = chosen.clone();
+        ui.on_apply_album_match(move |release| *value.borrow_mut() = release.to_string());
+        activate("Use this album");
+        assert_eq!(*chosen.borrow(), "chosen");
+        ui.set_album_matching_busy(true);
+        slint::platform::update_timers_and_animations();
+        assert_eq!(
+            ElementHandle::find_by_accessible_label(&ui, "Use this album")
+                .next()
+                .unwrap()
+                .accessible_enabled(),
+            Some(false)
+        );
+        for (width, scale) in [(390., 1.), (390., 1.5), (980., 1.)] {
+            ui.window().set_size(slint::LogicalSize::new(width, 844.));
+            ui.set_text_scale(scale);
+            slint::platform::update_timers_and_animations();
+            let button = ElementHandle::find_by_accessible_label(&ui, "Use this album")
+                .next()
+                .unwrap();
+            assert!(
+                button.absolute_position().x >= 0.
+                    && button.absolute_position().x + button.size().width
+                        <= ui.window().size().width as f32,
+                "matching action overflows the window"
+            );
         }
     }
     #[test]

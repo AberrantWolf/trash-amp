@@ -513,3 +513,30 @@ The signed iPhone development build was installed and launched before commit and
 push, as recorded above. The published ZIP is macOS-only. Separate-Mac upgrade,
 VoiceOver, extended physical-device playback and overnight iOS resume acceptance
 remain open; publication does not complete those qualification gates.
+
+## Digital album matching — 2026-10-29
+
+See [workflow and limits](digital-album-matching.md). New tests use actual generated
+FLAC/MP3 files and offline provider fixtures: distinct fingerprints, complete
+one-to-one review/application, duplicate source numbers, unchanged files,
+source/manual name authority, stale-source rejection, offline restoration and
+cancellation. Shared fingerprints match independent native Chromaprint 1.6.2 Test2
+vectors. Slint controls exercise review reopening, cancel and disabled partial
+application. Final qualification completed on 2026-10-30 (Japan time): 236 workspace tests
+pass, with three pre-existing opt-in tests ignored; workspace all-target Clippy
+with warnings denied and formatting pass. All 28 release-tooling tests pass, and
+runtime notice generation succeeds with the fingerprint implementation's LGPL
+notice included. Real-server acceptance also checks that opening Collector
+matching targets the album's original server and collection after another server
+has been selected, without native credentials in the browser URL.
+
+Actual Skia renders were inspected at 390×844 for the new setting and the review
+error state. The Slint review test checks controls and action bounds at 390/980
+pixels and 1.5× text; the overflowing action label and crowded toolbar placement
+were corrected. `--select-first --review-matches --size 390x844 --snapshot PATH`
+reproduces the real review path against an isolated saved local-folder profile.
+Interactive CUA inspection was unavailable because the Mac was locked.
+AVFoundation fixture tests initially failed under macOS seatbelt and passed when
+rerun outside it. Disposable build caches were removed after disk exhaustion;
+final checks disabled incremental/debug artifacts. No user profile was changed.
+No live AcoustID recognition or new physical-device/iOS playback is claimed.

@@ -1092,3 +1092,25 @@ fn availability_projection_does_not_fetch_live_data_or_cancel_mutation_generatio
     assert_eq!(catalog.generation().current(), version);
     assert_eq!(catalog.snapshot().source_online, Some(true));
 }
+
+#[test]
+fn missing_matching_key_is_visible_in_the_matching_snapshot_and_can_be_retried() {
+    let fixture = Harness::simple(&[library("local", "Untagged")]);
+    let catalog = fixture.handle();
+    let initial = read(&catalog);
+    let id = initial.library.albums[0].id.clone();
+    catalog.find_album_matches(id.clone());
+    wait(|| catalog.snapshot().matching_error.is_some());
+    let failed = read(&catalog);
+    assert!(!failed.matching_busy);
+    assert!(
+        failed
+            .matching_error
+            .as_deref()
+            .unwrap()
+            .contains("AcoustID")
+    );
+    catalog.find_album_matches(id);
+    wait(|| catalog.snapshot().matching_version > failed.matching_version);
+    assert!(!read(&catalog).matching_busy);
+}

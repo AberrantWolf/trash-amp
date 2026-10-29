@@ -202,3 +202,8 @@ Collector servers can be added from Servers / Lists. Approve enrollment in the
 server interface; provide owner certificate material for private certificate
 trust when required. See [connection and validation](docs/collector-connection.md)
 for offline downloads, list editing and qualification limits.
+
+[Digital album matching](docs/digital-album-matching.md) is available explicitly
+for local FLAC/MP3 folder albums with an AcoustID application key. Collector albums
+open their server's metadata review workflow. Existing names and originals are
+preserved; suggestions do not establish catalog verification.

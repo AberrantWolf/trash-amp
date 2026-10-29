@@ -40,6 +40,10 @@ pub struct Snapshot {
     pub source_message: Option<String>,
     pub scanning: bool,
     pub enriching: bool,
+    pub matching_busy: bool,
+    pub matching_error: Option<String>,
+    pub matching_review: Option<Arc<amp_library::matching::Review>>,
+    pub matching_version: u64,
     pub progress: Option<ScanProgress>,
     pub notice: Option<Notice>,
 }
@@ -113,6 +117,19 @@ impl Catalog {
     pub fn show_transient(&self, library: Library) {
         let v = self.generation.advance();
         self.send(Command::Transient(v, library));
+    }
+    pub fn find_album_matches(&self, id: amp_core::ItemId) {
+        self.send(Command::FindMatches(self.generation.current(), id));
+    }
+    pub fn cancel_album_matching(&self) {
+        self.send(Command::CancelMatching);
+    }
+    pub fn apply_album_match(&self, version: u64, release: String) {
+        self.send(Command::ApplyMatch(
+            self.generation.current(),
+            version,
+            release,
+        ));
     }
     pub fn enrich_current(&self) {
         self.send(Command::Enrich(self.generation.current()));
@@ -289,6 +306,10 @@ impl CatalogService {
             source_message: None,
             scanning: false,
             enriching: false,
+            matching_busy: false,
+            matching_error: None,
+            matching_review: None,
+            matching_version: 0,
             progress: None,
             notice: None,
         };
@@ -327,6 +348,7 @@ impl CatalogService {
                     next_source_request: 0,
                     notice_revision: 0,
                     metadata_dirty: false,
+                    matching_cancel: None,
                 }
                 .run(rx);
             })?;
@@ -362,6 +384,17 @@ enum Command {
     Restore(u64),
     Transient(u64, Library),
     Enrich(u64),
+    FindMatches(u64, amp_core::ItemId),
+    CancelMatching,
+    Matched(u64, u64, Result<amp_library::matching::Review>),
+    ApplyMatch(u64, u64, String),
+    MatchApplied(
+        u64,
+        u64,
+        Box<amp_library::matching::Review>,
+        String,
+        Result<Album>,
+    ),
     Preferences(Preferences),
     LocalCommit(SelectionCommit),
     Persist(Box<dyn FnOnce() -> Result<()> + Send>),
@@ -412,6 +445,7 @@ struct Worker {
     next_source_request: u64,
     notice_revision: u64,
     metadata_dirty: bool,
+    matching_cancel: Option<Arc<AtomicBool>>,
 }
 
 fn scan_baseline(state: &Snapshot, store: &Store, id: &str) -> Result<Option<Arc<Library>>> {
@@ -494,6 +528,14 @@ impl Worker {
         if !same_external {
             self.playback.set_default_album(None);
         }
+        let artwork = if source == Source::Local {
+            let mut saved =
+                amp_library::matching::saved_artwork(&self.store, &library).unwrap_or_default();
+            saved.extend(artwork);
+            saved
+        } else {
+            artwork
+        };
         self.state.library = Arc::new(library);
         self.state.artwork = Arc::new(artwork);
         self.playback
@@ -506,6 +548,13 @@ impl Worker {
         }
         self.state.scanning = false;
         self.state.enriching = false;
+        if let Some(stop) = self.matching_cancel.take() {
+            stop.store(true, Ordering::Release);
+        }
+        self.state.matching_busy = false;
+        self.state.matching_review = None;
+        self.state.matching_error = None;
+        self.state.matching_version += 1;
     }
     fn run(mut self, rx: mpsc::Receiver<Command>) {
         'requests: while let Ok(command) = rx.recv() {
@@ -524,10 +573,28 @@ impl Worker {
             }
             self.publish();
         }
+        if let Some(stop) = self.matching_cancel.take() {
+            stop.store(true, Ordering::Release);
+        }
         let _ = self.flush_metadata();
     }
     fn apply(&mut self, command: Command) {
+        let matching = matches!(
+            &command,
+            Command::FindMatches(..)
+                | Command::Matched(..)
+                | Command::ApplyMatch(..)
+                | Command::MatchApplied(..)
+        );
         if let Err(error) = self.command(command) {
+            if matching {
+                self.state.matching_error = Some(error.to_string());
+                self.state.matching_busy = false;
+                self.state.matching_version += 1;
+                if let Some(stop) = self.matching_cancel.take() {
+                    stop.store(true, Ordering::Release);
+                }
+            }
             self.notice(error.to_string());
         }
     }
@@ -893,6 +960,12 @@ impl Worker {
             Command::Invalidate(v) if self.current(v) => {
                 let flushed = self.flush_metadata();
                 self.state.generation = v;
+                if let Some(stop) = self.matching_cancel.take() {
+                    stop.store(true, Ordering::Release);
+                }
+                self.state.matching_busy = false;
+                self.state.matching_review = None;
+                self.state.matching_version += 1;
                 self.state.scanning = false;
                 self.source_job = None;
                 self.state.requested_source = None;
@@ -1023,6 +1096,173 @@ impl Worker {
                 }
                 self.notice(
                     "2,000 generated albums. This fixture contains no playable audio.".into(),
+                );
+            }
+            Command::FindMatches(v, id)
+                if self.current(v) && self.state.source == Source::Local =>
+            {
+                if self.state.matching_busy {
+                    return Ok(());
+                }
+                self.state.matching_error = None;
+                self.state.matching_review = None;
+                self.state.matching_version += 1;
+                let album = self
+                    .state
+                    .library
+                    .albums
+                    .iter()
+                    .find(|a| a.id == id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("Album is no longer available"))?;
+                let key = self.state.preferences.acoustid_api_key.clone();
+                if key.is_empty() {
+                    anyhow::bail!(
+                        "Set an AcoustID application key in Settings before matching local albums"
+                    );
+                }
+                let serial = self.state.matching_version;
+                self.state.matching_busy = true;
+                self.state.matching_review = None;
+                let stop = Arc::new(AtomicBool::new(false));
+                self.matching_cancel = Some(stop.clone());
+                let generation = self.generation.clone();
+                let tx = self.generation.tx.clone();
+                let cache = self.cache.clone();
+                thread::Builder::new()
+                    .name("amp-album-matching".into())
+                    .spawn(move || {
+                        let cancelled: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
+                            stop.load(Ordering::Acquire) || generation.current() != v
+                        });
+                        let result = Store::open(&cache).and_then(|store| {
+                            amp_library::matching::discover(
+                                &album,
+                                &key,
+                                &store,
+                                &cache.with_extension("matching-covers"),
+                                cancelled,
+                            )
+                        });
+                        let _ = tx.send(Command::Matched(v, serial, result));
+                    })
+                    .inspect_err(|_| {
+                        self.state.matching_busy = false;
+                        self.matching_cancel = None;
+                    })?;
+            }
+            Command::CancelMatching => {
+                self.state.matching_error = None;
+                if let Some(stop) = self.matching_cancel.take() {
+                    stop.store(true, Ordering::Release);
+                }
+                self.state.matching_version += 1;
+                self.state.matching_busy = false;
+                self.notice("Album matching cancelled".into());
+            }
+            Command::Matched(v, serial, result)
+                if self.current(v)
+                    && serial == self.state.matching_version
+                    && self.state.source == Source::Local =>
+            {
+                self.state.matching_busy = false;
+                self.matching_cancel = None;
+                self.state.matching_review = Some(Arc::new(result?));
+            }
+            Command::ApplyMatch(v, serial, release)
+                if self.current(v)
+                    && serial == self.state.matching_version
+                    && self.state.source == Source::Local =>
+            {
+                if self.state.matching_busy {
+                    return Ok(());
+                }
+                self.state.matching_error = None;
+                let review = self
+                    .state
+                    .matching_review
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Search for matching albums first"))?
+                    .as_ref()
+                    .clone();
+                let current = self
+                    .state
+                    .library
+                    .albums
+                    .iter()
+                    .find(|a| a.id == review.album.id)
+                    .ok_or_else(|| anyhow::anyhow!("Album changed"))?;
+                if serde_json::to_value(current)? != serde_json::to_value(&review.album)? {
+                    anyhow::bail!("Album metadata changed; search again before applying a match");
+                }
+                let stop = Arc::new(AtomicBool::new(false));
+                self.matching_cancel = Some(stop.clone());
+                self.state.matching_busy = true;
+                let generation = self.generation.clone();
+                let tx = self.generation.tx.clone();
+                thread::Builder::new()
+                    .name("amp-apply-album-match".into())
+                    .spawn(move || {
+                        let result = amp_library::matching::apply(&review, &release, &|| {
+                            stop.load(Ordering::Acquire) || generation.current() != v
+                        });
+                        let _ = tx.send(Command::MatchApplied(
+                            v,
+                            serial,
+                            Box::new(review),
+                            release,
+                            result,
+                        ));
+                    })
+                    .inspect_err(|_| {
+                        self.state.matching_busy = false;
+                        self.matching_cancel = None;
+                    })?;
+            }
+            Command::MatchApplied(v, serial, review, release, result)
+                if self.current(v)
+                    && serial == self.state.matching_version
+                    && self.state.source == Source::Local =>
+            {
+                self.state.matching_busy = false;
+                self.matching_cancel = None;
+                let album = result?;
+                let current = self
+                    .state
+                    .library
+                    .albums
+                    .iter()
+                    .find(|a| a.id == review.album.id)
+                    .ok_or_else(|| anyhow::anyhow!("Album changed"))?;
+                if serde_json::to_value(current)? != serde_json::to_value(&review.album)? {
+                    anyhow::bail!("Album changed while applying metadata; search again");
+                }
+                let acceptance = self.generation.acceptance.clone();
+                let _accepted = acceptance.lock().unwrap();
+                if !self.current(v) {
+                    return Ok(());
+                }
+                amp_library::matching::remember(&self.store, &review, &release)?;
+                let library = Arc::make_mut(&mut self.state.library);
+                let index = library
+                    .albums
+                    .iter()
+                    .position(|a| a.id == album.id)
+                    .unwrap();
+                library.albums[index] = album.clone();
+                if !self.state.artwork.contains_key(&album.id.item)
+                    && let Some(path) = review.covers.get(&release)
+                {
+                    Arc::make_mut(&mut self.state.artwork)
+                        .insert(album.id.item.clone(), path.clone());
+                }
+                self.state.library_revision += 1;
+                self.metadata_dirty = true;
+                self.playback.update_metadata(album);
+                self.flush_metadata()?;
+                self.state.matching_review = None;
+                self.notice(
+                    "Album match applied. Original files and existing names are preserved.".into(),
                 );
             }
             Command::Enrich(v) if self.current(v) && self.state.source == Source::Local => {

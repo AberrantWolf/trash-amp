@@ -23,7 +23,8 @@ const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (https://github.com/AberrantWolf)"
 );
-static NEXT_REQUEST: LazyLock<Mutex<Instant>> = LazyLock::new(|| Mutex::new(Instant::now()));
+pub(crate) static NEXT_REQUEST: LazyLock<Mutex<Instant>> =
+    LazyLock::new(|| Mutex::new(Instant::now()));
 const WEEK: i64 = 7 * 86400;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -289,29 +290,37 @@ impl Transport for MusicBrainz {
             .with_config()
             .limit(2 * 1024 * 1024)
             .read_to_string()?;
-        let value: Value = serde_json::from_str(&text)?;
-        if !value.is_object()
-            || (value.get("releases").and_then(Value::as_array).is_none()
-                && value.get("media").and_then(Value::as_array).is_none())
-        {
-            bail!("Unexpected MusicBrainz response");
-        }
+        // The community schema is decoded in the shared crate; this projection keeps
+        // the existing conservative naming policy and retained cache format local.
+        let page = junk_libs_music::provider::parse_releases(
+            text.as_bytes(),
+            matches!(query, Query::Release(_)),
+        )?;
+        let values = page.releases.into_iter().map(|r| json!({
+            "id":r.id, "title":r.title, "artist-credit":[{"name":r.artist}],
+            "media":r.media.into_iter().map(|m|json!({
+                "position":m.position, "track-count":m.track_count,
+                "discs":m.disc_ids.into_iter().map(|id|json!({"id":id})).collect::<Vec<_>>(),
+                "tracks":m.tracks.into_iter().map(|t|json!({"position":t.position,"title":t.title,"length":t.duration_ms,"artist-credit":[{"name":t.artist}]})).collect::<Vec<_>>()
+            })).collect::<Vec<_>>()
+        })).collect::<Vec<_>>();
+        let value = json!({"releases":values});
         Ok(value)
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct TrackNames {
-    disc: u32,
-    number: u32,
-    title: String,
-    artist: String,
+pub(crate) struct TrackNames {
+    pub(crate) disc: u32,
+    pub(crate) number: u32,
+    pub(crate) title: String,
+    pub(crate) artist: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct Names {
-    title: String,
-    artist: String,
-    tracks: Vec<TrackNames>,
+pub(crate) struct Names {
+    pub(crate) title: String,
+    pub(crate) artist: String,
+    pub(crate) tracks: Vec<TrackNames>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MatchRecord {
@@ -512,7 +521,7 @@ fn missing_track_artist(album: &Album, t: &Track) -> bool {
         &t.artist,
     )
 }
-fn apply(album: &mut Album, names: &Names) -> bool {
+pub(crate) fn apply(album: &mut Album, names: &Names) -> bool {
     let before = serde_json::to_string(album).unwrap();
     if missing(&album.metadata.names.title, &album.title) {
         album.title = names.title.clone();
@@ -630,6 +639,7 @@ fn enrich_with(
     cancelled: &dyn Fn() -> bool,
     update: &mut dyn FnMut(&Album),
 ) -> Result<()> {
+    crate::matching::restore(library, store, cancelled, update)?;
     // Prioritize discs: a network library may have thousands of untagged files
     // whose probes would otherwise delay every raw-disc lookup.
     for discs in [true, false] {

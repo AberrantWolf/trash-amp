@@ -124,3 +124,19 @@ SQLite snapshots, artwork, receipts and explicit download mechanisms. `amp-audio
 accepts an injected seekable media resolver and cancellation handle, retaining
 the shared junk-libs decoder and CPAL pipeline. Desktop browsing generations
 are independent of playback and download lifetimes.
+
+## Explicit digital album matching — 2026-10-29
+
+`junk-libs-music` owns FLAC/MP3 fingerprints, MusicBrainz community entity decoding,
+AcoustID interpretation and bounded one-to-one release comparison. It executes no
+network requests or metadata writes. `amp-library::matching` supplies cancellable
+read-only file readers, digest-bound fingerprint/provider cache and artwork HTTP
+adapters. `amp-app` owns generation-fenced discovery/review/application commands;
+`amp-ui` renders snapshots and sends commands. Scanning and polling never initiate
+fingerprint discovery. Source validation and acceptance run in background work.
+One accepted release and its supporting mapping are retained for offline refresh;
+repeated lookup history is not retained. Generated names can be filled, while
+source/manual names remain authoritative. Collector albums open the originating
+server's metadata workspace instead of duplicating its provider workflow.
+The existing local naming transport now decodes MusicBrainz entities through the
+shared community models; its conservative naming/cache policy remains local.

@@ -4,7 +4,7 @@
 accepted = [
     "MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
     "CDLA-Permissive-2.0", "Unicode-3.0", "Unicode-DFS-2016", "CC0-1.0", "BSL-1.0", "MPL-2.0",
-    "LicenseRef-Slint-Royalty-free-2.0",
+    "LicenseRef-Slint-Royalty-free-2.0", "LGPL-2.1-or-later",
 ]
 targets = ["aarch64-apple-darwin"]
 ignore-dev-dependencies = true

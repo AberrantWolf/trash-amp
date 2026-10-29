@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 [dependencies]
+junk-libs-music = { workspace = true, features = ["fingerprint", "musicbrainz"] }
+sha2 = "0.10"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+url = "2"
 amp-core.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true

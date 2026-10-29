@@ -484,8 +484,38 @@ async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
     let two = second.enroll(&secrets).await;
     let cache = tempfile::tempdir().unwrap();
     let adapter = Adapter::with_credentials(cache.path(), secrets.clone()).unwrap();
+    for key in [one, two] {
+        let credential = secrets.load(key).unwrap().unwrap();
+        adapter
+            .save_connection(&credential, credential.pairing.endpoints[0].url.to_string())
+            .unwrap();
+    }
     let a = adapter.refresh(one, &|| false).await.unwrap();
     let b = adapter.refresh(two, &|| false).await.unwrap();
+    adapter.select(Some(two)).unwrap();
+    let matching = adapter.album_matching_url(&a.library.albums[0].id).unwrap();
+    assert_eq!(
+        matching.origin(),
+        first.pairing.endpoints[0].url.origin(),
+        "review must target the album's server, not the selected connection"
+    );
+    assert_eq!(matching.path(), "/library-care/metadata");
+    let query: std::collections::BTreeMap<_, _> = matching
+        .query_pairs()
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    assert_eq!(
+        query,
+        std::collections::BTreeMap::from([
+            ("item".into(), item.to_string()),
+            (
+                "collection".into(),
+                a.album_collections[&item.to_string()].to_string()
+            )
+        ]),
+        "browser URL carries context but no native credentials"
+    );
+
     let probe = adapter.clone();
     assert_eq!(
         tokio::task::spawn_blocking(move || probe.connection_state(one))

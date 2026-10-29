@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+serde_json.workspace = true
 amp-core.workspace = true
 amp-library.workspace = true
 amp-audio.workspace = true
