@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/amp-core", "crates/amp-library", "crates/amp-audio", "crates/amp-desktop", "crates/amp-collector", "crates/amp-ui", "crates/amp-ios", "crates/amp-app", "crates/amp-media"]
+members = ["crates/amp-apple-library", "crates/amp-core", "crates/amp-library", "crates/amp-audio", "crates/amp-desktop", "crates/amp-collector", "crates/amp-ui", "crates/amp-ios", "crates/amp-app", "crates/amp-media"]
 default-members = ["crates/amp-desktop"]
 exclude = ["vendor/winit"]
 
@@ -14,6 +14,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
+amp-apple-library = { path = "crates/amp-apple-library" }
 amp-app = { path = "crates/amp-app" }
 amp-media = { path = "crates/amp-media" }
 amp-ui = { path = "crates/amp-ui" }

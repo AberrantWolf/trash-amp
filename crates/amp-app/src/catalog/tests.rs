@@ -22,6 +22,7 @@ fn library(id: &str, title: &str) -> Library {
             artist: "Artist".into(),
             source_label: "Local".into(),
             tracks: vec![Track {
+                blocked_reason: None,
                 id: ItemId {
                     item: "track".into(),
                     ..identity
@@ -243,6 +244,7 @@ fn external_completion_commits_without_ui_and_never_becomes_a_folder_library() {
     let accepted = handle.complete_external(
         v,
         ExternalCatalog {
+            online: None,
             source: "remote-source".into(),
             library: remote,
             artwork: BTreeMap::new(),
@@ -271,6 +273,7 @@ fn external_completion_commits_without_ui_and_never_becomes_a_folder_library() {
     let stale = handle.complete_external(
         v,
         ExternalCatalog {
+            online: None,
             source: "stale".into(),
             library: library("late", "Late"),
             artwork: BTreeMap::new(),
@@ -297,6 +300,7 @@ fn rejected_provider_persistence_does_not_install_its_catalog() {
     let result = handle.complete_external(
         v,
         ExternalCatalog {
+            online: None,
             source: "remote".into(),
             library: library("remote", "Remote"),
             artwork: BTreeMap::new(),
@@ -344,6 +348,7 @@ fn failed_scan_from_external_source_restores_the_local_cache_before_scanning() {
         .complete_external(
             v,
             ExternalCatalog {
+                online: None,
                 source: "remote".into(),
                 library: library("remote", "Remote"),
                 artwork: BTreeMap::new(),
@@ -471,6 +476,7 @@ fn accepted_external_catalog_updates_queued_names_without_ui_or_media_replacemen
         .complete_external(
             v,
             ExternalCatalog {
+                online: None,
                 source: "remote".into(),
                 library: original,
                 artwork: BTreeMap::new(),
@@ -513,6 +519,7 @@ fn background_source_replacement_clears_an_idle_play_selection_from_the_previous
         .complete_external(
             v,
             ExternalCatalog {
+                online: None,
                 source: "new".into(),
                 library: library("new", "New"),
                 artwork: BTreeMap::new(),
@@ -543,6 +550,7 @@ fn cancellation_during_external_persistence_rolls_back_selection_and_rejects_cat
     let receipt = handle.complete_external(
         v,
         ExternalCatalog {
+            online: None,
             source: "canceled".into(),
             library: library("canceled", "Canceled"),
             artwork: BTreeMap::new(),
@@ -607,4 +615,287 @@ fn cancellation_during_local_selection_restores_provider_and_folder_selection() 
     assert_eq!(read(&handle).library.id, "b");
     assert_eq!(harness.store().library().unwrap().unwrap().id, "b");
     assert_eq!(selected.load(Ordering::SeqCst), 1);
+}
+
+struct TestProvider {
+    calls: AtomicUsize,
+    allowed: AtomicBool,
+    fail: AtomicBool,
+    gate: Mutex<Option<mpsc::Receiver<()>>>,
+    changed: Mutex<Option<crate::sources::SourceObserver>>,
+}
+impl TestProvider {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            calls: AtomicUsize::new(0),
+            allowed: AtomicBool::new(true),
+            fail: AtomicBool::new(false),
+            gate: Mutex::default(),
+            changed: Mutex::default(),
+        })
+    }
+}
+impl SourceProvider for TestProvider {
+    fn descriptors(&self) -> Result<Vec<SourceDescriptor>> {
+        Ok(vec![SourceDescriptor {
+            id: "native:test".into(),
+            name: "Native music".into(),
+            provider: "native".into(),
+        }])
+    }
+    fn cache_allowed(&self) -> bool {
+        self.allowed.load(Ordering::Acquire)
+    }
+    fn load(&self, _: &str, _: bool, _: &dyn Fn() -> bool) -> Result<ExternalCatalog> {
+        self.calls.fetch_add(1, Ordering::AcqRel);
+        if let Some(gate) = self.gate.lock().unwrap().take() {
+            gate.recv_timeout(Duration::from_secs(3))?;
+        }
+        if !self.cache_allowed() {
+            anyhow::bail!("Access denied");
+        }
+        if self.fail.load(Ordering::Acquire) {
+            anyhow::bail!("Refresh unavailable");
+        }
+        Ok(ExternalCatalog {
+            online: None,
+            source: "native:test".into(),
+            library: library("native", "Native music"),
+            artwork: BTreeMap::new(),
+        })
+    }
+    fn observe(&self, changed: crate::sources::SourceObserver) {
+        *self.changed.lock().unwrap() = Some(changed);
+    }
+}
+#[test]
+fn registered_sources_load_persist_and_fail_refresh_without_ui() {
+    let h = Harness::simple(&[]);
+    let catalog = h.handle();
+    let provider = TestProvider::new();
+    catalog.register_sources(vec![provider.clone()], false);
+    assert_eq!(read(&catalog).sources.len(), 1);
+    catalog.select_source("native:test".into());
+    wait(|| catalog.snapshot().library.id == "native" && !catalog.snapshot().scanning);
+    assert_eq!(
+        h.store().active_source().unwrap().as_deref(),
+        Some("native:test")
+    );
+    assert!(h.store().saved_folders().unwrap().is_empty());
+    provider.fail.store(true, Ordering::Release);
+    catalog.refresh_source();
+    wait(|| {
+        catalog
+            .snapshot()
+            .notice
+            .is_some_and(|n| n.message.contains("Refresh unavailable"))
+    });
+    assert_eq!(catalog.snapshot().library.id, "native");
+    assert_eq!(
+        h.store().active_source().unwrap().as_deref(),
+        Some("native:test")
+    );
+}
+#[test]
+fn provider_completion_cannot_reselect_after_folder_switch() {
+    let h = Harness::simple(&[library("folder", "Folder")]);
+    let catalog = h.handle();
+    let provider = TestProvider::new();
+    let (release, gate) = mpsc::channel();
+    *provider.gate.lock().unwrap() = Some(gate);
+    catalog.register_sources(vec![provider.clone()], true);
+    read(&catalog);
+    catalog.select_source("native:test".into());
+    wait(|| provider.calls.load(Ordering::Acquire) == 1);
+    catalog.open_saved_folder("folder".into());
+    read(&catalog);
+    release.send(()).unwrap();
+    // Barrier after the asynchronous completion is sent, not a presentation tick.
+    wait(|| provider.gate.try_lock().is_ok());
+    assert_eq!(read(&catalog).source, Source::Local);
+    assert_eq!(
+        h.store().active_source().unwrap().as_deref(),
+        Some("folders")
+    );
+    assert_eq!(read(&catalog).library.id, "folder");
+}
+#[test]
+fn provider_notification_revokes_cached_catalog_without_ui() {
+    let h = Harness::simple(&[]);
+    let catalog = h.handle();
+    let provider = TestProvider::new();
+    catalog.register_sources(vec![provider.clone()], false);
+    read(&catalog);
+    catalog.select_source("native:test".into());
+    wait(|| catalog.snapshot().library.id == "native" && !catalog.snapshot().scanning);
+    provider.allowed.store(false, Ordering::Release);
+    provider.changed.lock().unwrap().as_ref().unwrap()(SourceChange {
+        id: "native:test".into(),
+        refresh: RefreshKind::Live,
+    });
+    wait(|| {
+        catalog
+            .snapshot()
+            .notice
+            .is_some_and(|n| n.message.contains("Access denied"))
+    });
+    assert!(catalog.snapshot().library.albums.is_empty());
+    assert!(
+        h.store()
+            .provider_snapshot("native:test")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn registered_source_restores_its_cache_when_live_refresh_fails() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("library.sqlite3");
+    let store = Store::open(&cache).unwrap();
+    store.save_active_source("native:test").unwrap();
+    store
+        .save_provider_snapshot(
+            "native:test",
+            &library("native", "Cached native music"),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+    drop(store);
+    let playback = PlaybackService::new(Arc::new(|| Ok(()))).unwrap();
+    let service = CatalogService::open(&cache, playback.playback()).unwrap();
+    let provider = TestProvider::new();
+    provider.fail.store(true, Ordering::Release);
+    let catalog = service.catalog();
+    catalog.register_sources(vec![provider], false);
+    wait(|| {
+        catalog
+            .snapshot()
+            .notice
+            .is_some_and(|n| n.message.contains("Refresh unavailable"))
+    });
+    let snapshot = catalog.snapshot();
+    assert_eq!(snapshot.source, Source::External("native:test".into()));
+    assert_eq!(snapshot.library.albums[0].title, "Cached native music");
+    assert!(snapshot.folders.is_empty());
+}
+
+#[test]
+fn changes_during_loading_are_coalesced_and_reloaded_without_changing_selection_generation() {
+    let h = Harness::simple(&[]);
+    let catalog = h.handle();
+    let provider = TestProvider::new();
+    let (release, gate) = mpsc::channel();
+    *provider.gate.lock().unwrap() = Some(gate);
+    catalog.register_sources(vec![provider.clone()], false);
+    read(&catalog);
+    catalog.select_source("native:test".into());
+    let version = catalog.generation().current();
+    wait(|| provider.calls.load(Ordering::Acquire) == 1);
+    for _ in 0..8 {
+        provider.changed.lock().unwrap().as_ref().unwrap()(SourceChange {
+            id: "native:test".into(),
+            refresh: RefreshKind::Live,
+        });
+    }
+    read(&catalog);
+    release.send(()).unwrap();
+    wait(|| provider.calls.load(Ordering::Acquire) == 2 && !catalog.snapshot().scanning);
+    assert_eq!(
+        catalog.generation().current(),
+        version,
+        "An automatic reload must not cancel a pending mutation"
+    );
+    assert_eq!(read(&catalog).source_load_revision, 2);
+    assert_eq!(provider.calls.load(Ordering::Acquire), 2);
+}
+
+#[test]
+fn old_request_artwork_is_rejected_even_within_the_same_selection_generation() {
+    let h = Harness::simple(&[]);
+    let catalog = h.handle();
+    let provider = TestProvider::new();
+    catalog.register_sources(vec![provider.clone()], false);
+    read(&catalog);
+    catalog.select_source("native:test".into());
+    wait(|| provider.calls.load(Ordering::Acquire) == 1 && !catalog.snapshot().scanning);
+    let version = catalog.generation().current();
+    catalog.open_source_at(version, "native:test".into(), false);
+    wait(|| provider.calls.load(Ordering::Acquire) == 2 && !catalog.snapshot().scanning);
+    catalog.send(Command::SourceArtwork(
+        SourceRequest {
+            generation: version,
+            serial: 2,
+            id: "native:test".into(),
+        },
+        BTreeMap::from([("album".into(), "current.png".into())]),
+    ));
+    read(&catalog);
+    catalog.send(Command::SourceArtwork(
+        SourceRequest {
+            generation: version,
+            serial: 1,
+            id: "native:test".into(),
+        },
+        BTreeMap::from([("album".into(), "obsolete.png".into())]),
+    ));
+    assert_eq!(read(&catalog).artwork.get("album").unwrap(), "current.png");
+}
+
+#[test]
+fn availability_projection_does_not_fetch_live_data_or_cancel_mutation_generation() {
+    struct Projection {
+        live_calls: AtomicUsize,
+    }
+    impl SourceProvider for Projection {
+        fn descriptors(&self) -> Result<Vec<SourceDescriptor>> {
+            Ok(vec![SourceDescriptor {
+                id: "test:network".into(),
+                name: "Network".into(),
+                provider: "test".into(),
+            }])
+        }
+        fn load(&self, _: &str, _: bool, _: &dyn Fn() -> bool) -> Result<ExternalCatalog> {
+            self.live_calls.fetch_add(1, Ordering::AcqRel);
+            Ok(ExternalCatalog {
+                source: "test:network".into(),
+                online: Some(true),
+                library: library("network", "Network"),
+                artwork: BTreeMap::new(),
+            })
+        }
+        fn project_cached(
+            &self,
+            id: &str,
+            online: Option<bool>,
+        ) -> Result<Option<ExternalCatalog>> {
+            Ok(Some(ExternalCatalog {
+                source: id.into(),
+                online,
+                library: library("network", "Download settled"),
+                artwork: BTreeMap::new(),
+            }))
+        }
+    }
+    let h = Harness::simple(&[]);
+    let catalog = h.handle();
+    let provider = Arc::new(Projection {
+        live_calls: AtomicUsize::new(0),
+    });
+    catalog.register_sources(vec![provider.clone()], false);
+    read(&catalog);
+    catalog.select_source("test:network".into());
+    wait(|| catalog.snapshot().source_online == Some(true) && !catalog.snapshot().scanning);
+    let version = catalog.generation().current();
+    catalog.source_changed(SourceChange {
+        id: "test:network".into(),
+        refresh: RefreshKind::Cached,
+    });
+    wait(|| {
+        catalog.snapshot().library.albums[0].title == "Download settled"
+            && !catalog.snapshot().scanning
+    });
+    assert_eq!(provider.live_calls.load(Ordering::Acquire), 1);
+    assert_eq!(catalog.generation().current(), version);
+    assert_eq!(catalog.snapshot().source_online, Some(true));
 }

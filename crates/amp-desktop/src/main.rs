@@ -43,14 +43,28 @@ fn main() -> anyhow::Result<()> {
                 .data_local_dir()
                 .to_owned()
         });
-    let service = amp_app::PlaybackService::new(Arc::new(|| Ok(())))?;
+    let collector = amp_collector::Adapter::open(&data_dir.join("collector"))?;
+    let mut resolvers = amp_audio::ResolverRegistry::default();
+    resolvers.register("collector", collector.clone())?;
+    let providers: Vec<Arc<dyn amp_app::sources::SourceProvider>> = vec![collector.clone()];
+    #[cfg(target_os = "macos")]
+    let providers = {
+        let mut providers = providers;
+        let apple = amp_apple_library::Adapter::open(data_dir.join("apple-library"))?;
+        resolvers.register(amp_apple_library::PROVIDER, apple.clone())?;
+        providers.push(apple);
+        providers
+    };
+    let service =
+        amp_app::PlaybackService::with_resolver(Arc::new(|| Ok(())), Arc::new(resolvers))?;
     let catalog = amp_app::catalog::CatalogService::open(
         &data_dir.join("library.sqlite3"),
         service.playback(),
     )?;
-    let collector = amp_collector::Adapter::open(&data_dir.join("collector"))?;
+    catalog.catalog().register_sources(providers, true);
     amp_ui::run(amp_ui::AppConfig {
         collector,
+        music_access_settings_url: "x-apple.systempreferences:com.apple.preference.security?Privacy_Media",
         open_url: |url, completed| {
             let url = url.to_owned();
             std::thread::spawn(move || {

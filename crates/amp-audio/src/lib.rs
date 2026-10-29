@@ -1,11 +1,8 @@
 //! Streaming PCM pipeline. Only bounded ring-buffer reads and atomics run in the device callback.
 use amp_core::{MediaAccess, Track};
 use anyhow::{Context, Result, bail};
-use junk_libs_audio::{
-    AudioDecoder, CuePcmDecoder, FramePosition, PcmChunk, PcmFormat, RedumperPcmDecoder,
-    SincResampler, WavDecoder,
-};
-pub use junk_libs_audio::{ByteSource, MediaHint};
+use junk_libs_audio::{AudioDecoder, CuePcmDecoder, RedumperPcmDecoder, SincResampler, WavDecoder};
+pub use junk_libs_audio::{ByteSource, FramePosition, MediaHint, PcmChunk, PcmFormat};
 use junk_libs_disc::{
     cue_audio::CueAudioDisc,
     redumper::{
@@ -25,9 +22,12 @@ use std::{
     thread,
 };
 
+mod input;
 #[cfg(target_os = "ios")]
 mod ios_session;
 mod output;
+pub use input::{MediaInput, PcmReader, ResolverRegistry};
+
 #[cfg(test)]
 mod recovery_tests;
 mod worker;
@@ -49,6 +49,8 @@ struct Shared {
     level: AtomicU32,
     underruns: AtomicU64,
     shutdown: AtomicBool,
+    input_revision: AtomicU64,
+    input_changes: AtomicUsize,
     sample_rate: AtomicU32,
     buffer_seconds: u32,
     sequence: AtomicU64,
@@ -135,6 +137,9 @@ enum Command {
 /// Adapter invoked only on the decoder worker, never in the device callback.
 pub trait MediaResolver: Send + Sync {
     fn resolve(&self, track: &Track) -> Result<ByteSource>;
+    fn open(&self, track: &Track) -> Result<MediaInput> {
+        self.resolve(track).map(MediaInput::Encoded)
+    }
     fn cancel(&self);
 }
 pub struct Player {
@@ -143,6 +148,13 @@ pub struct Player {
     next_sequence: AtomicU64,
     shared: Arc<Shared>,
     events: mpsc::Receiver<PlayerEvent>,
+}
+/// Keep new native/remote reads out of the cancel-to-command publication gap.
+struct InputChange<'a>(&'a Shared);
+impl Drop for InputChange<'_> {
+    fn drop(&mut self) {
+        self.0.input_changes.fetch_sub(1, Ordering::Release);
+    }
 }
 impl Player {
     /// Starts the audio worker. Output availability and recovery are reported asynchronously.
@@ -194,10 +206,16 @@ impl Player {
             worker,
         ))
     }
-    pub fn play(&self, tracks: Vec<Track>, start: usize) -> u64 {
+    fn changing_input(&self) -> InputChange<'_> {
+        self.shared.input_changes.fetch_add(1, Ordering::AcqRel);
+        self.shared.input_revision.fetch_add(1, Ordering::AcqRel);
         if let Some(resolver) = &self.resolver {
             resolver.cancel();
         }
+        InputChange(&self.shared)
+    }
+    pub fn play(&self, tracks: Vec<Track>, start: usize) -> u64 {
+        let _input_change = self.changing_input();
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let _ = self
             .commands
@@ -211,21 +229,15 @@ impl Player {
         let _ = self.commands.send(Command::SetPlaying(playing));
     }
     pub fn seek(&self, seconds: f64) {
-        if let Some(resolver) = &self.resolver {
-            resolver.cancel();
-        }
+        let _input_change = self.changing_input();
         let _ = self.commands.send(Command::Seek(seconds));
     }
     pub fn next(&self) {
-        if let Some(resolver) = &self.resolver {
-            resolver.cancel();
-        }
+        let _input_change = self.changing_input();
         let _ = self.commands.send(Command::Next);
     }
     pub fn previous(&self) {
-        if let Some(resolver) = &self.resolver {
-            resolver.cancel();
-        }
+        let _input_change = self.changing_input();
         // Standard transport behavior: restart after the first few seconds.
         if self.snapshot().seconds > 3.0 {
             self.seek(0.0);
@@ -244,9 +256,7 @@ impl Player {
         let _ = self.commands.send(Command::Truncate(len));
     }
     pub fn edit_queue(&self, edit: QueueEdit) -> Result<QueueUpdate> {
-        if let Some(resolver) = &self.resolver {
-            resolver.cancel();
-        }
+        let _input_change = self.changing_input();
         let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = mpsc::channel();
         self.commands
@@ -294,22 +304,16 @@ impl Player {
 }
 impl Drop for Player {
     fn drop(&mut self) {
+        self.shared.shutdown.store(true, Ordering::Release);
         if let Some(resolver) = &self.resolver {
             resolver.cancel();
         }
-        self.shared.shutdown.store(true, Ordering::Relaxed);
         let _ = self.commands.send(Command::Shutdown);
     }
 }
 
-enum Source {
-    Wav(WavDecoder),
-    Compressed(AudioDecoder),
-    Disc(CuePcmDecoder),
-    Raw(RedumperPcmDecoder),
-}
 struct AudioReader {
-    source: Source,
+    source: Box<dyn PcmReader>,
     buffered: VecDeque<[f32; 2]>,
     rate: u32,
 }
@@ -322,10 +326,13 @@ impl AudioReader {
     ) -> Result<Self> {
         match &track.access {
             MediaAccess::Managed { provider, .. } => {
-                let source = resolver
+                let input = resolver
                     .context(format!("{provider}: playback adapter unavailable"))?
-                    .resolve(track)?;
-                let mut decoder = AudioDecoder::open(source)?;
+                    .open(track)?;
+                let mut decoder: Box<dyn PcmReader> = match input {
+                    MediaInput::Encoded(source) => Box::new(AudioDecoder::open(source)?),
+                    MediaInput::Decoded(reader) => reader,
+                };
                 if decoder.format().channels() > 2 {
                     bail!("Multichannel playback requires an explicit channel mapper")
                 }
@@ -335,7 +342,7 @@ impl AudioReader {
                     decoder.seek_exact(FramePosition(frame))?;
                 }
                 Ok(Self {
-                    source: Source::Compressed(decoder),
+                    source: decoder,
                     buffered: VecDeque::new(),
                     rate,
                 })
@@ -347,7 +354,7 @@ impl AudioReader {
                 let source_frame = scale_frame(output_frame, output_rate, 44_100);
                 reader.seek_exact(FramePosition(source_frame.min(reader.total_frames())))?;
                 Ok(Self {
-                    source: Source::Disc(reader),
+                    source: Box::new(reader),
                     buffered: VecDeque::new(),
                     rate: 44100,
                 })
@@ -361,7 +368,7 @@ impl AudioReader {
                 let source_frame = scale_frame(output_frame, output_rate, 44_100);
                 reader.seek_exact(FramePosition(source_frame.min(reader.total_frames())))?;
                 Ok(Self {
-                    source: Source::Raw(reader),
+                    source: Box::new(reader),
                     buffered: VecDeque::new(),
                     rate: 44100,
                 })
@@ -390,7 +397,7 @@ impl AudioReader {
                     ))?;
                     return Ok(Self {
                         rate: decoder.format().sample_rate(),
-                        source: Source::Wav(decoder),
+                        source: Box::new(decoder),
                         buffered: VecDeque::new(),
                     });
                 }
@@ -410,7 +417,7 @@ impl AudioReader {
                     decoder.seek_exact(FramePosition(frame))?;
                 }
                 let result = Self {
-                    source: Source::Compressed(decoder),
+                    source: Box::new(decoder),
                     buffered: VecDeque::new(),
                     rate,
                 };
@@ -423,32 +430,10 @@ impl AudioReader {
             if let Some(frame) = self.buffered.pop_front() {
                 return Ok(Some(frame));
             }
-            match &mut self.source {
-                Source::Disc(reader) => {
-                    let Some(chunk) = reader.read_frames(588)? else {
-                        return Ok(None);
-                    };
-                    push_stereo(&mut self.buffered, chunk)?;
-                }
-                Source::Raw(reader) => {
-                    let Some(chunk) = reader.read_frames(588)? else {
-                        return Ok(None);
-                    };
-                    push_stereo(&mut self.buffered, chunk.pcm)?;
-                }
-                Source::Wav(reader) => {
-                    let Some(chunk) = reader.read_frames(1_024)? else {
-                        return Ok(None);
-                    };
-                    push_stereo(&mut self.buffered, chunk)?;
-                }
-                Source::Compressed(reader) => {
-                    let Some(chunk) = reader.read_frames(1_024)? else {
-                        return Ok(None);
-                    };
-                    push_stereo(&mut self.buffered, chunk)?;
-                }
-            }
+            let Some(chunk) = self.source.read_frames(1_024)? else {
+                return Ok(None);
+            };
+            push_stereo(&mut self.buffered, chunk)?;
         }
     }
 }
@@ -607,6 +592,7 @@ mod tests {
         }
         w.finalize().unwrap();
         let track = Track {
+            blocked_reason: None,
             availability: Default::default(),
             source: None,
             id: amp_core::ItemId {
@@ -739,5 +725,71 @@ mod tests {
                 .next()
                 .is_err()
         );
+    }
+    struct DecodedFixture {
+        position: u64,
+    }
+    impl PcmReader for DecodedFixture {
+        fn format(&self) -> PcmFormat {
+            PcmFormat::new(44100, 1).unwrap()
+        }
+        fn total_frames(&self) -> Option<u64> {
+            Some(100)
+        }
+        fn read_frames(&mut self, max: usize) -> Result<Option<PcmChunk>> {
+            if self.position >= 100 {
+                return Ok(None);
+            }
+            let count = max.min((100 - self.position) as usize);
+            let chunk = PcmChunk::new(
+                self.format(),
+                FramePosition(self.position),
+                (0..count)
+                    .map(|n| (self.position + n as u64) as f32 / 100.0)
+                    .collect(),
+            )?;
+            self.position += count as u64;
+            Ok(Some(chunk))
+        }
+        fn seek_exact(&mut self, frame: FramePosition) -> Result<()> {
+            self.position = frame.0;
+            Ok(())
+        }
+    }
+    struct DecodedResolver;
+    impl MediaResolver for DecodedResolver {
+        fn resolve(&self, _: &Track) -> Result<ByteSource> {
+            bail!("Decoded only")
+        }
+        fn open(&self, _: &Track) -> Result<MediaInput> {
+            Ok(MediaInput::Decoded(Box::new(DecodedFixture {
+                position: 0,
+            })))
+        }
+        fn cancel(&self) {}
+    }
+    #[test]
+    fn registered_decoded_input_uses_shared_seek_and_channel_conversion() {
+        let (_dir, mut track) = fixture(44100, 1);
+        track.access = MediaAccess::Managed {
+            provider: "native".into(),
+            item: "opaque".into(),
+        };
+        let mut registry = ResolverRegistry::default();
+        assert!(registry.open(&track).is_err());
+        registry
+            .register("native", Arc::new(DecodedResolver))
+            .unwrap();
+        assert!(
+            registry
+                .register("native", Arc::new(DecodedResolver))
+                .is_err()
+        );
+        let mut reader = AudioReader::open(&track, 17, 44100, Some(&registry)).unwrap();
+        assert_eq!(reader.next().unwrap(), Some([0.17, 0.17]));
+        for _ in 18..100 {
+            assert!(reader.next().unwrap().is_some());
+        }
+        assert!(reader.next().unwrap().is_none());
     }
 }

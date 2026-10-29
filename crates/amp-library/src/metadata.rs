@@ -719,6 +719,7 @@ mod tests {
             source_label: "BIN/CUE".into(),
             tracks: (1..=2)
                 .map(|number| Track {
+                    blocked_reason: None,
                     availability: Default::default(),
                     source: None,
                     id: ItemId {

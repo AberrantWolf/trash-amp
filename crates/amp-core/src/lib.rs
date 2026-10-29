@@ -38,6 +38,8 @@ pub struct SourceCoordinates {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<PlaybackBlockReason>,
     #[serde(default)]
     pub availability: Availability,
     #[serde(default)]
@@ -49,6 +51,39 @@ pub struct Track {
     pub disc: u32,
     pub duration_seconds: f64,
     pub access: MediaAccess,
+}
+
+/// A provider explains why an otherwise browsable item cannot be played.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PlaybackBlockReason {
+    Protected,
+    NotLocal,
+    AccessDenied,
+    Missing,
+    UnsupportedFormat,
+}
+impl PlaybackBlockReason {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Protected => "Protected music unsupported",
+            Self::NotLocal => "Not on this device",
+            Self::AccessDenied => "Music library access denied",
+            Self::Missing => "Music item no longer available",
+            Self::UnsupportedFormat => "Unsupported audio format",
+        }
+    }
+}
+impl Track {
+    pub fn playback_block(&self) -> Option<&'static str> {
+        self.blocked_reason
+            .map(PlaybackBlockReason::message)
+            .or(match self.availability {
+                Availability::Available | Availability::Downloaded => None,
+                Availability::Preparing => Some("Track is preparing"),
+                Availability::Unavailable => Some("Track unavailable"),
+                Availability::Unsupported => Some("Unsupported audio format"),
+            })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,5 +227,23 @@ mod preference_tests {
         let saved = serde_json::to_value(&prefs).unwrap();
         assert_eq!(saved["browse_artists"], true);
         assert!(saved.get("sort_by_artist").is_none());
+    }
+}
+
+#[cfg(test)]
+mod track_compatibility_tests {
+    use super::*;
+    #[test]
+    fn older_tracks_default_to_no_blocked_reason() {
+        let mut value = serde_json::json!({
+            "availability": "Available", "id": {"library":"old", "provider":"file", "item":"song"},
+            "title":"Song", "artist":"Artist", "number":1, "disc":1, "duration_seconds":1.0,
+            "access":{"File":{"locator":"/old/song.wav"}}
+        });
+        let track: Track = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(track.playback_block(), None);
+        value["blocked_reason"] = serde_json::json!("Protected");
+        let track: Track = serde_json::from_value(value).unwrap();
+        assert_eq!(track.playback_block(), Some("Protected music unsupported"));
     }
 }

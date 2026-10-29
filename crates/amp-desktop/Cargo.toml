@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+amp-audio.workspace = true
 amp-collector.workspace = true
 amp-ui.workspace = true
 amp-app.workspace = true
@@ -21,3 +22,6 @@ raw-window-handle = "0.6"
 
 [dev-dependencies]
 i-slint-backend-testing = "=1.18.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+amp-apple-library.workspace = true

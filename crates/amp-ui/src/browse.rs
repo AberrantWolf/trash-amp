@@ -110,12 +110,12 @@ fn row(entry: &Entry, compact: bool) -> BrowserRow {
             3 => entry.album.clone().into(),
             _ => entry.artist.clone().into(),
         },
+        status: entry.playback_block.unwrap_or_default().into(),
         duration: if kind == 3 {
             time(entry.seconds)
         } else {
             SharedString::default()
         },
-        ..Default::default()
     }
 }
 fn label(title: String, kind: i32) -> BrowserRow {
@@ -402,6 +402,10 @@ fn play_one(ui: &PlayerWindow, s: &mut State, target: &Target) {
     let Some(track) = resolve_track(s, target) else {
         return;
     };
+    if let Some(reason) = track.playback_block() {
+        ui.set_status(reason.into());
+        return;
+    }
     s.playback.play_track(track);
     ui.set_status("Playing track".into());
 }
@@ -438,6 +442,10 @@ fn context_tracks(s: &State, detail: bool, index: usize) -> Vec<Track> {
         .collect()
 }
 pub(super) fn enqueue_track(ui: &PlayerWindow, s: &mut State, track: Track) {
+    if let Some(reason) = track.playback_block() {
+        ui.set_status(reason.into());
+        return;
+    }
     s.playback.enqueue(track);
     ui.set_status("Added to up next".into());
 }
@@ -459,7 +467,7 @@ fn action(ui: &PlayerWindow, s: &mut State, detail: bool, i: i32, verb: i32) {
                 }
                 let tracks = context_tracks(s, detail, i as usize);
                 if !tracks.is_empty() {
-                    s.playback.play_list(tracks);
+                    s.playback.play_list_from(tracks);
                     ui.set_status("Playing from track".into());
                 }
             }

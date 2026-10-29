@@ -34,6 +34,40 @@ impl Store {
         }
         Ok(store)
     }
+    pub fn active_source(&self) -> Result<Option<String>> {
+        self.get("active_source")
+    }
+    pub fn save_active_source(&self, id: &str) -> Result<()> {
+        self.put("active_source", &id)
+    }
+    pub fn restore_active_source(&self, id: Option<&str>) -> Result<()> {
+        if let Some(id) = id {
+            self.save_active_source(id)
+        } else {
+            self.0
+                .execute("DELETE FROM state WHERE key='active_source'", [])?;
+            Ok(())
+        }
+    }
+    pub fn provider_snapshot(
+        &self,
+        id: &str,
+    ) -> Result<Option<(Library, BTreeMap<String, String>)>> {
+        self.get(&format!("provider:{id}"))
+    }
+    pub fn save_provider_snapshot(
+        &self,
+        id: &str,
+        library: &Library,
+        artwork: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        self.put(&format!("provider:{id}"), &(library, artwork))
+    }
+    pub fn remove_provider_snapshot(&self, id: &str) -> Result<()> {
+        self.0
+            .execute("DELETE FROM state WHERE key=?", [format!("provider:{id}")])?;
+        Ok(())
+    }
     pub fn preferences(&self) -> Result<Preferences> {
         Ok(self.get("preferences")?.unwrap_or_default())
     }
@@ -440,6 +474,7 @@ fn tagged_track(path: &Path, library: &str) -> Result<(String, Option<String>, b
         .context("Track path must be valid UTF-8")?
         .to_owned();
     let track = Track {
+        blocked_reason: None,
         availability: Default::default(),
         source: None,
         id: id(library, locator.clone()),
@@ -592,6 +627,7 @@ fn disc_album(
     let tracks = layouts
         .iter()
         .map(|l| Track {
+            blocked_reason: None,
             availability: Default::default(),
             source: None,
             id: id(library, format!("{cue_path}#{}", l.0)),
@@ -669,6 +705,7 @@ pub fn demo_library() -> Library {
                 source_label: "Generated layout fixture".into(),
                 tracks: (1..=10)
                     .map(|n| Track {
+                        blocked_reason: None,
                         availability: Default::default(),
                         source: None,
                         id: id("demo", format!("{i}/{n}")),

@@ -37,6 +37,10 @@ export component PlayerWindow inherits Window {
     in-out property <string> certificate-path;
     in property <string> connection-status;
     in property <bool> collector-active;
+    in property <bool> device-library-active;
+    in property <bool> device-library-available;
+    in property <string> source-status;
+    callback music-access-settings();
     in property <bool> collector-online;
     in property <bool> collector-busy;
     in property <bool> removing-connection;
@@ -123,9 +127,9 @@ export component PlayerWindow inherits Window {
     // Store the desktop choice independently of the temporary phone layout.
     in-out property <float> library-width: 280;
     // Snapshot the viewport to keep layout constraints independent of Window's layout hints.
-    private property <length> viewport-width: 980px;
-    changed width => { root.viewport-width = self.width; }
-    private property <length> desktop-library-width: min(max(220px * root.text-scale, root.library-width * root.text-scale * 1px), root.viewport-width * 0.45);
+    private property <length> content-width: 980px;
+    changed width => { root.content-width = self.width; }
+    private property <length> desktop-library-width: min(max(220px * root.text-scale, root.library-width * root.text-scale * 1px), root.content-width * 0.45);
     in property <bool> wide: true;
     in property <bool> touch-input;
     out property <bool> tap-to-play: root.touch-input || !root.wide;
@@ -141,6 +145,7 @@ export component PlayerWindow inherits Window {
     in-out property <int> folder-index: -1;
     callback folder-selected(int);
     callback refresh-folder();
+    callback play-album();
     callback play-track(int); callback enqueue(int); callback toggle-play();
     callback previous(); callback next(); callback seek(float);
     callback preferences-changed(); callback clear-queue();
@@ -201,6 +206,17 @@ export component PlayerWindow inherits Window {
                         ComboBox { model: root.sources; current-index <=> root.source-index; accessible-label: "Music source"; min-height: 44px;
                             selected(i) => { root.source-changed(self.current-index); } }
                     }
+                    if root.source-status != "": Text { text: root.source-status; color: Theme.muted; wrap: word-wrap; accessible-label: "Music source status"; }
+                    if root.device-library-available && !root.device-library-active: Button {
+                        text: "Music access settings"; clicked => { root.music-access-settings(); }
+                    }
+                    if root.device-library-active: VerticalLayout {
+                        spacing: 8px;
+                        Text { text: "Music stored on this device"; color: Theme.text; font-weight: 600; }
+                        Text { text: "Cloud-only and protected songs are shown but cannot play. Sync or download unprotected music in Music, then refresh."; color: Theme.muted; wrap: word-wrap; }
+                        Button { text: root.scanning ? "Refreshing…" : "Refresh music library"; min-height: 44px; enabled: !root.scanning; clicked => { root.refresh-folder(); } }
+                        Button { text: "Music access settings"; min-height: 44px; clicked => { root.music-access-settings(); } }
+                    }
                     if root.collector-active: VerticalLayout {
                         spacing: 6px;
                         Text { text: "Library"; color: Theme.text; font-weight: 600; }
@@ -212,7 +228,7 @@ export component PlayerWindow inherits Window {
                         }
                         Text { text: root.connection-status; color: Theme.muted; wrap: word-wrap; }
                     }
-                    if !root.collector-active && root.folder-libraries.length > 0: VerticalLayout {
+                    if !root.collector-active && !root.device-library-active && root.folder-libraries.length > 0: VerticalLayout {
                         spacing: 6px;
                         Text { text: "Folder library"; color: Theme.text; font-weight: 600; }
                         HorizontalLayout {
@@ -222,7 +238,7 @@ export component PlayerWindow inherits Window {
                             IconButton { label: "Refresh folder"; icon: @image-url("icons/refresh.svg"); enabled: root.folder-index >= 0 && !root.scanning; clicked => { root.refresh-folder(); } }
                         }
                     }
-                    if !root.collector-active && root.folder-libraries.length == 0: Text {
+                    if !root.collector-active && !root.device-library-active && root.folder-libraries.length == 0: Text {
                         text: root.can-open-folder ? "Open a music folder to start a local library." : "Add a server to start listening.";
                         color: Theme.muted; wrap: word-wrap;
                     }
@@ -244,10 +260,10 @@ export component PlayerWindow inherits Window {
             collector-scroll := ScrollView {
                 mouse-drag-pan-enabled: true;
                 width: 100%; height: 100%;
-                viewport-width: max(self.visible-width, collector-content.min-width);
-                viewport-height: max(self.visible-height, collector-content.min-height);
+                content-width: max(self.visible-width, collector-content.min-width);
+                content-height: max(self.visible-height, collector-content.min-height);
                 collector-content := VerticalLayout {
-                width: collector-scroll.viewport-width; height: collector-scroll.viewport-height;
+                width: collector-scroll.content-width; height: collector-scroll.content-height;
                 padding: 12px; spacing: 8px;
                 Text { text: "Lists"; color: Theme.text; font-size: 20px * root.text-scale; font-weight: 600; }
                 Text { text: root.connection-status; color: Theme.muted; wrap: word-wrap; }
@@ -291,11 +307,11 @@ export component PlayerWindow inherits Window {
             settings-scroll := ScrollView {
                 mouse-drag-pan-enabled: true;
                 width: 100%; height: 100%;
-                viewport-width: self.visible-width;
-                viewport-height: max(self.visible-height, settings-content.min-height);
+                content-width: self.visible-width;
+                content-height: max(self.visible-height, settings-content.min-height);
                 settings-content := VerticalLayout {
                     width: settings-scroll.visible-width;
-                    height: settings-scroll.viewport-height;
+                    height: settings-scroll.content-height;
                     padding: 12px; spacing: 12px;
                     Text { text: "Settings"; color: Theme.text; font-size: 20px * root.text-scale; font-weight: 600; }
                     HorizontalLayout {
@@ -410,7 +426,7 @@ export component PlayerWindow inherits Window {
                     x: 8px; y: root.wide ? 64px + search-bar.height : 58px;
                     width: parent.width - 16px;
                     height: parent.height - 72px - search-bar.height;
-                    viewport-y <=> root.browser-y;
+                    content-y <=> root.browser-y;
                     for item[i] in root.browser-rows: BrowserItem {
                         item: item; text-scale: root.text-scale; selected: root.browser-selected == i; tap-to-play: root.tap-to-play;
                         activate => { root.browse-action(false, i, 0); keyboard.focus(); }
@@ -428,7 +444,7 @@ export component PlayerWindow inherits Window {
                 accessible-label: "Resize album browser";
                 key-pressed(event) => {
                     if (event.text == Key.LeftArrow) { root.library-width = max(220, root.library-width - 20); return accept; }
-                    if (event.text == Key.RightArrow) { root.library-width = min(root.viewport-width * 0.45 / (root.text-scale * 1px), root.library-width + 20); return accept; }
+                    if (event.text == Key.RightArrow) { root.library-width = min(root.content-width * 0.45 / (root.text-scale * 1px), root.library-width + 20); return accept; }
                     return reject;
                 }
                 Rectangle { x: 7px; width: 2px; height: 100%; background: resize.has-hover || resize.pressed ? Theme.accent : Theme.divider; }
@@ -436,7 +452,7 @@ export component PlayerWindow inherits Window {
                     mouse-cursor: ew-resize;
                     moved => {
                         if (self.pressed) {
-                            root.library-width = min(max(220, (root.desktop-library-width + self.mouse-x - self.pressed-x) / (root.text-scale * 1px)), root.viewport-width * 0.45 / (root.text-scale * 1px));
+                            root.library-width = min(max(220, (root.desktop-library-width + self.mouse-x - self.pressed-x) / (root.text-scale * 1px)), root.content-width * 0.45 / (root.text-scale * 1px));
                         }
                     }
                     double-clicked => { root.library-width = 280; }
@@ -465,7 +481,7 @@ export component PlayerWindow inherits Window {
                 if root.artist-view: ListView {
                     accessible-label: "Artist releases";
                     min-height: 0px; preferred-height: 0px; vertical-stretch: 1;
-                    viewport-y <=> root.detail-y;
+                    content-y <=> root.detail-y;
                     for item[i] in root.artist-rows: BrowserItem {
                         item: item; text-scale: root.text-scale; show-album: false; tap-to-play: root.tap-to-play;
                         activate => { root.browse-action(true, i, 0); keyboard.focus(); }
@@ -478,7 +494,7 @@ export component PlayerWindow inherits Window {
                 if !root.artist-view && root.collector-active && !(root.show-queue && root.adhoc-queue && !root.artist-view): ComboBox { model: root.album-sources; current-index <=> root.album-source-index; selected(_) => { root.album-source-selected(self.current-index); } }
                 if !root.artist-view && !(root.show-queue && root.adhoc-queue && !root.artist-view): HorizontalLayout {
                     spacing: 6px; alignment: start;
-                    IconButton { label: "Play album"; icon: @image-url("icons/play.svg"); enabled: root.tracks.length > 0 && !root.album-ambiguous; clicked => { root.play-track(0); } }
+                    IconButton { label: "Play album"; icon: @image-url("icons/play.svg"); enabled: root.tracks.length > 0 && !root.album-ambiguous; clicked => { root.play-album(); } }
                     if root.collector-active: IconButton { label: "Download album"; icon: @image-url("icons/download.svg"); enabled: !root.collector-busy && root.collector-online; clicked => { root.download-action(0); } }
                     if root.collector-active: IconButton { label: "Download track"; icon: @image-url("icons/download-track.svg"); enabled: !root.collector-busy && root.collector-online && root.selected-track >= 0; clicked => { root.download-action(6); } }
                     if root.collector-active: IconButton { label: "Remove download"; icon: @image-url("icons/remove-download.svg"); clicked => { root.download-action(1); } }
@@ -505,7 +521,7 @@ export component PlayerWindow inherits Window {
                 }
                 if !root.show-queue && !root.artist-view: ListView {
                     accessible-label: "Album tracks";
-                    viewport-y <=> root.track-y;
+                    content-y <=> root.track-y;
                         min-height: 0px; preferred-height: 0px; vertical-stretch: 1;
                     for track[i] in root.tracks: TrackItem {
                         track: track; text-scale: root.text-scale; tap-to-play: root.tap-to-play;

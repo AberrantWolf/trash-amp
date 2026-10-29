@@ -201,6 +201,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "amp-apple-library"
+version = "0.1.0-beta.4"
+dependencies = [
+ "amp-app",
+ "amp-audio",
+ "amp-core",
+ "anyhow",
+ "block2 0.6.2",
+ "dispatch2",
+ "hound",
+ "image",
+ "objc2 0.6.4",
+ "objc2-foundation 0.3.2",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
 name = "amp-audio"
 version = "0.1.0-beta.4"
 dependencies = [
@@ -223,6 +241,7 @@ dependencies = [
 name = "amp-collector"
 version = "0.1.0-beta.4"
 dependencies = [
+ "amp-app",
  "amp-audio",
  "amp-core",
  "anyhow",
@@ -2242,6 +2261,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "fax"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caf1079563223d5d59d83c85886a56e586cfd5c1a26292e971a0fa266531ac5a"
+
+[[package]]
 name = "fdeflate"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3530,6 +3555,7 @@ dependencies = [
  "moxcms",
  "num-traits",
  "png",
+ "tiff",
  "zune-core",
  "zune-jpeg",
 ]
@@ -7133,6 +7159,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiff"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b63feaf3343d35b6ca4d50483f94843803b0f51634937cc2ec519fc32232bc52"
+dependencies = [
+ "fax",
+ "flate2",
+ "half",
+ "quick-error",
+ "weezl",
+ "zune-jpeg",
+]
+
+[[package]]
 name = "time"
 version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7540,6 +7580,8 @@ name = "trash-amp"
 version = "0.1.0-beta.4"
 dependencies = [
  "amp-app",
+ "amp-apple-library",
+ "amp-audio",
  "amp-collector",
  "amp-media",
  "amp-ui",
@@ -7558,6 +7600,8 @@ name = "trash-amp-ios"
 version = "0.1.0-beta.4"
 dependencies = [
  "amp-app",
+ "amp-apple-library",
+ "amp-audio",
  "amp-collector",
  "amp-media",
  "amp-ui",

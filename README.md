@@ -73,6 +73,7 @@ only for this session.
 - Size-adaptive album/track browsing, compact transport, a playback level meter, and reduced-motion preference.
 - Compact icon actions with desktop hover tooltips, keyboard controls, and screen-reader names. iOS/Android omit hover tooltips. Home holds source/library selection, refresh, folder opening, Lists, and Settings; a Home icon returns there without a toolbar above the tracks.
 - Filesystem libraries, including mounted network shares and single-album folders.
+- Development builds add a read-only [Device Music Library](docs/device-music-library.md) source on Mac, iPhone and iPad for local, unprotected songs. Physical synced-library qualification remains pending.
 - Read-only tag inspection, compilation merging across artist folders, separate conflicting album copies, CUE/BIN track discovery, CD-TEXT album fields.
 - Local SQLite library snapshot and preferences. Failed scans preserve the previous library. A new scan cancels the previous scan between file operations.
 - Streaming Symphonia decoding and seek, CUE/BIN and current redumper audio PCM through junk-libs, CPAL output, and Rubato resampling when needed.

@@ -3,6 +3,8 @@
 pub mod catalog;
 pub mod files;
 
+pub mod sources;
+
 use amp_audio::{MediaResolver, OutputState, Player, PlayerEvent};
 use amp_core::{Album, Library, Track};
 use anyhow::{Result, bail};
@@ -129,9 +131,11 @@ pub type EngineFactory =
 
 enum Command {
     Resolver(Arc<dyn MediaResolver>),
+    RevokeProvider(String),
     BufferSeconds(u32),
     DefaultAlbum(Option<(Vec<Track>, bool)>),
     Album(Vec<Track>, usize),
+    AlbumStart(Vec<Track>),
     Track(Track),
     List(Vec<Track>),
     ReplaceQueue(Vec<Track>),
@@ -139,6 +143,8 @@ enum Command {
     FileQueue(Track, Arc<AtomicBool>),
     FileQueueAppend(String, Vec<Track>),
     FileQueueFinished(String),
+
+    ListFrom(Vec<Track>),
     Enqueue(Track),
     ClearQueue,
     Metadata(Album),
@@ -169,11 +175,17 @@ impl Playback {
     pub fn set_resolver(&self, resolver: Arc<dyn MediaResolver>) {
         self.send(Command::Resolver(resolver));
     }
+    pub fn revoke_provider(&self, provider: String) {
+        self.send(Command::RevokeProvider(provider));
+    }
     pub fn set_default_album(&self, tracks: Option<(Vec<Track>, bool)>) {
         self.send(Command::DefaultAlbum(tracks));
     }
     pub fn play_album(&self, tracks: Vec<Track>, start: usize) {
         self.send(Command::Album(tracks, start));
+    }
+    pub fn play_album_start(&self, tracks: Vec<Track>) {
+        self.send(Command::AlbumStart(tracks));
     }
     pub fn play_track(&self, track: Track) {
         self.send(Command::Track(track));
@@ -198,6 +210,10 @@ impl Playback {
     }
     pub fn append_file_queue(&self, session: String, tracks: Vec<Track>) {
         self.send(Command::FileQueueAppend(session, tracks));
+    }
+    /// A direct row action must not silently advance past a blocked first track.
+    pub fn play_list_from(&self, tracks: Vec<Track>) {
+        self.send(Command::ListFrom(tracks));
     }
     pub fn enqueue(&self, track: Track) {
         self.send(Command::Enqueue(track));
@@ -243,6 +259,15 @@ impl PlaybackService {
                 )?))
             }),
         )
+    }
+    /// Configure all managed providers before any engine can be created.
+    pub fn with_resolver(
+        prepare: PreparePlayback,
+        resolver: Arc<dyn MediaResolver>,
+    ) -> Result<Self> {
+        let service = Self::new(prepare)?;
+        service.playback.set_resolver(resolver);
+        Ok(service)
     }
     /// Inject a playback backend without changing queue or transport orchestration.
     pub fn with_engine_factory(prepare: PreparePlayback, factory: EngineFactory) -> Result<Self> {
@@ -405,14 +430,17 @@ impl Worker {
         if matches!(
             &command,
             Command::Album(..)
+                | Command::AlbumStart(..)
                 | Command::Track(..)
                 | Command::List(..)
+                | Command::ListFrom(..)
                 | Command::ReplaceQueue(..)
                 | Command::ClearQueue
         ) {
             self.cancel_file_queue();
         }
         let result = match command {
+            Command::RevokeProvider(provider) => self.revoke_provider(&provider),
             Command::Resolver(resolver) => {
                 if self.engine.is_some() {
                     Err(anyhow::anyhow!(
@@ -432,8 +460,30 @@ impl Worker {
                 Ok(())
             }
             Command::Album(tracks, start) => self.play_album(tracks, start),
+            Command::AlbumStart(tracks) => {
+                match tracks.iter().position(|t| t.playback_block().is_none()) {
+                    Some(start) => self.play_album(tracks, start),
+                    None => Err(anyhow::anyhow!("No playable tracks")),
+                }
+            }
             Command::Track(track) => self.play_track(track),
+            Command::ListFrom(tracks) => {
+                if let Some(reason) = tracks.first().and_then(Track::playback_block) {
+                    self.notice(reason.into());
+                    return;
+                }
+                let tracks: Vec<_> = tracks
+                    .into_iter()
+                    .filter(|t| t.playback_block().is_none())
+                    .collect();
+                let len = tracks.len();
+                self.replace(tracks, 0, len)
+            }
             Command::List(tracks) => {
+                let tracks: Vec<_> = tracks
+                    .into_iter()
+                    .filter(|t| t.playback_block().is_none())
+                    .collect();
                 let len = tracks.len();
                 self.replace(tracks, 0, len)
             }
@@ -471,6 +521,10 @@ impl Worker {
                 Ok(())
             }
             Command::Enqueue(track) => {
+                if let Some(reason) = track.playback_block() {
+                    self.notice(reason.into());
+                    return;
+                }
                 if let Some(engine) = &self.engine {
                     self.queue.sequence.push(track.clone());
                     engine.append(vec![track]);
@@ -550,16 +604,28 @@ impl Worker {
                         )
                     })
                     .collect::<std::collections::BTreeMap<_, _>>();
-                let defaults = self
-                    .default_album
-                    .iter_mut()
-                    .flat_map(|(tracks, _)| tracks.iter_mut());
+                if let Some((tracks, _)) = &mut self.default_album {
+                    tracks.retain_mut(|track| {
+                        if let Some(updated) = names.get(&(
+                            track.id.library.as_str(),
+                            track.id.provider.as_str(),
+                            track.id.item.as_str(),
+                        )) {
+                            track.title.clone_from(&updated.title);
+                            track.artist.clone_from(&updated.artist);
+                            track.availability = updated.availability.clone();
+                            track.blocked_reason = updated.blocked_reason;
+                            true
+                        } else {
+                            track.id.library != library.id
+                        }
+                    });
+                }
                 for track in self
                     .queue
                     .sequence
                     .iter_mut()
                     .chain(&mut self.queue.pending)
-                    .chain(defaults)
                 {
                     if let Some(updated) = names.get(&(
                         track.id.library.as_str(),
@@ -590,6 +656,67 @@ impl Worker {
         if let Err(error) = result {
             self.notice(error.to_string());
         }
+    }
+    fn revoke_provider(&mut self, provider: &str) -> Result<()> {
+        self.queue.pending.retain(|t| t.id.provider != provider);
+        if let Some((tracks, _)) = &mut self.default_album {
+            tracks.retain(|t| t.id.provider != provider);
+        }
+        self.albums.retain(|(_, p, _), _| p != provider);
+        self.queue_dirty = true;
+        if !self
+            .queue
+            .sequence
+            .iter()
+            .any(|t| t.id.provider == provider)
+        {
+            return Ok(());
+        }
+        if let Some(engine) = &self.engine {
+            let original = self.queue.sequence.clone();
+            let tracks = original.clone();
+            let provider_owned = provider.to_owned();
+            let update = engine.edit_queue(Box::new(move |index| {
+                let tracks = tracks
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(i, t)| *i <= index || t.id.provider != provider_owned)
+                    .map(|(_, t)| t)
+                    .collect();
+                (tracks, None)
+            }))?;
+            let index = update.clock.track;
+            self.queue.explicit_start = original
+                .iter()
+                .enumerate()
+                .take(self.queue.explicit_start)
+                .filter(|(i, t)| *i <= index || t.id.provider != provider)
+                .count();
+            self.accept_edit(update);
+        }
+        if self
+            .queue
+            .sequence
+            .get(self.clock.track)
+            .is_some_and(|t| t.id.provider == provider)
+        {
+            let remaining = self
+                .queue
+                .remaining(self.clock.track)
+                .into_iter()
+                .filter(|t| t.id.provider != provider)
+                .collect();
+            if let Some(engine) = self.engine.take() {
+                engine.set_playing(false);
+            }
+            self.queue = Queue {
+                sequence: Vec::new(),
+                pending: remaining,
+                explicit_start: 0,
+            };
+            self.clock = amp_audio::Snapshot::default();
+        }
+        Ok(())
     }
     fn ensure_engine(&mut self) -> Result<()> {
         (self.prepare)()?;
@@ -629,6 +756,9 @@ impl Worker {
         Ok(())
     }
     fn play_track(&mut self, track: Track) -> Result<()> {
+        if let Some(reason) = track.playback_block() {
+            bail!("{reason}");
+        }
         if self.engine.is_none() {
             let mut tracks = vec![track];
             tracks.extend(self.queue.pending.iter().cloned());
@@ -671,10 +801,21 @@ impl Worker {
         self.queue_dirty = true;
         Ok(())
     }
-    fn play_album(&mut self, mut tracks: Vec<Track>, start: usize) -> Result<()> {
-        if start >= tracks.len() {
-            bail!("Choose a playable track");
+    fn play_album(&mut self, tracks: Vec<Track>, start: usize) -> Result<()> {
+        let first = tracks
+            .get(start)
+            .ok_or_else(|| anyhow::anyhow!("Choose a playable track"))?;
+        if let Some(reason) = first.playback_block() {
+            bail!("{reason}");
         }
+        let start = tracks[..start]
+            .iter()
+            .filter(|t| t.playback_block().is_none())
+            .count();
+        let mut tracks: Vec<_> = tracks
+            .into_iter()
+            .filter(|t| t.playback_block().is_none())
+            .collect();
         let len = tracks.len();
         tracks.extend(self.queue.pending.iter().cloned());
         self.replace(tracks, start, len)
@@ -689,7 +830,11 @@ impl Worker {
             if ambiguous {
                 bail!("Choose a source disc before playing this album");
             }
-            return self.play_album(tracks, 0);
+            let start = tracks
+                .iter()
+                .position(|t| t.playback_block().is_none())
+                .ok_or_else(|| anyhow::anyhow!("No playable tracks"))?;
+            return self.play_album(tracks, start);
         }
         if self.engine.is_none() {
             return Ok(());

@@ -298,6 +298,7 @@ mod tests {
             },
             title: path.file_stem().unwrap().to_string_lossy().into(),
             artist: "Unknown artist".into(),
+            blocked_reason: None,
             number: 0,
             disc: 1,
             duration_seconds: 1.,

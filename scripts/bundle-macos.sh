@@ -41,6 +41,7 @@ cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
+    <key>NSAppleMusicUsageDescription</key><string>Browse and play unprotected music stored in your music library.</string>
     <key>CFBundleName</key><string>Trash Amp</string>
     <key>CFBundleDisplayName</key><string>Trash Amp</string>
     <key>CFBundleIdentifier</key><string>org.aberrantwolf.trash-amp</string>

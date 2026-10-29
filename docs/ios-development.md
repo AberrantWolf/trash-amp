@@ -1,8 +1,9 @@
 # iOS development
 
 The `ios` branch starts an iPhone/iPad host over the existing Rust and Slint UI.
-This is a development bootstrap, not an iOS release. Collector streaming and
-managed downloads are the initial media sources. External folder access is not
+This is a development bootstrap, not an iOS release. Collector streaming, managed downloads and the read-only Device Music Library
+are available sources. See [device music](device-music-library.md) for access,
+architecture and remaining physical-device qualification. External folder access is not
 implemented, so this host hides the folder picker.
 
 ## Code boundaries

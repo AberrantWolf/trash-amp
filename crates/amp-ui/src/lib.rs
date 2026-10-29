@@ -30,6 +30,7 @@ pub struct AppConfig {
     pub file_drop: Option<FileDropInstaller>,
     pub media_controls: MediaControlsFactory,
     pub open_url: UrlOpener,
+    pub music_access_settings_url: &'static str,
     pub playback: Playback,
     pub catalog: Catalog,
 }
@@ -123,12 +124,35 @@ fn wire_folder_selection(ui: &PlayerWindow, state: &Rc<RefCell<State>>) {
                 .map(|folder| folder.id.clone())
         });
         if let Some(id) = id {
-            ui.invoke_source_changed(0);
-            ui.set_source_index(0);
+            ui.set_collector_active(false);
+            ui.set_device_library_active(false);
             state.borrow().catalog.open_saved_folder(id);
         } else {
             ui.set_status("Cannot reopen folder: Choose a saved folder".into());
         }
+    });
+}
+fn wire_source_selection(ui: &PlayerWindow, state: &Rc<RefCell<State>>) {
+    let weak = ui.as_weak();
+    let state = state.clone();
+    ui.on_source_changed(move |index| {
+        let snapshot = state.borrow().catalog.snapshot();
+        let Some(source) = usize::try_from(index)
+            .ok()
+            .and_then(|i| snapshot.sources.get(i))
+        else {
+            return;
+        };
+        if let Some(ui) = weak.upgrade() {
+            ui.set_collector_active(source.provider == "collector");
+            ui.set_collector_online(false);
+            ui.set_connection_kind(ConnectionKind::Disconnected);
+            ui.set_device_library_active(source.provider == "apple-library");
+            ui.set_saved_lists(ModelRc::default());
+            ui.set_list_rows(ModelRc::default());
+            ui.set_collection_index(0);
+        }
+        state.borrow().catalog.select_source(source.id.clone());
     });
 }
 fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
@@ -136,10 +160,44 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
     if snapshot.generation != state.catalog.generation().current() {
         return;
     }
+    if !snapshot.sources.is_empty() {
+        ui.set_sources(ModelRc::new(VecModel::from(
+            snapshot
+                .sources
+                .iter()
+                .map(|s| SharedString::from(&s.name))
+                .collect::<Vec<_>>(),
+        )));
+        let accepted = match &snapshot.source {
+            CatalogSource::External(id) => id.as_str(),
+            _ => "folders",
+        };
+        let id = snapshot.requested_source.as_deref().unwrap_or(accepted);
+        ui.set_source_index(
+            snapshot
+                .sources
+                .iter()
+                .position(|s| s.id == id)
+                .map_or(-1, |i| i as i32),
+        );
+        ui.set_device_library_active(
+            snapshot
+                .sources
+                .iter()
+                .any(|s| s.id == id && s.provider == "apple-library"),
+        );
+        ui.set_device_library_available(
+            snapshot
+                .sources
+                .iter()
+                .any(|s| s.provider == "apple-library"),
+        );
+    }
     if state.folders != snapshot.folders {
         state.folders = snapshot.folders.clone();
         folder_choices(ui, state);
     }
+    ui.set_source_status(snapshot.source_message.clone().unwrap_or_default().into());
     ui.set_scanning(snapshot.scanning);
     ui.set_scan_progress(
         snapshot
@@ -151,9 +209,8 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
             })
             .unwrap_or(0.0),
     );
-    if !matches!(snapshot.source, CatalogSource::External(_))
-        && state.catalog_revision != snapshot.library_revision
-    {
+    let collector_catalog = matches!(&snapshot.source, CatalogSource::External(id) if snapshot.sources.iter().any(|s| &s.id == id && s.provider == "collector"));
+    if !collector_catalog && state.catalog_revision != snapshot.library_revision {
         let replacement = state.catalog_replacement != snapshot.replacement_revision;
         let selected_id = state
             .selected
@@ -173,12 +230,25 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
                 old.title != new.title
                     || old.artist != new.artist
                     || old.source_label != new.source_label
-                    || old
-                        .tracks
-                        .iter()
-                        .zip(&new.tracks)
-                        .any(|(a, b)| a.title != b.title || a.artist != b.artist)
+                    || old.tracks.len() != new.tracks.len()
+                    || old.tracks.iter().zip(&new.tracks).any(|(a, b)| {
+                        a.title != b.title
+                            || a.artist != b.artist
+                            || a.availability != b.availability
+                            || a.blocked_reason != b.blocked_reason
+                    })
             });
+        let selected_track_id = state
+            .selected
+            .and_then(|i| state.library.albums.get(i))
+            .and_then(|album| {
+                usize::try_from(ui.get_selected_track())
+                    .ok()
+                    .and_then(|i| album.tracks.get(i))
+            })
+            .map(|t| t.id.clone());
+        let had_selection = selected_id.is_some();
+        let artwork_changed = state.artwork != *snapshot.artwork;
         state.library = (*snapshot.library).clone();
         state.artwork = (*snapshot.artwork).clone();
         state.selected = if replacement {
@@ -188,15 +258,24 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
         };
         sort_albums(ui, state);
         folder_choices(ui, state);
-        if replacement {
+        if replacement || (had_selection && state.selected.is_none()) {
             albums(ui, state);
-        } else if changed_selected && let Some(index) = state.selected {
+        } else if (changed_selected || artwork_changed)
+            && let Some(index) = state.selected
+        {
             let showing_library = ui.get_show_library();
             let showing_queue = ui.get_show_queue();
-            let track = ui.get_selected_track();
             select(ui, state, index);
             ui.set_show_library(showing_library);
             ui.set_show_queue(showing_queue);
+            let track = selected_track_id
+                .and_then(|id| {
+                    state.library.albums[index]
+                        .tracks
+                        .iter()
+                        .position(|t| t.id == id)
+                })
+                .map_or(-1, |i| i as i32);
             ui.set_selected_track(track);
         }
         browse::rebuild(ui, state, replacement);
@@ -272,13 +351,18 @@ fn select(ui: &PlayerWindow, state: &mut State, index: usize) {
             .iter()
             .map(|t| TrackRow {
                 title: t.title.clone().into(),
-                status: match t.availability {
-                    amp_core::Availability::Available | amp_core::Availability::Downloaded => "",
-                    amp_core::Availability::Preparing => "Preparing",
-                    amp_core::Availability::Unavailable => "Unavailable",
-                    amp_core::Availability::Unsupported => "Unsupported",
-                }
-                .into(),
+                status: t
+                    .blocked_reason
+                    .map(|reason| reason.message())
+                    .unwrap_or(match t.availability {
+                        amp_core::Availability::Available | amp_core::Availability::Downloaded => {
+                            ""
+                        }
+                        amp_core::Availability::Preparing => "Preparing",
+                        amp_core::Availability::Unavailable => "Unavailable",
+                        amp_core::Availability::Unsupported => "Unsupported",
+                    })
+                    .into(),
                 duration: time(t.duration_seconds),
                 number: format!("{:02}", t.number).into(),
             })
@@ -295,6 +379,10 @@ fn start(ui: &PlayerWindow, state: &mut State, index: usize) {
     }
     if index == 0 && ui.get_album_ambiguous() {
         ui.set_status("Choose a source disc before playing this album".into());
+        return;
+    }
+    if let Some(reason) = album.tracks[index].playback_block() {
+        ui.set_status(reason.into());
         return;
     }
     state.playback.play_album(album.tracks.clone(), index);
@@ -364,6 +452,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
         file_drop,
         media_controls,
         open_url,
+        music_access_settings_url,
         playback,
         catalog,
     } = config;
@@ -393,12 +482,30 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     let preferences = initial.preferences.clone();
     let ui = PlayerWindow::new()?;
     ui.set_home(true);
+    {
+        let weak = ui.as_weak();
+        ui.on_music_access_settings(move || {
+            let weak = weak.clone();
+            open_url(
+                music_access_settings_url,
+                Box::new(move |result| {
+                    if let Err(error) = result {
+                        let _ = weak
+                            .upgrade_in_event_loop(move |ui| ui.set_error_message(error.into()));
+                    }
+                }),
+            );
+        });
+    }
+
     ui.set_can_open_folder(folder_picker.is_some());
     ui.set_touch_input(cfg!(any(target_os = "ios", target_os = "android")));
     ui.global::<ButtonHints>()
         .set_hover_tooltips(!cfg!(any(target_os = "ios", target_os = "android")));
     if folder_picker.is_none() {
-        ui.set_status("Connect a Collector server in Settings to begin.".into());
+        ui.set_status(
+            "Choose Device Music Library or connect a Collector server in Settings.".into(),
+        );
     }
     ui.set_application_version(env!("CARGO_PKG_VERSION").into());
     ui.set_sort_order(i32::from(preferences.browse_artists));
@@ -425,7 +532,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     sort_albums(&ui, &mut state.borrow_mut());
     albums(&ui, &state.borrow());
     if folder_picker.is_none() && state.borrow().library.albums.is_empty() {
-        ui.set_album_artist("Connect a Collector server in Settings.".into());
+        ui.set_album_artist("Choose a music source on Home.".into());
     }
     browse::rebuild(&ui, &mut state.borrow_mut(), true);
     browse::wire(&ui, &state);
@@ -439,17 +546,9 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     };
     wire_folder_selection(&ui, &state);
     {
-        let weak = ui.as_weak();
         let state = state.clone();
-        let scan = scan.clone();
         ui.on_refresh_folder(move || {
-            let root = state.borrow().library.root.clone();
-            if let Some(ui) = weak.upgrade()
-                && !ui.get_collector_active()
-                && ui.get_folder_index() >= 0
-            {
-                scan(PathBuf::from(root));
-            }
+            state.borrow().catalog.refresh_source();
         });
     }
     {
@@ -461,8 +560,8 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
                 let scan = scan.clone();
                 pick(Box::new(move |path| {
                     if let Some(ui) = weak.upgrade() {
-                        ui.invoke_source_changed(0);
-                        ui.set_source_index(0);
+                        ui.set_collector_active(false);
+                        ui.set_device_library_active(false);
                         ui.set_home(false);
                         scan(path);
                     }
@@ -475,8 +574,8 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
         let catalog = catalog.clone();
         ui.on_demo(move || {
             if let Some(ui) = weak.upgrade() {
-                ui.invoke_source_changed(0);
-                ui.set_source_index(0);
+                ui.set_collector_active(false);
+                ui.set_device_library_active(false);
             }
             catalog.show_transient(amp_library::demo_library());
         });
@@ -489,6 +588,15 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
                 let mut s = state.borrow_mut();
                 browse::clear_track_context(&mut s);
                 start(&ui, &mut s, i as usize)
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        ui.on_play_album(move || {
+            let s = state.borrow();
+            if let Some(album) = s.selected.and_then(|i| s.library.albums.get(i)) {
+                s.playback.play_album_start(album.tracks.clone());
             }
         });
     }
@@ -613,8 +721,8 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     if let Some(index) = args.iter().position(|a| a == "--library")
         && let Some(path) = args.get(index + 1)
     {
-        ui.invoke_source_changed(0);
-        ui.set_source_index(0);
+        ui.set_collector_active(false);
+        ui.set_device_library_active(false);
         ui.set_home(false);
         scan(PathBuf::from(path))
     }
@@ -884,6 +992,7 @@ mod tests {
         let ui = PlayerWindow::new().unwrap();
         ui.set_wide(false);
         ui.set_home(true);
+
         ui.set_collector_active(true);
         ui.window().set_size(slint::LogicalSize::new(390., 740.));
         let clicks = Rc::new(Cell::new(0));
@@ -1278,6 +1387,7 @@ mod tests {
         folder_choices(&ui, &state.borrow());
         wire_folder_selection(&ui, &state);
         ui.set_home(true);
+
         ui.show().unwrap();
         assert!(
             ElementHandle::find_by_accessible_label(&ui, "Saved folder library")
@@ -1397,6 +1507,7 @@ mod tests {
         ui.set_search_text("Miles".into());
         ui.set_show_library(false);
         ui.set_home(true);
+
         ui.window().set_size(slint::LogicalSize::new(390., 844.));
         ui.show().unwrap();
         let activate = |label| {
@@ -1746,5 +1857,167 @@ mod tests {
             seek.set_position(0.3);
             assert_eq!(seek.get_displayed_position(), 0.3);
         }
+    }
+    #[test]
+    fn device_source_uses_registered_identity_and_exposes_permission_status() {
+        use amp_app::sources::{SourceDescriptor, SourceProvider};
+        struct Provider;
+        impl SourceProvider for Provider {
+            fn descriptors(&self) -> anyhow::Result<Vec<SourceDescriptor>> {
+                Ok(vec![
+                    SourceDescriptor {
+                        id: "test:other".into(),
+                        name: "Other music".into(),
+                        provider: "test".into(),
+                    },
+                    SourceDescriptor {
+                        id: "apple-library:device".into(),
+                        name: "Device Music Library".into(),
+                        provider: "apple-library".into(),
+                    },
+                ])
+            }
+            fn load(
+                &self,
+                id: &str,
+                _: bool,
+                _: &dyn Fn() -> bool,
+            ) -> anyhow::Result<amp_app::catalog::ExternalCatalog> {
+                anyhow::bail!("{id}: Music library access denied")
+            }
+        }
+        i_slint_backend_testing::init_no_event_loop();
+        let directory = tempfile_test_directory();
+        let service = TestServices::new(&directory.join("library.sqlite3"));
+        let catalog = service.catalog();
+        catalog.register_sources(vec![Arc::new(Provider)], false);
+        let initial = catalog.bootstrap_snapshot().unwrap();
+        assert_eq!(
+            initial.sources.len(),
+            2,
+            "No implicit folder row on a host without folder access"
+        );
+        let state = Rc::new(RefCell::new(State {
+            catalog: catalog.clone(),
+            playback: service.playback(),
+            folders: initial.folders,
+            catalog_revision: 0,
+            catalog_replacement: 0,
+            library: Library::default(),
+            artwork: Default::default(),
+            browser: Default::default(),
+            selected: None,
+            preferences: initial.preferences,
+        }));
+        let ui = PlayerWindow::new().unwrap();
+        ui.set_home(true);
+        ui.window().set_size(slint::LogicalSize::new(390., 844.));
+        wire_source_selection(&ui, &state);
+        ui.invoke_source_changed(1);
+        assert!(ui.get_device_library_active());
+        assert!(!ui.get_collector_active());
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while catalog
+            .bootstrap_snapshot()
+            .unwrap()
+            .source_message
+            .as_ref()
+            .is_none_or(|m| !m.contains("access denied"))
+        {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        render_catalog(&ui, &mut state.borrow_mut(), &mut 0);
+        assert!(
+            ui.get_source_status()
+                .contains("apple-library:device: Music library access denied")
+        );
+        assert!(ui.get_device_library_available());
+        assert_eq!(
+            catalog.snapshot().source,
+            CatalogSource::Local,
+            "Failed access preserves the accepted source"
+        );
+        ui.show().unwrap();
+        assert!(
+            i_slint_backend_testing::ElementHandle::find_by_accessible_label(
+                &ui,
+                "Music source status"
+            )
+            .next()
+            .is_some()
+        );
+        drop(state);
+        drop(service);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    fn tempfile_test_directory() -> PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("trash-amp-source-ui-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+    #[test]
+    fn native_catalog_refresh_preserves_track_identity_and_clears_a_removed_album() {
+        use slint::Model;
+        i_slint_backend_testing::init_no_event_loop();
+        let directory = tempfile_test_directory();
+        let services = TestServices::new(&directory.join("library.sqlite3"));
+        let catalog = services.catalog();
+        let initial = catalog.snapshot();
+        let state = Rc::new(RefCell::new(State {
+            catalog: catalog.clone(),
+            playback: services.playback(),
+            folders: initial.folders,
+            catalog_revision: initial.library_revision,
+            catalog_replacement: initial.replacement_revision,
+            library: Library::default(),
+            artwork: Default::default(),
+            browser: Default::default(),
+            selected: None,
+            preferences: initial.preferences,
+        }));
+        let ui = PlayerWindow::new().unwrap();
+        let mut notice = 0;
+        let publish = |library: Library| {
+            let version = catalog.generation().advance();
+            assert!(
+                catalog
+                    .complete_external(
+                        version,
+                        amp_app::catalog::ExternalCatalog {
+                            online: None,
+                            source: "native:test".into(),
+                            library,
+                            artwork: Default::default()
+                        },
+                        Arc::new(|| Ok(Box::new(|| Ok(()))))
+                    )
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap()
+                    .unwrap()
+            );
+        };
+        let mut library = amp_library::demo_library();
+        library.albums.truncate(1);
+        library.albums[0].tracks.truncate(3);
+        publish(library.clone());
+        render_catalog(&ui, &mut state.borrow_mut(), &mut notice);
+        select(&ui, &mut state.borrow_mut(), 0);
+        ui.set_selected_track(1);
+        let selected = library.albums[0].tracks[1].id.clone();
+        library.albums[0].tracks.remove(0);
+        publish(library.clone());
+        render_catalog(&ui, &mut state.borrow_mut(), &mut notice);
+        assert_eq!(ui.get_selected_track(), 0);
+        assert_eq!(state.borrow().library.albums[0].tracks[0].id, selected);
+        library.albums.clear();
+        publish(library);
+        render_catalog(&ui, &mut state.borrow_mut(), &mut notice);
+        assert!(state.borrow().selected.is_none());
+        assert_eq!(ui.get_tracks().row_count(), 0);
+        drop(state);
+        drop(services);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

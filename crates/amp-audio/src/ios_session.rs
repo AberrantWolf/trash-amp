@@ -106,7 +106,7 @@ impl Drop for AudioSession {
         // Remove callbacks before deactivation emits any new session notifications.
         let center = NSNotificationCenter::defaultCenter();
         for observer in self.observers.drain(..) {
-            unsafe { center.removeObserver((&*observer).as_ref()) };
+            unsafe { center.removeObserver((*observer).as_ref()) };
         }
         let _ = self.deactivate();
     }
