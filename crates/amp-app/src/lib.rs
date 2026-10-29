@@ -530,12 +530,11 @@ impl Worker {
                     .file_queue
                     .as_ref()
                     .is_some_and(|(id, stop)| *id == session && !stop.load(Ordering::Relaxed))
+                    && let Some(engine) = &self.engine
                 {
-                    if let Some(engine) = &self.engine {
-                        self.queue.sequence.extend(tracks.iter().cloned());
-                        engine.append_stream(tracks);
-                        self.queue_dirty = true;
-                    }
+                    self.queue.sequence.extend(tracks.iter().cloned());
+                    engine.append_stream(tracks);
+                    self.queue_dirty = true;
                 }
                 Ok(())
             }

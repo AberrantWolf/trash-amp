@@ -410,10 +410,11 @@ pub(super) fn run<B: Backend>(
             }
         }
         if exhausted || !shared.playing.load(Ordering::Relaxed) || producer.slots() == 0 {
-            if exhausted && producer.slots() == producer.buffer().capacity() {
-                if shared.playing.swap(false, Ordering::Relaxed) {
-                    resume_on_append = true;
-                }
+            if exhausted
+                && producer.slots() == producer.buffer().capacity()
+                && shared.playing.swap(false, Ordering::Relaxed)
+            {
+                resume_on_append = true;
             }
             thread::sleep(Duration::from_millis(3));
             continue;

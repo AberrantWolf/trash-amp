@@ -26,6 +26,10 @@ pub struct LoadSummary {
     pub warnings: Vec<String>,
     pub cancelled: bool,
 }
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Track events dominate a stream bounded to 32 events; keep them inline to avoid an allocation per track"
+)]
 pub enum LoadEvent {
     Track(Track),
     Finished(LoadSummary),
