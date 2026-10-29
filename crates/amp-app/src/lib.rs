@@ -6,7 +6,7 @@ pub mod files;
 pub mod sources;
 
 use amp_audio::{MediaResolver, OutputState, Player, PlayerEvent};
-use amp_core::{Album, Library, Track};
+use amp_core::{Album, AudioProcessingSettings, Library, Track};
 use anyhow::{Result, bail};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -69,6 +69,8 @@ pub type PreparePlayback = Arc<dyn Fn() -> Result<()> + Send + Sync>;
 /// Replaceable engine boundary. Platform-managed playback can implement its own
 /// engine without bringing a native framework into the application service.
 pub trait Engine: Send {
+    /// Apply output effects live without replacing the queue or resetting its clock.
+    fn set_processing(&self, settings: AudioProcessingSettings);
     /// Return a replacement ID; snapshots echo it once that sequence is applied.
     fn play(&self, tracks: Vec<Track>, start: usize) -> u64;
     fn set_playing(&self, playing: bool);
@@ -88,6 +90,9 @@ pub trait Engine: Send {
 }
 
 impl Engine for Player {
+    fn set_processing(&self, settings: AudioProcessingSettings) {
+        self.set_processing(settings);
+    }
     fn play(&self, tracks: Vec<Track>, start: usize) -> u64 {
         self.play(tracks, start)
     }
@@ -133,6 +138,7 @@ enum Command {
     Resolver(Arc<dyn MediaResolver>),
     RevokeProvider(String),
     BufferSeconds(u32),
+    Processing(AudioProcessingSettings),
     DefaultAlbum(Option<(Vec<Track>, bool)>),
     Album(Vec<Track>, usize),
     AlbumStart(Vec<Track>),
@@ -166,6 +172,10 @@ pub struct Playback {
 impl Playback {
     pub fn snapshot(&self) -> Snapshot {
         self.snapshot.read().unwrap().clone()
+    }
+    /// Update output effects on the active engine and retain them for future engines.
+    pub fn set_processing(&self, settings: AudioProcessingSettings) {
+        self.send(Command::Processing(settings.normalized()));
     }
     /// Configure the next engine; existing playback keeps its current allocation.
     pub fn set_buffer_seconds(&self, seconds: u32) {
@@ -328,6 +338,7 @@ struct Worker {
     resolver: Option<Arc<dyn MediaResolver>>,
     engine: Option<Box<dyn Engine>>,
     buffer_seconds: u32,
+    processing: AudioProcessingSettings,
     default_album: Option<(Vec<Track>, bool)>,
     queue: Queue,
     file_queue: Option<(String, Arc<AtomicBool>)>,
@@ -370,6 +381,7 @@ impl Worker {
             resolver: None,
             engine: None,
             buffer_seconds: amp_core::default_audio_buffer_seconds(),
+            processing: AudioProcessingSettings::default(),
             default_album: None,
             queue: Queue::default(),
             file_queue: None,
@@ -450,6 +462,13 @@ impl Worker {
                     self.resolver = Some(resolver);
                     Ok(())
                 }
+            }
+            Command::Processing(settings) => {
+                self.processing = settings.normalized();
+                if let Some(engine) = &self.engine {
+                    engine.set_processing(self.processing);
+                }
+                Ok(())
             }
             Command::BufferSeconds(seconds) => {
                 self.buffer_seconds = seconds;
@@ -721,7 +740,9 @@ impl Worker {
     fn ensure_engine(&mut self) -> Result<()> {
         (self.prepare)()?;
         if self.engine.is_none() {
-            self.engine = Some((self.factory)(self.resolver.clone(), self.buffer_seconds)?);
+            let engine = (self.factory)(self.resolver.clone(), self.buffer_seconds)?;
+            engine.set_processing(self.processing);
+            self.engine = Some(engine);
         }
         Ok(())
     }

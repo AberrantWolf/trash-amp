@@ -69,10 +69,14 @@ impl Store {
         Ok(())
     }
     pub fn preferences(&self) -> Result<Preferences> {
-        Ok(self.get("preferences")?.unwrap_or_default())
+        let mut preferences: Preferences = self.get("preferences")?.unwrap_or_default();
+        preferences.audio_processing = preferences.audio_processing.normalized();
+        Ok(preferences)
     }
     pub fn save_preferences(&self, p: &Preferences) -> Result<()> {
-        self.put("preferences", p)
+        let mut preferences = p.clone();
+        preferences.audio_processing = preferences.audio_processing.normalized();
+        self.put("preferences", &preferences)
     }
     pub fn library(&self) -> Result<Option<Library>> {
         match self.get::<String>("active_folder")? {
@@ -815,6 +819,43 @@ mod tests {
         });
         assert!(result.unwrap_err().to_string().contains("cancelled"));
     }
+    #[test]
+    fn crossfeed_preferences_normalize_and_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.sqlite3");
+        let store = Store::open(&path).unwrap();
+        let mut preferences = Preferences::default();
+        preferences.audio_processing.crossfeed = amp_core::CrossfeedSettings {
+            enabled: true,
+            cutoff_hz: 1234,
+            feed_db_tenths: 78,
+        };
+        store.save_preferences(&preferences).unwrap();
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.preferences().unwrap().audio_processing,
+            preferences.audio_processing
+        );
+        preferences.audio_processing.crossfeed.cutoff_hz = 0;
+        preferences.audio_processing.crossfeed.feed_db_tenths = u32::MAX;
+        // Check both boundaries: even legacy/unvalidated database entries load safely.
+        store.put("preferences", &preferences).unwrap();
+        assert_eq!(
+            store.preferences().unwrap().audio_processing,
+            preferences.audio_processing.normalized()
+        );
+        store.save_preferences(&preferences).unwrap();
+        assert_eq!(
+            store
+                .get::<Preferences>("preferences")
+                .unwrap()
+                .unwrap()
+                .audio_processing,
+            preferences.audio_processing.normalized()
+        );
+    }
+
     #[test]
     fn preferences_and_folder_libraries_survive_switching_and_restart() {
         let dir = tempfile::tempdir().unwrap();

@@ -4,6 +4,9 @@ import { Theme } from "theme.slint";
 // Keep the standard slider's input, keyboard and accessibility behavior while
 // drawing its visible parts with the same palette as the rest of the player.
 export component Slider inherits Rectangle {
+    in property <bool> enabled: true;
+    in property <string> label;
+    opacity: root.enabled ? 1 : 0.45;
     in property <float> minimum <=> input.minimum;
     in property <float> maximum <=> input.maximum;
     in property <float> step <=> input.step;
@@ -28,7 +31,7 @@ export component Slider inherits Rectangle {
         border-width: input.has-focus ? 3px : 1px;
         border-color: input.has-focus ? Theme.text : Theme.border;
     }
-    input := StandardSlider { width: 100%; height: 100%; opacity: 0; }
+    input := StandardSlider { width: 100%; height: 100%; opacity: 0; enabled: root.enabled; accessible-label: root.label; }
 }
 
 export component CheckBox inherits Rectangle {

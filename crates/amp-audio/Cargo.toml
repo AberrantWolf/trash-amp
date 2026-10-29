@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 [dependencies]
+bs2b.workspace = true
 amp-core.workspace = true
 anyhow.workspace = true
 junk-libs-disc.workspace = true

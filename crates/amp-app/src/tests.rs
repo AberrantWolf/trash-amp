@@ -14,14 +14,20 @@ struct FakeState {
     tracks: Vec<Track>,
     events: VecDeque<PlayerEvent>,
     replacements: usize,
+    processing: AudioProcessingSettings,
+    processing_at_play: AudioProcessingSettings,
     dropped: bool,
     hold_snapshot: bool,
     next_sequence: u64,
 }
 struct Fake(Arc<Mutex<FakeState>>);
 impl Engine for Fake {
+    fn set_processing(&self, settings: AudioProcessingSettings) {
+        self.0.lock().unwrap().processing = settings;
+    }
     fn play(&self, tracks: Vec<Track>, start: usize) -> u64 {
         let mut state = self.0.lock().unwrap();
+        state.processing_at_play = state.processing;
         state.replacements += 1;
         state.next_sequence += 1;
         state.tracks = tracks;
@@ -879,4 +885,36 @@ fn device_library_play_actions_cancel_progressive_file_discovery() {
         playback.append_file_queue("test".into(), vec![track("late-drop")]);
         assert!(settle(&playback).up_next.is_empty());
     }
+}
+
+#[test]
+fn processing_is_installed_before_first_play_and_updates_without_replacing_audio() {
+    let (service, fake) = setup();
+    let playback = service.playback();
+    let settings = AudioProcessingSettings {
+        crossfeed: amp_core::CrossfeedSettings {
+            enabled: true,
+            cutoff_hz: 650,
+            feed_db_tenths: 95,
+        },
+    };
+    playback.set_processing(settings);
+    playback.play_track(track("a"));
+    settle(&playback);
+    assert_eq!(fake.lock().unwrap().processing_at_play, settings);
+    let before = playback.snapshot();
+    let updated = AudioProcessingSettings {
+        crossfeed: amp_core::CrossfeedSettings {
+            enabled: false,
+            cutoff_hz: 0,
+            feed_db_tenths: 999,
+        },
+    };
+    playback.set_processing(updated);
+    settle(&playback);
+    let state = fake.lock().unwrap();
+    assert_eq!(state.processing, updated.normalized());
+    assert_eq!(state.replacements, 1);
+    assert_eq!(playback.snapshot().seconds, before.seconds);
+    assert_eq!(playback.snapshot().playing, before.playing);
 }

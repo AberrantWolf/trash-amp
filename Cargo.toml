@@ -15,6 +15,7 @@ license = "MIT"
 
 [workspace.dependencies]
 amp-apple-library = { path = "crates/amp-apple-library" }
+bs2b = "0.2"
 amp-app = { path = "crates/amp-app" }
 amp-media = { path = "crates/amp-media" }
 amp-ui = { path = "crates/amp-ui" }

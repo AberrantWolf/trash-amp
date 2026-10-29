@@ -70,6 +70,20 @@ export component PlayerWindow inherits Window {
     default-font-size: 14px * root.text-scale;
     in-out property <float> text-scale: 1;
     in-out property <int> audio-buffer-seconds: 15;
+    in-out property <bool> crossfeed-enabled;
+    in-out property <int> crossfeed-cutoff: 700;
+    // Store tenths of a dB so preset matching and persistence stay exact.
+    in-out property <int> crossfeed-feed: 45;
+    out property <int> crossfeed-preset: root.crossfeed-cutoff == 700 && root.crossfeed-feed == 45 ? 0
+        : root.crossfeed-cutoff == 700 && root.crossfeed-feed == 60 ? 1
+        : root.crossfeed-cutoff == 650 && root.crossfeed-feed == 95 ? 2 : 3;
+    public function select-crossfeed-preset(index: int) {
+        if index >= 0 && index < 3 {
+            root.crossfeed-cutoff = index == 2 ? 650 : 700;
+            root.crossfeed-feed = index == 0 ? 45 : index == 1 ? 60 : 95;
+            root.preferences-changed();
+        }
+    }
     in property <[TrackRow]> tracks;
     in property <[string]> queued;
     in property <string> album-title: "Your albums, close at hand.";
@@ -342,6 +356,37 @@ export component PlayerWindow inherits Window {
                                 changed(v) => { root.audio-buffer-seconds = round(v); root.preferences-changed(); } }
                         }
                         Text { text: "More buffer helps with network dropouts and uses more memory. Restart the app to apply changes."; color: Theme.muted; wrap: word-wrap; }
+                        CheckBox { text: "Binaural crossfeed"; checked <=> root.crossfeed-enabled;
+                            toggled => { root.preferences-changed(); } }
+                        Text { text: "Blend stereo channels for headphone listening. Changes apply during playback. Requires stereo output at 2–384 kHz.";
+                            color: Theme.muted; wrap: word-wrap; }
+                        ComboBox { model: ["Default", "Chu Moy", "Jan Meier", "Custom"];
+                            accessible-label: "Crossfeed preset"; enabled: root.crossfeed-enabled;
+                            // User selection replaces current-index's initial binding.
+                            // Keep a separate binding to resync it after tuning changes.
+                            private property <int> derived-preset: root.crossfeed-preset;
+                            changed derived-preset => { self.current-index = self.derived-preset; }
+                            current-index: self.derived-preset;
+                            selected(_) => {
+                                root.select-crossfeed-preset(self.current-index);
+                                self.current-index = root.crossfeed-preset;
+                            } }
+                        Text { text: "Crossfeed cutoff: " + root.crossfeed-cutoff + " Hz"; color: Theme.text; wrap: word-wrap; }
+                        Slider { minimum: 300; maximum: 2000; step: 1;
+                            private property <float> configured-value: root.crossfeed-cutoff;
+                            changed configured-value => { self.value = self.configured-value; }
+                            value: self.configured-value;
+                            label: "Crossfeed cutoff in Hz"; enabled: root.crossfeed-enabled;
+                            changed(v) => { root.crossfeed-cutoff = round(v); root.preferences-changed(); } }
+                        Text { text: "Crossfeed attenuation: " + floor(root.crossfeed-feed / 10) + "." + mod(root.crossfeed-feed, 10) + " dB";
+                            color: Theme.text; wrap: word-wrap; }
+                        Slider { minimum: 10; maximum: 150; step: 1;
+                            private property <float> configured-value: root.crossfeed-feed;
+                            changed configured-value => { self.value = self.configured-value; }
+                            value: self.configured-value;
+                            label: "Crossfeed attenuation in tenths of a dB"; enabled: root.crossfeed-enabled;
+                            changed(v) => { root.crossfeed-feed = round(v); root.preferences-changed(); } }
+                        Text { text: "Higher attenuation gives subtler crossfeed."; color: Theme.muted; wrap: word-wrap; }
                         CheckBox { text: "Reduce motion"; checked <=> root.reduced-motion;
                             toggled => { root.preferences-changed(); } }
                         Button { text: "Load 2,000-album layout demo"; clicked => { root.demo(); root.settings = false; } }

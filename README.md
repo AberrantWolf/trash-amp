@@ -10,6 +10,15 @@ See the [beta checklist](docs/release-gates.md),
 [release guide](docs/macos-release.md) for qualification, packaging and the GitHub
 automated prerelease workflow.
 
+## Headphone crossfeed
+
+In Settings → General, enable **Binaural crossfeed** to blend stereo channels for
+headphone listening. Choose Default, Chu Moy, or Jan Meier, or tune the cutoff
+and attenuation. Higher attenuation gives subtler crossfeed. Changes apply
+smoothly during playback and are saved between launches; crossfeed defaults off.
+It applies to audio played through Trash Amp's PCM output at 2–384 kHz with stereo
+output, and bypasses mono outputs.
+
 ## macOS app bundle
 
 ```sh

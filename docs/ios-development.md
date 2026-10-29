@@ -51,8 +51,9 @@ deactivate a newly resumed stream.
 The iOS decoder retains up to three seconds of unplayed PCM, the queue, the exact
 audible position and its decoder/reader state. A bounded worker-side mirror keeps
 the last device-buffer's worth of produced frames; pause trims already played
-frames after the device stops. The real-time callback still uses only its ring
-and atomics. At 44.1/48 kHz the paused frame cache uses roughly 4–5 MB, including
+frames after the device stops. The real-time callback uses bounded ring reads, atomics, and callback-owned
+allocation-free output processing. Buffered PCM stays unprocessed; a recreated
+stream builds its effects at the new output rate with the latest settings. At 44.1/48 kHz the paused frame cache uses roughly 4–5 MB, including
 per-frame position metadata, plus the decoder's existing bounded buffers.
 
 The worker sleeps until a transport/queue command or shutdown, instead of polling

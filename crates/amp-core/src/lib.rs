@@ -117,6 +117,48 @@ pub enum ColorMode {
     Dark,
 }
 
+/// Output effects, independent of the source and read-ahead buffer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioProcessingSettings {
+    pub crossfeed: CrossfeedSettings,
+}
+impl AudioProcessingSettings {
+    pub fn normalized(self) -> Self {
+        Self {
+            crossfeed: self.crossfeed.normalized(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CrossfeedSettings {
+    pub enabled: bool,
+    pub cutoff_hz: u32,
+    /// Attenuation of the crossfeed in tenths of a dB; larger is subtler.
+    pub feed_db_tenths: u32,
+}
+impl Default for CrossfeedSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            cutoff_hz: 700,
+            feed_db_tenths: 45,
+        }
+    }
+}
+impl CrossfeedSettings {
+    // These bounds match bs2b's Level validation.
+    pub fn normalized(self) -> Self {
+        Self {
+            enabled: self.enabled,
+            cutoff_hz: self.cutoff_hz.clamp(300, 2000),
+            feed_db_tenths: self.feed_db_tenths.clamp(10, 150),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Preferences {
     #[serde(default, alias = "sort_by_artist")]
@@ -131,6 +173,8 @@ pub struct Preferences {
     pub oled_mode: bool,
     #[serde(default = "default_audio_buffer_seconds")]
     pub audio_buffer_seconds: u32,
+    #[serde(default)]
+    pub audio_processing: AudioProcessingSettings,
 }
 pub const fn default_audio_buffer_seconds() -> u32 {
     15
@@ -147,6 +191,7 @@ impl Default for Preferences {
             color_mode: ColorMode::Dark,
             oled_mode: false,
             audio_buffer_seconds: default_audio_buffer_seconds(),
+            audio_processing: AudioProcessingSettings::default(),
         }
     }
 }
@@ -187,6 +232,36 @@ impl UpNext {
 #[cfg(test)]
 mod preference_tests {
     use super::*;
+    #[test]
+    fn legacy_and_partial_processing_preferences_default_and_custom_values_round_trip() {
+        let mut old = serde_json::to_value(Preferences::default()).unwrap();
+        old.as_object_mut().unwrap().remove("audio_processing");
+        let mut preferences: Preferences = serde_json::from_value(old).unwrap();
+        assert_eq!(
+            preferences.audio_processing,
+            AudioProcessingSettings::default()
+        );
+        let partial: AudioProcessingSettings = serde_json::from_value(serde_json::json!({
+            "crossfeed": { "enabled": true }
+        }))
+        .unwrap();
+        assert_eq!(
+            partial.crossfeed,
+            CrossfeedSettings {
+                enabled: true,
+                ..Default::default()
+            }
+        );
+        preferences.audio_processing.crossfeed = CrossfeedSettings {
+            enabled: true,
+            cutoff_hz: 1234,
+            feed_db_tenths: 78,
+        };
+        let restored: Preferences =
+            serde_json::from_slice(&serde_json::to_vec(&preferences).unwrap()).unwrap();
+        assert_eq!(restored.audio_processing, preferences.audio_processing);
+    }
+
     #[test]
     fn appearance_defaults_for_legacy_preferences_and_round_trips() {
         let mut old = serde_json::to_value(Preferences::default()).unwrap();

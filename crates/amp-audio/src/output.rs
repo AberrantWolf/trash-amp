@@ -1,5 +1,5 @@
 //! Output devices and stream callbacks. All device operations run on the audio worker.
-use super::{ClockGuard, Frame, Shared};
+use super::{ClockGuard, Frame, Shared, processing::ProcessingChain};
 use anyhow::{Context, Result, bail};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{
@@ -167,9 +167,19 @@ fn stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
 ) -> Result<cpal::Stream> {
     let channels = usize::from(config.channels);
     let errors = health.clone();
+    let mut processing = ProcessingChain::new(config.sample_rate, channels);
     Ok(device.build_output_stream(
         *config,
-        move |data: &mut [T], _| render(data, channels, &mut consumer, &shared, &health),
+        move |data: &mut [T], _| {
+            render(
+                data,
+                channels,
+                &mut consumer,
+                &shared,
+                &health,
+                &mut processing,
+            )
+        },
         // A retired stream can only mark its own health, never pause a replacement.
         move |_| {
             errors.failed.store(true, Ordering::Release);
@@ -184,6 +194,7 @@ pub(super) fn render<T: cpal::SizedSample + cpal::FromSample<f32>>(
     consumer: &mut rtrb::Consumer<Frame>,
     shared: &Shared,
     health: &Health,
+    processing: &mut ProcessingChain,
 ) {
     health.callbacks.fetch_add(1, Ordering::Relaxed);
     let Some(_clock) = ClockGuard::try_lock(&shared.clock_writer) else {
@@ -191,6 +202,7 @@ pub(super) fn render<T: cpal::SizedSample + cpal::FromSample<f32>>(
         return;
     };
     let generation = shared.generation.load(Ordering::Acquire);
+    processing.begin_callback(generation, shared.processing.load(Ordering::Acquire));
     while consumer
         .peek()
         .is_ok_and(|frame| frame.generation != generation)
@@ -213,13 +225,16 @@ pub(super) fn render<T: cpal::SizedSample + cpal::FromSample<f32>>(
                 }
                 _ => {
                     starved = true;
+                    processing.reset();
                     None
                 }
             }
         } else {
             None
         };
-        let samples = frame.map(|frame| frame.samples).unwrap_or_default();
+        let samples = frame
+            .map(|frame| processing.process_frame(frame.samples))
+            .unwrap_or_default();
         peak = peak.max(samples[0].abs()).max(samples[1].abs());
         for (channel, sample) in output.iter_mut().enumerate() {
             let value = if channels == 1 {
@@ -235,5 +250,145 @@ pub(super) fn render<T: cpal::SizedSample + cpal::FromSample<f32>>(
         .store(peak.min(1.0).to_bits(), Ordering::Relaxed);
     if starved {
         shared.underruns.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::processing;
+    use amp_core::{AudioProcessingSettings, CrossfeedSettings};
+    use cpal::Sample;
+
+    #[test]
+    fn render_preserves_gapless_history_meters_processed_audio_and_silences_pauses_and_underruns() {
+        let settings = AudioProcessingSettings {
+            crossfeed: CrossfeedSettings {
+                enabled: true,
+                ..Default::default()
+            },
+        };
+        let shared = Shared::default();
+        shared.playing.store(true, Ordering::Relaxed);
+        shared.generation.store(1, Ordering::Release);
+        shared
+            .processing
+            .store(processing::pack(settings), Ordering::Release);
+        let health = Health::default();
+        let (mut producer, mut consumer) = rtrb::RingBuffer::new(2000);
+        let mut chain = ProcessingChain::new(48000, 2);
+        let mut reference = ProcessingChain::new(48000, 2);
+        reference.begin_callback(1, processing::pack(settings));
+        for i in 0..1500 {
+            producer
+                .push(Frame {
+                    samples: [0.5, 0.0],
+                    generation: 1,
+                    track: usize::from(i >= 700),
+                    position: if i >= 700 { i - 700 } else { i },
+                })
+                .unwrap();
+        }
+        let mut first = vec![0.0; 1000];
+        render(&mut first, 2, &mut consumer, &shared, &health, &mut chain);
+        let expected: Vec<_> = (0..500)
+            .flat_map(|_| reference.process_frame([0.5, 0.0]))
+            .collect();
+        assert_eq!(first, expected);
+        let peak = first
+            .iter()
+            .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
+        assert_eq!(f32::from_bits(shared.level.load(Ordering::Relaxed)), peak);
+        shared.playing.store(false, Ordering::Relaxed);
+        let mut paused = [1.0; 128];
+        render(&mut paused, 2, &mut consumer, &shared, &health, &mut chain);
+        assert_eq!(paused, [0.0; 128]);
+        shared.playing.store(true, Ordering::Relaxed);
+        let mut rest = vec![0.0; 2200];
+        render(&mut rest, 2, &mut consumer, &shared, &health, &mut chain);
+        let expected: Vec<_> = (0..1000)
+            .flat_map(|_| reference.process_frame([0.5, 0.0]))
+            .collect();
+        assert_eq!(&rest[..2000], expected);
+        assert!(rest[2000..].iter().all(|s| *s == 0.0));
+        assert_eq!(shared.track.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.underruns.load(Ordering::Relaxed), 1);
+        producer
+            .push(Frame {
+                samples: [0.0, 0.0],
+                generation: 1,
+                ..Default::default()
+            })
+            .unwrap();
+        let mut after_gap = [1.0; 2];
+        render(
+            &mut after_gap,
+            2,
+            &mut consumer,
+            &shared,
+            &health,
+            &mut chain,
+        );
+        assert_eq!(after_gap, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn mono_bypasses_crossfeed_and_integer_surround_output_maps_after_processing() {
+        let shared = Shared::default();
+        shared.playing.store(true, Ordering::Relaxed);
+        shared.processing.store(
+            processing::pack(AudioProcessingSettings {
+                crossfeed: CrossfeedSettings {
+                    enabled: true,
+                    ..Default::default()
+                },
+            }),
+            Ordering::Release,
+        );
+        let health = Health::default();
+        let (mut producer, mut consumer) = rtrb::RingBuffer::new(1);
+        producer
+            .push(Frame {
+                samples: [0.5, 0.0],
+                ..Default::default()
+            })
+            .unwrap();
+        let mut mono = [0.0];
+        render(
+            &mut mono,
+            1,
+            &mut consumer,
+            &shared,
+            &health,
+            &mut ProcessingChain::new(48000, 1),
+        );
+        assert_eq!(mono, [0.25]);
+        producer
+            .push(Frame {
+                samples: [0.5, 0.0],
+                ..Default::default()
+            })
+            .unwrap();
+        let mut output = [0_i16; 4];
+        render(
+            &mut output,
+            4,
+            &mut consumer,
+            &shared,
+            &health,
+            &mut ProcessingChain::new(48000, 4),
+        );
+        let mut reference = ProcessingChain::new(48000, 4);
+        reference.begin_callback(0, shared.processing.load(Ordering::Acquire));
+        let samples = reference.process_frame([0.5, 0.0]);
+        assert_eq!(
+            output,
+            [
+                i16::from_sample(samples[0]),
+                i16::from_sample(samples[1]),
+                0,
+                0
+            ]
+        );
     }
 }

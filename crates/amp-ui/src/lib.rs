@@ -4,7 +4,10 @@ use amp_app::PlaybackService;
 use amp_app::catalog::CatalogService;
 use amp_app::catalog::{Catalog, Source as CatalogSource};
 use amp_app::{Playback, Transport};
-use amp_core::{ColorMode, DumpPreference, Library, Preferences, Track};
+use amp_core::{
+    AudioProcessingSettings, ColorMode, CrossfeedSettings, DumpPreference, Library, Preferences,
+    Track,
+};
 #[cfg(test)]
 use amp_library::Store;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
@@ -20,6 +23,16 @@ use std::{
     time::Duration,
 };
 slint::include_modules!();
+
+fn processing_settings(ui: &PlayerWindow) -> AudioProcessingSettings {
+    AudioProcessingSettings {
+        crossfeed: CrossfeedSettings {
+            enabled: ui.get_crossfeed_enabled(),
+            cutoff_hz: ui.get_crossfeed_cutoff().clamp(300, 2000) as u32,
+            feed_db_tenths: ui.get_crossfeed_feed().clamp(10, 150) as u32,
+        },
+    }
+}
 
 /// A launcher supplies sandbox storage and the native capabilities it implements.
 /// Absence of a picker hides folder selection without identifying an OS in the UI.
@@ -517,6 +530,11 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     ui.set_text_scale(preferences.text_scale);
     ui.set_audio_buffer_seconds(preferences.audio_buffer_seconds.clamp(3, 60) as i32);
     playback.set_buffer_seconds(preferences.audio_buffer_seconds);
+    let processing = preferences.audio_processing.normalized();
+    ui.set_crossfeed_enabled(processing.crossfeed.enabled);
+    ui.set_crossfeed_cutoff(processing.crossfeed.cutoff_hz as i32);
+    ui.set_crossfeed_feed(processing.crossfeed.feed_db_tenths as i32);
+    playback.set_processing(processing);
     let state = Rc::new(RefCell::new(State {
         playback: playback.clone(),
         artwork: Default::default(),
@@ -668,6 +686,11 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
                 } else {
                     DumpPreference::BinCue
                 };
+                let processing = processing_settings(&ui);
+                if s.preferences.audio_processing != processing {
+                    s.preferences.audio_processing = processing;
+                    s.playback.set_processing(processing);
+                }
                 s.catalog.save_preferences(s.preferences.clone());
             }
         });
@@ -1202,6 +1225,153 @@ mod tests {
         }
         assert_eq!(*saved.borrow(), vec![false, true, false, true]);
     }
+    #[test]
+    fn crossfeed_real_preset_and_slider_inputs_update_settings_and_preset_label() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::platform::{Key, PointerEventButton, WindowEvent};
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(980., 1000.));
+        ui.set_settings(true);
+        ui.set_crossfeed_enabled(true);
+        ui.show().unwrap();
+        let saved = Rc::new(RefCell::new(Vec::new()));
+        let values = saved.clone();
+        let weak = ui.as_weak();
+        ui.on_preferences_changed(move || {
+            values
+                .borrow_mut()
+                .push(processing_settings(&weak.unwrap()));
+        });
+        let combo = ElementHandle::find_by_accessible_label(&ui, "Crossfeed preset")
+            .next()
+            .unwrap();
+        for (key, expected) in [
+            (Key::DownArrow, 60),
+            (Key::DownArrow, 95),
+            (Key::UpArrow, 60),
+        ] {
+            let position = slint::LogicalPosition::new(
+                combo.absolute_position().x + combo.size().width / 2.,
+                combo.absolute_position().y + combo.size().height / 2.,
+            );
+            ui.window().dispatch_event(WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Left,
+            });
+            ui.window().dispatch_event(WindowEvent::PointerReleased {
+                position,
+                button: PointerEventButton::Left,
+            });
+            for text in [slint::SharedString::from(key), Key::Return.into()] {
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+                ui.window()
+                    .dispatch_event(WindowEvent::KeyReleased { text });
+            }
+            assert_eq!(ui.get_crossfeed_feed(), expected);
+            assert_eq!(
+                saved.borrow().last().unwrap().crossfeed.feed_db_tenths,
+                expected as u32
+            );
+        }
+        assert_eq!(combo.accessible_value().as_deref(), Some("Chu Moy"));
+        let cutoff = ElementHandle::find_by_accessible_label(&ui, "Crossfeed cutoff in Hz")
+            .next()
+            .unwrap();
+        cutoff.invoke_accessible_increment_action();
+        slint::platform::update_timers_and_animations();
+        assert_eq!(ui.get_crossfeed_cutoff(), 701);
+        assert_eq!(saved.borrow().last().unwrap().crossfeed.cutoff_hz, 701);
+        assert_eq!(combo.accessible_value().as_deref(), Some("Custom"));
+        cutoff.invoke_accessible_decrement_action();
+        slint::platform::update_timers_and_animations();
+        assert_eq!(ui.get_crossfeed_cutoff(), 700);
+        assert_eq!(combo.accessible_value().as_deref(), Some("Chu Moy"));
+        let feed =
+            ElementHandle::find_by_accessible_label(&ui, "Crossfeed attenuation in tenths of a dB")
+                .next()
+                .unwrap();
+        feed.invoke_accessible_increment_action();
+        slint::platform::update_timers_and_animations();
+        assert_eq!(ui.get_crossfeed_feed(), 61);
+        assert_eq!(saved.borrow().last().unwrap().crossfeed.feed_db_tenths, 61);
+        assert_eq!(combo.accessible_value().as_deref(), Some("Custom"));
+        ui.invoke_select_crossfeed_preset(2);
+        slint::platform::update_timers_and_animations();
+        assert_eq!(ui.get_crossfeed_cutoff(), 650);
+        assert_eq!(ui.get_crossfeed_feed(), 95);
+        assert_eq!(cutoff.accessible_value().as_deref(), Some("650"));
+        assert_eq!(feed.accessible_value().as_deref(), Some("95"));
+        assert_eq!(combo.accessible_value().as_deref(), Some("Jan Meier"));
+        feed.invoke_accessible_increment_action();
+        slint::platform::update_timers_and_animations();
+        assert_eq!(ui.get_crossfeed_feed(), 96);
+        assert_eq!(combo.accessible_value().as_deref(), Some("Custom"));
+        ui.set_crossfeed_enabled(false);
+        assert_eq!(cutoff.accessible_enabled(), Some(false));
+        assert_eq!(feed.accessible_enabled(), Some(false));
+    }
+
+    #[test]
+    fn crossfeed_presets_tuning_and_toggle_preserve_saved_values() {
+        use i_slint_backend_testing::ElementHandle;
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(390., 844.));
+        ui.set_settings(true);
+        ui.show().unwrap();
+        let saved = Rc::new(RefCell::new(Vec::new()));
+        let captured = saved.clone();
+        let weak = ui.as_weak();
+        ui.on_preferences_changed(move || {
+            captured
+                .borrow_mut()
+                .push(processing_settings(&weak.unwrap()));
+        });
+        assert_eq!(processing_settings(&ui), AudioProcessingSettings::default());
+        assert_eq!(ui.get_crossfeed_preset(), 0);
+        let toggle = ElementHandle::find_by_accessible_label(&ui, "Binaural crossfeed")
+            .next()
+            .unwrap();
+        toggle.invoke_accessible_default_action();
+        assert!(saved.borrow().last().unwrap().crossfeed.enabled);
+        for (preset, cutoff, feed) in [(0, 700, 45), (1, 700, 60), (2, 650, 95)] {
+            ui.invoke_select_crossfeed_preset(preset);
+            assert_eq!(ui.get_crossfeed_preset(), preset);
+            assert_eq!(ui.get_crossfeed_cutoff(), cutoff);
+            assert_eq!(ui.get_crossfeed_feed(), feed);
+            assert_eq!(
+                saved.borrow().last().unwrap().crossfeed.feed_db_tenths,
+                feed as u32
+            );
+        }
+        ui.set_crossfeed_cutoff(1234);
+        ui.set_crossfeed_feed(78);
+        ui.invoke_preferences_changed();
+        assert_eq!(ui.get_crossfeed_preset(), 3);
+        ui.invoke_select_crossfeed_preset(3);
+        toggle.invoke_accessible_default_action();
+        assert!(!ui.get_crossfeed_enabled());
+        assert_eq!(ui.get_crossfeed_cutoff(), 1234);
+        assert_eq!(ui.get_crossfeed_feed(), 78);
+        let combo = ElementHandle::find_by_accessible_label(&ui, "Crossfeed preset")
+            .next()
+            .unwrap();
+        assert_eq!(combo.accessible_enabled(), Some(false));
+        toggle.invoke_accessible_default_action();
+        assert_eq!(combo.accessible_enabled(), Some(true));
+        assert_eq!(ui.get_crossfeed_preset(), 3);
+        assert_eq!(
+            saved.borrow().last().unwrap().crossfeed,
+            CrossfeedSettings {
+                enabled: true,
+                cutoff_hz: 1234,
+                feed_db_tenths: 78,
+            }
+        );
+    }
+
     #[test]
     fn appearance_checkbox_keeps_pointer_and_accessibility_behavior() {
         use i_slint_backend_testing::ElementHandle;

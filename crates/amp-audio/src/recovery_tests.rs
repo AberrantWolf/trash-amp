@@ -26,6 +26,7 @@ struct Session {
     shared: Arc<Shared>,
     consumer: Mutex<rtrb::Consumer<Frame>>,
     health: Arc<Health>,
+    processing: Mutex<processing::ProcessingChain>,
     alive: AtomicBool,
     running: AtomicBool,
 }
@@ -41,6 +42,7 @@ impl Session {
             &mut self.consumer.lock().unwrap(),
             &self.shared,
             &self.health,
+            &mut self.processing.lock().unwrap(),
         );
         samples
     }
@@ -103,6 +105,7 @@ impl Backend for FakeBackend {
         });
         let health = Arc::new(Health::default());
         let session = Arc::new(Session {
+            processing: Mutex::new(processing::ProcessingChain::new(device.rate, 2)),
             shared,
             consumer: Mutex::new(consumer),
             health: health.clone(),
@@ -1027,5 +1030,88 @@ fn seek_and_queue_edits_cancel_blocked_inputs_without_pausing_or_reporting_decod
             drop(player);
             worker.join().unwrap();
         }
+    }
+}
+
+#[test]
+fn live_crossfeed_changes_already_buffered_audio_without_transport_edits() {
+    let (_dir, track) = tests::fixture(44_100, 44_100);
+    let harness = Harness::new(Some(Device::new("headphones", 44_100)));
+    let session = harness.session(0);
+    harness.player.play(vec![track], 0);
+    session.wait_frames(6000);
+    let generation = session.shared.generation.load(Ordering::Acquire);
+    let before = harness.player.snapshot();
+    let dry = session.render(500);
+    for (i, frame) in dry.chunks_exact(2).enumerate() {
+        assert_eq!(frame, [i as f32 / 32768.0, -(i as f32 / 32768.0)]);
+    }
+    let settings = amp_core::AudioProcessingSettings {
+        crossfeed: amp_core::CrossfeedSettings {
+            enabled: true,
+            ..Default::default()
+        },
+    };
+    harness.player.set_processing(settings);
+    let wet = session.render(1000);
+    assert_ne!(wet[1998], 499.0 / 32768.0);
+    assert!(wet[1998].is_finite());
+    harness.player.set_processing(Default::default());
+    let disabled = session.render(1000);
+    // The tail is an exact dry bypass once the 441-frame fade completes.
+    for (i, frame) in disabled.chunks_exact(2).enumerate().skip(441) {
+        let expected = ((1500 + i) % 1000) as f32 / 32768.0;
+        assert_eq!(frame, [expected, -expected]);
+    }
+    assert_eq!(
+        session.shared.generation.load(Ordering::Acquire),
+        generation
+    );
+    let after = harness.player.snapshot();
+    assert_eq!(after.sequence, before.sequence);
+    assert_eq!(after.track, before.track);
+    assert!(after.playing);
+    assert_eq!(after.seconds, 2500.0 / 44100.0);
+}
+
+#[test]
+fn enabled_crossfeed_rebuilds_at_new_output_rate_and_keeps_latest_paused_settings() {
+    let (_dir, track) = tests::fixture(44_100, 88_200);
+    let harness = Harness::with_policy(Some(Device::new("first", 44_100)), None, true);
+    harness
+        .player
+        .set_processing(amp_core::AudioProcessingSettings {
+            crossfeed: amp_core::CrossfeedSettings {
+                enabled: true,
+                ..Default::default()
+            },
+        });
+    harness.player.play(vec![track.clone()], 0);
+    let old = harness.session(0);
+    old.wait_frames(8820);
+    old.render(4410);
+    harness.player.set_playing(false);
+    wait(|| !old.alive.load(Ordering::Acquire));
+    let settings = amp_core::AudioProcessingSettings {
+        crossfeed: amp_core::CrossfeedSettings {
+            enabled: true,
+            cutoff_hz: 1300,
+            feed_db_tenths: 103,
+        },
+    };
+    harness.player.set_processing(settings);
+    harness.device(Some(Device::new("48khz", 48_000)));
+    harness.player.set_playing(true);
+    let new = harness.session(1);
+    new.wait_frames(1000);
+    assert_eq!(harness.player.snapshot().seconds, 0.1);
+    let mut reader = Converted::new(&track, 4800, 48_000, None).unwrap();
+    let mut processing = processing::ProcessingChain::new(48_000, 2);
+    processing.begin_callback(1, processing::pack(settings));
+    for frame in new.render(1000).chunks_exact(2) {
+        assert_eq!(
+            frame,
+            processing.process_frame(reader.next().unwrap().unwrap())
+        );
     }
 }

@@ -1,4 +1,4 @@
-//! Streaming PCM pipeline. Only bounded ring-buffer reads and atomics run in the device callback.
+//! Streaming PCM pipeline. The device callback uses bounded ring reads, atomics and allocation-free DSP.
 use amp_core::{MediaAccess, Track};
 use anyhow::{Context, Result, bail};
 use junk_libs_audio::{AudioDecoder, CuePcmDecoder, RedumperPcmDecoder, SincResampler, WavDecoder};
@@ -26,6 +26,7 @@ mod input;
 #[cfg(target_os = "ios")]
 mod ios_session;
 mod output;
+mod processing;
 pub use input::{MediaInput, PcmReader, ResolverRegistry};
 
 #[cfg(test)]
@@ -55,6 +56,7 @@ struct Shared {
     buffer_seconds: u32,
     sequence: AtomicU64,
     output_state: AtomicUsize,
+    processing: AtomicU32,
 }
 impl Shared {
     /// A native notification must stop rendering and publish pause even when
@@ -185,6 +187,7 @@ impl Player {
     ) -> Result<(Self, thread::JoinHandle<()>)> {
         let shared = Arc::new(Shared {
             buffer_seconds,
+            processing: AtomicU32::new(processing::pack(Default::default())),
             sample_rate: AtomicU32::new(44_100),
             ..Shared::default()
         });
@@ -221,6 +224,12 @@ impl Player {
             .commands
             .send(Command::Replace(tracks, start, sequence));
         sequence
+    }
+    /// Updates output effects without invalidating buffered audio or the transport.
+    pub fn set_processing(&self, settings: amp_core::AudioProcessingSettings) {
+        self.shared
+            .processing
+            .store(processing::pack(settings), Ordering::Release);
     }
     pub fn toggle(&self) {
         let _ = self.commands.send(Command::Toggle);
