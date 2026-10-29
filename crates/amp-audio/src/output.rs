@@ -38,7 +38,7 @@ pub(super) struct CpalBackend;
 
 pub(super) fn buffer_capacity(rate: u32, retain_on_pause: bool) -> usize {
     if retain_on_pause {
-        rate as usize * 3
+        rate as usize * 15
     } else {
         rate as usize / 2
     }
@@ -115,15 +115,17 @@ impl Backend for CpalBackend {
 
     fn open(&mut self, shared: Arc<Shared>) -> Result<Output<Self::Stream>> {
         #[cfg(target_os = "ios")]
-        let session = super::ios_session::AudioSession::new()?;
+        let session = super::ios_session::AudioSession::new(shared.clone())?;
         let (device, supported, key) = default_device()?;
         let format = supported.sample_format();
         let config: cpal::StreamConfig = supported.into();
         let health = Arc::new(Health::default());
-        let (producer, consumer) = rtrb::RingBuffer::new(buffer_capacity(
-            config.sample_rate,
-            self.release_when_paused(),
-        ));
+        let capacity = if shared.buffer_seconds == 0 {
+            buffer_capacity(config.sample_rate, self.release_when_paused())
+        } else {
+            config.sample_rate as usize * shared.buffer_seconds as usize
+        };
+        let (producer, consumer) = rtrb::RingBuffer::new(capacity);
         let stream = match format {
             cpal::SampleFormat::F32 => {
                 stream::<f32>(&device, &config, consumer, shared, health.clone())?

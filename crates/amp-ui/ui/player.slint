@@ -58,6 +58,7 @@ export component PlayerWindow inherits Window {
     default-font-family: "Helvetica Neue";
     default-font-size: 14px * root.text-scale;
     in-out property <float> text-scale: 1;
+    in-out property <int> audio-buffer-seconds: 15;
     in property <[TrackRow]> tracks;
     in property <[string]> queued;
     in property <string> album-title: "Your albums, close at hand.";
@@ -309,6 +310,12 @@ export component PlayerWindow inherits Window {
                             toggled => { root.preferences-changed(); } }
                         CheckBox { text: "Automatic metadata from MusicBrainz"; checked <=> root.automatic-metadata;
                             toggled => { root.preferences-changed(); } }
+                        HorizontalLayout {
+                            Text { text: "Audio buffer: " + root.audio-buffer-seconds + " s"; color: Theme.text; }
+                            Slider { minimum: 3; maximum: 60; step: 1; value: root.audio-buffer-seconds;
+                                changed(v) => { root.audio-buffer-seconds = round(v); root.preferences-changed(); } }
+                        }
+                        Text { text: "More buffer helps with network dropouts and uses more memory. Restart the app to apply changes."; color: Theme.muted; wrap: word-wrap; }
                         CheckBox { text: "Reduce motion"; checked <=> root.reduced-motion;
                             toggled => { root.preferences-changed(); } }
                         Button { text: "Load 2,000-album layout demo"; clicked => { root.demo(); root.settings = false; } }

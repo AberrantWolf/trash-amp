@@ -121,7 +121,7 @@ fn setup_with(prepare: PreparePlayback) -> (PlaybackService, Arc<Mutex<FakeState
     let fake = state.clone();
     let service = PlaybackService::with_engine_factory(
         prepare,
-        Box::new(move |_| Ok(Box::new(Fake(fake.clone())))),
+        Box::new(move |_, _| Ok(Box::new(Fake(fake.clone())))),
     )
     .unwrap();
     (service, state)
@@ -583,5 +583,27 @@ fn lock_screen_seeks_keep_track_and_album_metadata_in_every_publication() {
         let album = state.album.as_ref().unwrap();
         assert_eq!(album.title, "Album");
         assert_eq!(album.artwork_path.as_deref(), Some("/cover"));
+    }
+}
+
+#[test]
+fn saved_buffer_is_bounded_and_reaches_engine_before_playback() {
+    for (requested, expected) in [(0, 3), (30, 30), (u32::MAX, 60)] {
+        let state = Arc::new(Mutex::new(FakeState::default()));
+        let received = Arc::new(Mutex::new(None));
+        let captured = received.clone();
+        let service = PlaybackService::with_engine_factory(
+            Arc::new(|| Ok(())),
+            Box::new(move |_, seconds| {
+                *captured.lock().unwrap() = Some(seconds);
+                Ok(Box::new(Fake(state.clone())))
+            }),
+        )
+        .unwrap();
+        let playback = service.playback();
+        playback.set_buffer_seconds(requested);
+        playback.play_list(vec![track("buffer-test")]);
+        settle(&playback);
+        assert_eq!(*received.lock().unwrap(), Some(expected));
     }
 }

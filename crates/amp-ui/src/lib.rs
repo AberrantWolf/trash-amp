@@ -393,6 +393,8 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     ui.set_prefer_raw(preferences.dump_preference == DumpPreference::Redumper);
     ui.set_automatic_metadata(preferences.automatic_metadata);
     ui.set_text_scale(preferences.text_scale);
+    ui.set_audio_buffer_seconds(preferences.audio_buffer_seconds.clamp(3, 60) as i32);
+    playback.set_buffer_seconds(preferences.audio_buffer_seconds);
     let state = Rc::new(RefCell::new(State {
         playback: playback.clone(),
         artwork: Default::default(),
@@ -534,6 +536,8 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
                 };
                 s.preferences.oled_mode = ui.get_oled_mode();
                 s.preferences.text_scale = ui.get_text_scale();
+                s.preferences.audio_buffer_seconds =
+                    ui.get_audio_buffer_seconds().clamp(3, 60) as u32;
                 s.preferences.reduced_motion = ui.get_reduced_motion();
                 s.preferences.automatic_metadata = ui.get_automatic_metadata();
                 s.preferences.dump_preference = if ui.get_prefer_raw() {

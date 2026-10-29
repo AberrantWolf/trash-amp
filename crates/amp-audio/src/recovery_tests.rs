@@ -375,7 +375,7 @@ impl MediaResolver for NetworkResolver {
 
 #[test]
 fn mobile_resume_plays_retained_pcm_while_network_refill_is_blocked() {
-    let (_dir, mut track) = tests::fixture(44_100, 44_100 * 20);
+    let (_dir, mut track) = tests::fixture(44_100, 44_100 * 40);
     let MediaAccess::File { locator } = &track.access else {
         unreachable!()
     };
@@ -428,8 +428,10 @@ fn mobile_resume_plays_retained_pcm_while_network_refill_is_blocked() {
         thread::sleep(Duration::from_millis(5));
     }
     assert!(gate.entered.load(Ordering::Acquire));
-    assert_frames(&new.render(4_410), position);
-    position += 4_410;
+    // A five-second outage exceeded the old three-second mobile buffer.
+    // Drain that much PCM while no further network data can arrive.
+    assert_frames(&new.render(44_100 * 5), position);
+    position += 44_100 * 5;
     assert_eq!(harness.player.snapshot().underruns, 0);
     gate.release();
     new.wait_frames(capacity);
@@ -826,4 +828,44 @@ fn render_never_advances_the_audible_clock_during_a_queue_edit() {
         assert_eq!(during_seconds, before.seconds);
         assert_eq!(update.clock.seconds, before.seconds);
     });
+}
+
+#[test]
+fn system_pause_is_visible_while_network_read_is_blocked_and_never_auto_resumes() {
+    let (_dir, mut track) = tests::fixture(44_100, 44_100 * 40);
+    let MediaAccess::File { locator } = &track.access else {
+        unreachable!()
+    };
+    let gate = Arc::new(NetworkGate::default());
+    let resolver = Arc::new(NetworkResolver {
+        bytes: std::fs::read(locator).unwrap(),
+        gate: gate.clone(),
+        opens: AtomicUsize::new(0),
+    });
+    track.access = MediaAccess::Managed {
+        provider: "network-test".into(),
+        item: "track".into(),
+    };
+    let harness =
+        Harness::with_resolver(Some(Device::new("car", 44_100)), None, true, Some(resolver));
+    harness.player.play(vec![track], 0);
+    let output = harness.session(0);
+    output.wait_frames(output::buffer_capacity(44_100, true));
+    *gate.blocked.lock().unwrap() = true;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !gate.entered.load(Ordering::Acquire) && Instant::now() < deadline {
+        output.render(4_410);
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(gate.entered.load(Ordering::Acquire));
+    assert!(harness.player.snapshot().playing);
+    harness.player.shared.pause_for_system_event();
+    assert!(!harness.player.snapshot().playing);
+    let position = harness.player.snapshot().seconds;
+    assert!(output.render(4_410).iter().all(|sample| *sample == 0.0));
+    assert_eq!(harness.player.snapshot().seconds, position);
+    gate.release();
+    wait(|| !output.alive.load(Ordering::Acquire));
+    assert!(!harness.player.snapshot().playing);
+    assert_eq!(harness.devices.lock().unwrap().sessions.len(), 1);
 }

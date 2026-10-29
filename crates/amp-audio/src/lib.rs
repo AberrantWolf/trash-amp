@@ -50,8 +50,18 @@ struct Shared {
     underruns: AtomicU64,
     shutdown: AtomicBool,
     sample_rate: AtomicU32,
+    buffer_seconds: u32,
     sequence: AtomicU64,
     output_state: AtomicUsize,
+}
+impl Shared {
+    /// A native notification must stop rendering and publish pause even when
+    /// the decoder worker is waiting for a network read.
+    #[cfg(any(target_os = "ios", test))]
+    fn pause_for_system_event(&self) {
+        self.playing.store(false, Ordering::Relaxed);
+        self.level.store(0, Ordering::Relaxed);
+    }
 }
 /// The render callback never waits. A decoder-side edit can briefly silence a
 /// callback while it captures the audible position and installs a new generation.
@@ -146,7 +156,23 @@ impl Player {
         resolver: Option<Arc<dyn MediaResolver>>,
         backend: B,
     ) -> Result<(Self, thread::JoinHandle<()>)> {
+        Self::spawn_with_buffer(resolver, backend, 0)
+    }
+    /// Use a bounded read-ahead buffer, configured before the output worker starts.
+    pub fn with_resolver_and_buffer(
+        resolver: Option<Arc<dyn MediaResolver>>,
+        seconds: u32,
+    ) -> Result<Self> {
+        Self::spawn_with_buffer(resolver, output::CpalBackend, seconds.clamp(3, 60))
+            .map(|(player, _worker)| player)
+    }
+    fn spawn_with_buffer<B: output::Backend>(
+        resolver: Option<Arc<dyn MediaResolver>>,
+        backend: B,
+        buffer_seconds: u32,
+    ) -> Result<(Self, thread::JoinHandle<()>)> {
         let shared = Arc::new(Shared {
+            buffer_seconds,
             sample_rate: AtomicU32::new(44_100),
             ..Shared::default()
         });

@@ -205,12 +205,15 @@ version = "0.1.0-beta.4"
 dependencies = [
  "amp-core",
  "anyhow",
+ "block2 0.6.2",
  "cpal",
  "hound",
  "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98)",
  "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98)",
  "junk-libs-playback",
+ "objc2 0.6.4",
  "objc2-avf-audio",
+ "objc2-foundation 0.3.2",
  "rtrb",
  "tempfile",
 ]

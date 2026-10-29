@@ -114,10 +114,11 @@ impl Engine for Player {
 }
 
 pub type EngineFactory =
-    Box<dyn Fn(Option<Arc<dyn MediaResolver>>) -> Result<Box<dyn Engine>> + Send>;
+    Box<dyn Fn(Option<Arc<dyn MediaResolver>>, u32) -> Result<Box<dyn Engine>> + Send>;
 
 enum Command {
     Resolver(Arc<dyn MediaResolver>),
+    BufferSeconds(u32),
     DefaultAlbum(Option<(Vec<Track>, bool)>),
     Album(Vec<Track>, usize),
     Track(Track),
@@ -143,6 +144,10 @@ pub struct Playback {
 impl Playback {
     pub fn snapshot(&self) -> Snapshot {
         self.snapshot.read().unwrap().clone()
+    }
+    /// Configure the next engine; existing playback keeps its current allocation.
+    pub fn set_buffer_seconds(&self, seconds: u32) {
+        self.send(Command::BufferSeconds(seconds.clamp(3, 60)));
     }
     /// Install the stable resolving adapter before the first playback request.
     pub fn set_resolver(&self, resolver: Arc<dyn MediaResolver>) {
@@ -198,7 +203,11 @@ impl PlaybackService {
     pub fn new(prepare: PreparePlayback) -> Result<Self> {
         Self::with_engine_factory(
             prepare,
-            Box::new(|resolver| Ok(Box::new(Player::with_resolver(resolver)?))),
+            Box::new(|resolver, seconds| {
+                Ok(Box::new(Player::with_resolver_and_buffer(
+                    resolver, seconds,
+                )?))
+            }),
         )
     }
     /// Inject a playback backend without changing queue or transport orchestration.
@@ -259,6 +268,7 @@ struct Worker {
     factory: EngineFactory,
     resolver: Option<Arc<dyn MediaResolver>>,
     engine: Option<Box<dyn Engine>>,
+    buffer_seconds: u32,
     default_album: Option<(Vec<Track>, bool)>,
     queue: Queue,
     clock: amp_audio::Snapshot,
@@ -299,6 +309,7 @@ impl Worker {
             factory,
             resolver: None,
             engine: None,
+            buffer_seconds: amp_core::default_audio_buffer_seconds(),
             default_album: None,
             queue: Queue::default(),
             clock: amp_audio::Snapshot::default(),
@@ -365,6 +376,10 @@ impl Worker {
                     self.resolver = Some(resolver);
                     Ok(())
                 }
+            }
+            Command::BufferSeconds(seconds) => {
+                self.buffer_seconds = seconds;
+                Ok(())
             }
             Command::DefaultAlbum(album) => {
                 self.default_album = album;
@@ -500,7 +515,7 @@ impl Worker {
     fn ensure_engine(&mut self) -> Result<()> {
         (self.prepare)()?;
         if self.engine.is_none() {
-            self.engine = Some((self.factory)(self.resolver.clone())?);
+            self.engine = Some((self.factory)(self.resolver.clone(), self.buffer_seconds)?);
         }
         Ok(())
     }

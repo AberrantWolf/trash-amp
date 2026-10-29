@@ -94,7 +94,13 @@ pub struct Preferences {
     pub color_mode: ColorMode,
     #[serde(default)]
     pub oled_mode: bool,
+    #[serde(default = "default_audio_buffer_seconds")]
+    pub audio_buffer_seconds: u32,
 }
+pub const fn default_audio_buffer_seconds() -> u32 {
+    15
+}
+
 impl Default for Preferences {
     fn default() -> Self {
         Self {
@@ -105,6 +111,7 @@ impl Default for Preferences {
             text_scale: 1.0,
             color_mode: ColorMode::Dark,
             oled_mode: false,
+            audio_buffer_seconds: default_audio_buffer_seconds(),
         }
     }
 }
@@ -161,6 +168,18 @@ mod preference_tests {
             assert_eq!(restored.color_mode, mode);
             assert!(restored.oled_mode);
         }
+    }
+
+    #[test]
+    fn legacy_preferences_get_larger_buffer_and_custom_values_round_trip() {
+        let mut old = serde_json::to_value(Preferences::default()).unwrap();
+        old.as_object_mut().unwrap().remove("audio_buffer_seconds");
+        let mut prefs: Preferences = serde_json::from_value(old).unwrap();
+        assert_eq!(prefs.audio_buffer_seconds, 15);
+        prefs.audio_buffer_seconds = 60;
+        let restored: Preferences =
+            serde_json::from_slice(&serde_json::to_vec(&prefs).unwrap()).unwrap();
+        assert_eq!(restored.audio_buffer_seconds, 60);
     }
 
     #[test]
