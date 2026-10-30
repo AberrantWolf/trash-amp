@@ -540,3 +540,15 @@ AVFoundation fixture tests initially failed under macOS seatbelt and passed when
 rerun outside it. Disposable build caches were removed after disk exhaustion;
 final checks disabled incremental/debug artifacts. No user profile was changed.
 No live AcoustID recognition or new physical-device/iOS playback is claimed.
+
+## Shared matching review follow-up — 2026-10-30
+
+The shared pin advances to `0becbd0c382df3d494244c7ccc20de05cba580cf`.
+The review fixes incomplete/duplicate/missing release coordinates, empty artist
+credit fallback, malformed provider data and invalid fingerprint searchability.
+Persisted completeness flags are revalidated without hiding historical track data
+or upgrading incomplete evidence. Existing accepted metadata remains unchanged.
+The shared crate passes 19 tests, including exhaustive comparison of all 512
+three-by-three graphs and unchanged native fingerprint vectors, plus strict Clippy.
+The final pin passes 236 consumer workspace tests (three existing opt-in tests
+ignored), strict all-target Clippy and formatting.

@@ -14,7 +14,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-junk-libs-music = { git = "https://github.com/AberrantWolf/junk-libs", rev = "3a0042936cd29fd794518a47ca121ff172f34046" }
+junk-libs-music = { git = "https://github.com/AberrantWolf/junk-libs", rev = "0becbd0c382df3d494244c7ccc20de05cba580cf" }
 amp-apple-library = { path = "crates/amp-apple-library" }
 bs2b = "0.2"
 amp-app = { path = "crates/amp-app" }

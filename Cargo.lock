@@ -290,8 +290,8 @@ dependencies = [
  "httpdate",
  "image",
  "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98)",
- "libc",
  "junk-libs-music",
+ "libc",
  "lofty",
  "rusqlite",
  "serde",
@@ -3892,6 +3892,17 @@ dependencies = [
 [[package]]
 name = "junk-libs-audio"
 version = "0.1.0"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=0becbd0c382df3d494244c7ccc20de05cba580cf#0becbd0c382df3d494244c7ccc20de05cba580cf"
+dependencies = [
+ "serde",
+ "symphonia",
+ "symphonia-metadata",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "junk-libs-audio"
+version = "0.1.0"
 source = "git+https://github.com/AberrantWolf/junk-libs?rev=193e0a88faaa0c3d5636976932f120c237831ad0#193e0a88faaa0c3d5636976932f120c237831ad0"
 dependencies = [
  "claxon",
@@ -3909,17 +3920,6 @@ source = "git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f487
 dependencies = [
  "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98)",
  "rubato",
- "serde",
- "symphonia",
- "symphonia-metadata",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "junk-libs-audio"
-version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=3a0042936cd29fd794518a47ca121ff172f34046#3a0042936cd29fd794518a47ca121ff172f34046"
-dependencies = [
  "serde",
  "symphonia",
  "symphonia-metadata",
@@ -4017,10 +4017,10 @@ dependencies = [
 [[package]]
 name = "junk-libs-music"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=3a0042936cd29fd794518a47ca121ff172f34046#3a0042936cd29fd794518a47ca121ff172f34046"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=0becbd0c382df3d494244c7ccc20de05cba580cf#0becbd0c382df3d494244c7ccc20de05cba580cf"
 dependencies = [
  "chromaprint-next",
- "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=3a0042936cd29fd794518a47ca121ff172f34046)",
+ "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=0becbd0c382df3d494244c7ccc20de05cba580cf)",
  "musicbrainz_rs",
  "serde",
  "serde_json",
