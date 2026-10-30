@@ -406,7 +406,7 @@ enum Command {
     ),
     Progress(u64, ScanProgress),
     Scanned(u64, Result<ScanResult>),
-    Metadata(u64, Album),
+    Metadata(u64, Box<Album>, Album),
     Enriched(u64, Result<()>),
     Shutdown,
     Read(mpsc::Sender<Snapshot>),
@@ -1268,12 +1268,20 @@ impl Worker {
             Command::Enrich(v) if self.current(v) && self.state.source == Source::Local => {
                 self.enrich(v)?;
             }
-            Command::Metadata(v, album)
+            Command::Metadata(v, before, album)
                 if self.current(v) && self.state.source == Source::Local =>
             {
-                let library = Arc::make_mut(&mut self.state.library);
-                if let Some(index) = library.albums.iter().position(|a| a.id == album.id) {
-                    library.albums[index] = album.clone();
+                if let Some(index) = self
+                    .state
+                    .library
+                    .albums
+                    .iter()
+                    .position(|a| a.id == album.id)
+                    && before.id == album.id
+                    && serde_json::to_value(&self.state.library.albums[index])?
+                        == serde_json::to_value(&before)?
+                {
+                    Arc::make_mut(&mut self.state.library).albums[index] = album.clone();
                     self.state.library_revision += 1;
                     self.metadata_dirty = true;
                     self.playback.update_metadata(album);
@@ -1399,7 +1407,8 @@ impl Worker {
             return Ok(());
         }
         self.state.enriching = true;
-        let mut library = (*self.state.library).clone();
+        let baseline = self.state.library.clone();
+        let mut library = (*baseline).clone();
         let backend = self.backend.clone();
         let cache = self.cache.clone();
         let generation = self.generation.clone();
@@ -1408,6 +1417,20 @@ impl Worker {
         let spawned = thread::Builder::new()
             .name("amp-metadata".into())
             .spawn(move || {
+                let identity = |album: &Album| {
+                    (
+                        album.id.library.clone(),
+                        album.id.provider.clone(),
+                        album.id.item.clone(),
+                    )
+                };
+                let indices: BTreeMap<_, _> = baseline
+                    .albums
+                    .iter()
+                    .enumerate()
+                    .map(|(index, album)| (identity(album), index))
+                    .collect();
+                let mut emitted = BTreeMap::new();
                 let result = Store::open(&cache).and_then(|store| {
                     backend.enrich(
                         &mut library,
@@ -1415,7 +1438,18 @@ impl Worker {
                         &|| network.load(Ordering::Acquire),
                         &|| generation.current() != v,
                         &mut |album| {
-                            let _ = tx.send(Command::Metadata(v, album.clone()));
+                            let key = identity(album);
+                            if let Some(before) = emitted
+                                .get(&key)
+                                .or_else(|| indices.get(&key).map(|index| &baseline.albums[*index]))
+                            {
+                                let _ = tx.send(Command::Metadata(
+                                    v,
+                                    Box::new(before.clone()),
+                                    album.clone(),
+                                ));
+                                emitted.insert(key, album.clone());
+                            }
                         },
                     )
                 });

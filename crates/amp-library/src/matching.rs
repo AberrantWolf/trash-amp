@@ -590,13 +590,23 @@ pub(crate) fn restore(
             .optional()?;
         if let Some(saved) = saved {
             let (mut review, release): (Review, String) = serde_json::from_str(&saved)?;
-            if album.tracks.iter().map(|t| &t.id).collect::<Vec<_>>()
-                != review
-                    .album
+            let identities = |album: &Album| {
+                album
                     .tracks
                     .iter()
-                    .map(|t| &t.id)
-                    .collect::<Vec<_>>()
+                    .map(|track| {
+                        (
+                            track.id.library.clone(),
+                            track.id.provider.clone(),
+                            track.id.item.clone(),
+                        )
+                    })
+                    .collect::<BTreeSet<_>>()
+            };
+            let current = identities(album);
+            if current.len() != album.tracks.len()
+                || current != identities(&review.album)
+                || album.tracks.len() != review.album.tracks.len()
             {
                 continue;
             }
@@ -818,6 +828,29 @@ mod tests {
                 .to_string()
                 .contains("changed")
         );
+    }
+    #[test]
+    fn accepted_mapping_restores_after_track_order_changes() {
+        let (root, store, mut album, http) = fixture();
+        let review = discover_with(
+            &album,
+            "fixture-key",
+            &store,
+            root.path(),
+            Arc::new(|| false),
+            &http,
+        )
+        .unwrap();
+        remember(&store, &review, RELEASE).unwrap();
+        album.tracks.reverse();
+        let mut library = amp_core::Library {
+            albums: vec![album],
+            ..Default::default()
+        };
+        restore(&mut library, &store, &|| false, &mut |_| {}).unwrap();
+        assert_eq!(library.albums[0].title, "Matched album");
+        assert_eq!(library.albums[0].tracks[0].title, "Matched first");
+        assert_eq!(library.albums[0].tracks[1].title, "Matched second");
     }
     #[test]
     fn duplicate_source_track_numbers_keep_independent_fingerprint_mappings() {

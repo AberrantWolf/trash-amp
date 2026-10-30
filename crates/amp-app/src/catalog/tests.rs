@@ -397,7 +397,11 @@ fn source_switch_flushes_accepted_metadata_but_rejects_late_scan_and_metadata() 
     let handle = harness.handle();
     let old = handle.generation().current();
     let accepted = library("a", "Accepted").albums.remove(0);
-    handle.send(Command::Metadata(old, accepted));
+    handle.send(Command::Metadata(
+        old,
+        Box::new(a.albums[0].clone()),
+        accepted,
+    ));
     read(&handle);
     handle.open_saved_folder("b".into());
     assert_eq!(read(&handle).library.id, "b");
@@ -412,6 +416,7 @@ fn source_switch_flushes_accepted_metadata_but_rejects_late_scan_and_metadata() 
     ));
     handle.send(Command::Metadata(
         old,
+        Box::new(a.albums[0].clone()),
         library("a", "Late metadata").albums.remove(0),
     ));
     handle.send(Command::Enriched(old, Ok(())));
@@ -1113,4 +1118,30 @@ fn missing_matching_key_is_visible_in_the_matching_snapshot_and_can_be_retried()
     catalog.find_album_matches(id);
     wait(|| catalog.snapshot().matching_version > failed.matching_version);
     assert!(!read(&catalog).matching_busy);
+}
+
+#[test]
+fn enrichment_cannot_overwrite_a_later_accepted_album_in_the_same_generation() {
+    let original = library("a", "Original");
+    let harness = Harness::simple(std::slice::from_ref(&original));
+    let handle = harness.handle();
+    let generation = handle.generation().current();
+    let before = original.albums[0].clone();
+    handle.send(Command::Metadata(
+        generation,
+        Box::new(before.clone()),
+        library("a", "Accepted match").albums.remove(0),
+    ));
+    assert_eq!(read(&handle).library.albums[0].title, "Accepted match");
+    handle.send(Command::Metadata(
+        generation,
+        Box::new(before),
+        library("a", "Late enrichment").albums.remove(0),
+    ));
+    handle.send(Command::Enriched(generation, Ok(())));
+    assert_eq!(read(&handle).library.albums[0].title, "Accepted match");
+    assert_eq!(
+        harness.store().library_by_id("a").unwrap().unwrap().albums[0].title,
+        "Accepted match"
+    );
 }

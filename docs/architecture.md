@@ -140,3 +140,9 @@ source/manual names remain authoritative. Collector albums open the originating
 server's metadata workspace instead of duplicating its provider workflow.
 The existing local naming transport now decodes MusicBrainz entities through the
 shared community models; its conservative naming/cache policy remains local.
+
+Enrichment callbacks carry the album baseline they extend in addition to the scan
+generation. The catalog owner rejects a reply if that album has changed meanwhile,
+so late enrichment cannot overwrite a reviewed match within the same generation.
+Offline accepted mappings compare unique track identities independently of scan
+order, then validate the recorded source bytes before restoring names.

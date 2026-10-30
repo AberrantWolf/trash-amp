@@ -552,3 +552,19 @@ The shared crate passes 19 tests, including exhaustive comparison of all 512
 three-by-three graphs and unchanged native fingerprint vectors, plus strict Clippy.
 The final pin passes 236 consumer workspace tests (three existing opt-in tests
 ignored), strict all-target Clippy and formatting.
+
+## Application matching review — 2026-10-30
+
+The review fixes a same-generation race where late enrichment could overwrite a
+subsequently accepted album. Callbacks now carry the expected album baseline;
+conflicting replies leave both the live library and persisted snapshot intact.
+A regression exercises the two replies and checks both outcomes. Offline accepted
+mapping restoration now compares unique complete track identities independently
+of scan order; a real FLAC/MP3 regression reverses that order before restoration.
+Existing source validation and manual-name authority remain in force.
+
+All 238 workspace tests pass, with three existing opt-in tests ignored. Strict
+workspace all-target Clippy and formatting pass. AVFoundation tests ran outside
+macOS seatbelt. No new UI layout, release, live-service or device acceptance is
+claimed. Both applications retain shared revision
+`0becbd0c382df3d494244c7ccc20de05cba580cf`.
