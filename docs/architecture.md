@@ -20,6 +20,13 @@ The [application services](application-service.md) run independently of the pres
 
 ## Identities and sources
 
+Choosing a registered source commits its identity independently of asynchronous
+loading. An empty library, failed read or denied permission remains the selected
+source with explicit feedback. Selection and returned data use the same fenced
+installation path, but a loading/error projection never overwrites a saved
+provider catalog. Switching views preserves other saved catalogs and does not
+change the provider identity of audio already queued.
+
 Every item includes library, provider and item IDs. Filesystem identifiers initially use canonical paths; renaming/moving files changes identity. Complementary tagged album fragments can merge across artist folders. Conflicting disc/track slots and distinct explicit album artists keep copies separate. Metadata release IDs alone must not collapse duplicate copies.
 
 Media access is independent from library enumeration. The current variants are local files, CUE track spans and managed items. Future access adapters must support opaque native handles, ranged HTTP access, sequential-only streams, and availability changes. Do not convert all sources to `PathBuf` or assume seek is supported.

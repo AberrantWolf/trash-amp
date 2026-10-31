@@ -614,6 +614,14 @@ impl Worker {
             self.store
                 .save_provider_snapshot(id, &data.library, &data.artwork)?;
         }
+        self.install_source(v, id, data)
+    }
+    // Selection is independent of whether a provider can return a catalog.
+    // A pending/error projection must never overwrite the provider's saved cache.
+    fn install_source(&mut self, v: u64, id: &str, data: ExternalCatalog) -> Result<bool> {
+        if !self.current(v) {
+            return Ok(false);
+        }
         let previous = self.store.active_source()?;
         self.store.save_active_source(id)?;
         let acceptance = self.generation.acceptance.clone();
@@ -707,6 +715,23 @@ impl Worker {
         } else {
             None
         };
+        if self.state.source != Source::External(id.clone())
+            && !self.install_source(
+                v,
+                &id,
+                ExternalCatalog {
+                    source: id.clone(),
+                    online: None,
+                    library: Library {
+                        id: id.clone(),
+                        ..Default::default()
+                    },
+                    artwork: BTreeMap::new(),
+                },
+            )?
+        {
+            return Ok(());
+        }
         self.state.requested_source = Some(id.clone());
         let access = provider.access_status();
         self.state.source_access = Some(access);
@@ -930,7 +955,9 @@ impl Worker {
                                 .flat_map(|a| &a.tracks)
                                 .filter(|t| t.playback_block().is_none())
                                 .count();
-                            self.state.source_message = Some(if total == 0 {
+                            self.state.source_message = Some(if !final_result {
+                                "Loading music library…".into()
+                            } else if total == 0 {
                                 "No music found in this library.".into()
                             } else if playable == 0 {
                                 "No playable songs are available in this library.".into()

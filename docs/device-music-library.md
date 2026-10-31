@@ -7,7 +7,9 @@ subscription is required. Cloud-only and DRM-protected songs remain visible with
 an explanation; they cannot be played or queued. This does not import playlists,
 change the Music library, download cloud content or provide subscription playback.
 
-Select the source to request permission. Startup and lifecycle refreshes never
+Select **Home → Music source → Device Music Library**, or choose **Settings →
+Servers → Open Device Music Library** to open the same source flow. The Servers
+dropdown itself lists only Collector servers. Select the source to request permission. Startup and lifecycle refreshes never
 request permission. Home shows loading, empty and permission failure states and
 provides a Music access settings action. Refresh rereads the library; native
 library changes and foreground activation revalidate the active source. iOS
@@ -31,8 +33,11 @@ folder writes the folders marker and retains its existing active-folder ID.
 Collector's own catalog/download cache remains authoritative for its content;
 its legacy selected-connection field is only a migration input. Apple snapshots
 and artwork references use provider-scoped state keys, never `folder_libraries`.
-Failed loads retain accepted catalogs; revoked authorization removes exposed
-Apple metadata and cached artwork and revokes that provider in playback.
+Source selection commits independently of loading: choosing an empty, unavailable
+or permission-denied source keeps that source selected and shows its loading,
+empty or error state. Previously saved catalogs remain stored; valid cached data
+for the chosen source survives a failed refresh. Revoked authorization removes
+exposed Apple metadata and cached artwork and revokes that provider in playback.
 Selection generations and per-load request tickets reject late source and artwork
 completions. Notifications during a load coalesce into a follow-up refresh.
 Automatic refreshes retain the selection generation, so they cannot cancel an

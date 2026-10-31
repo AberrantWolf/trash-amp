@@ -1145,3 +1145,130 @@ fn enrichment_cannot_overwrite_a_later_accepted_album_in_the_same_generation() {
         "Accepted match"
     );
 }
+
+#[test]
+fn offline_cache_does_not_report_an_empty_playable_library_while_refresh_is_pending() {
+    struct CachedSource(Mutex<mpsc::Receiver<()>>);
+    impl SourceProvider for CachedSource {
+        fn descriptors(&self) -> Result<Vec<SourceDescriptor>> {
+            Ok(vec![SourceDescriptor {
+                id: "cached:test".into(),
+                name: "Server".into(),
+                provider: "test".into(),
+            }])
+        }
+        fn cached(&self, id: &str) -> Result<Option<ExternalCatalog>> {
+            let mut library = library("cached", "Retained album");
+            library.albums[0].tracks[0].availability = Availability::Unavailable;
+            Ok(Some(ExternalCatalog {
+                source: id.into(),
+                online: Some(false),
+                library,
+                artwork: BTreeMap::new(),
+            }))
+        }
+        fn load(&self, id: &str, _: bool, _: &dyn Fn() -> bool) -> Result<ExternalCatalog> {
+            self.0
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(3))?;
+            Ok(ExternalCatalog {
+                source: id.into(),
+                online: Some(true),
+                library: library("cached", "Live album"),
+                artwork: BTreeMap::new(),
+            })
+        }
+    }
+    let h = Harness::simple(&[]);
+    let catalog = h.handle();
+    let (release, gate) = mpsc::channel();
+    catalog.register_sources(vec![Arc::new(CachedSource(Mutex::new(gate)))], false);
+    read(&catalog);
+    catalog.select_source("cached:test".into());
+    wait(|| catalog.snapshot().library.id == "cached");
+    let pending = read(&catalog);
+    assert!(pending.scanning);
+    assert_eq!(pending.source_online, Some(false));
+    assert_eq!(
+        pending.library.albums[0].tracks[0].availability,
+        Availability::Unavailable
+    );
+    assert!(!pending.source_message.unwrap().contains("No playable"));
+    release.send(()).unwrap();
+    wait(|| !catalog.snapshot().scanning);
+    let ready = read(&catalog);
+    assert_eq!(ready.source_online, Some(true));
+    assert_eq!(
+        ready.library.albums[0].tracks[0].availability,
+        Availability::Available
+    );
+}
+
+#[test]
+fn selecting_a_failed_source_keeps_its_identity_and_preserves_saved_catalogs() {
+    let h = Harness::simple(&[library("folder", "Retained folder")]);
+    let catalog = h.handle();
+    let provider = TestProvider::new();
+    provider.fail.store(true, Ordering::Release);
+    let (release, gate) = mpsc::channel();
+    *provider.gate.lock().unwrap() = Some(gate);
+    catalog.register_sources(vec![provider.clone()], true);
+    read(&catalog);
+    catalog.open_saved_folder("folder".into());
+    read(&catalog);
+    catalog.select_source("native:test".into());
+    wait(|| provider.calls.load(Ordering::Acquire) == 1);
+    let loading = read(&catalog);
+    assert_eq!(loading.source, Source::External("native:test".into()));
+    assert!(loading.scanning && loading.library.albums.is_empty());
+    assert_eq!(
+        h.store().active_source().unwrap().as_deref(),
+        Some("native:test")
+    );
+    assert!(
+        h.store()
+            .provider_snapshot("native:test")
+            .unwrap()
+            .is_none(),
+        "A loading projection cannot publish an empty provider cache"
+    );
+    release.send(()).unwrap();
+    wait(|| !catalog.snapshot().scanning);
+    let failed = read(&catalog);
+    assert_eq!(failed.source, Source::External("native:test".into()));
+    assert!(failed.library.albums.is_empty());
+    assert!(
+        failed
+            .source_message
+            .unwrap()
+            .contains("Refresh unavailable")
+    );
+    assert_eq!(
+        h.store().active_source().unwrap().as_deref(),
+        Some("native:test")
+    );
+    assert_eq!(
+        h.store().library().unwrap().unwrap().albums[0].title,
+        "Retained folder"
+    );
+    provider.fail.store(false, Ordering::Release);
+    catalog.refresh_source();
+    wait(|| !catalog.snapshot().scanning && catalog.snapshot().library.id == "native");
+    assert_eq!(
+        read(&catalog).source,
+        Source::External("native:test".into())
+    );
+    assert_eq!(
+        h.store()
+            .provider_snapshot("native:test")
+            .unwrap()
+            .unwrap()
+            .0
+            .albums[0]
+            .title,
+        "Native music"
+    );
+    catalog.open_saved_folder("folder".into());
+    assert_eq!(read(&catalog).library.albums[0].title, "Retained folder");
+}

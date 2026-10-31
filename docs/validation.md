@@ -1,3 +1,113 @@
+## Empty/failed source selection — 2026-10-31
+
+The prior dropdown correction did not address selection being conditional on a
+successful load. The catalog owner now commits a registered source identity before
+reading it. A successful empty result stays selected with the empty-library state;
+read failures and permission denial keep that source selected with their visible
+error. Initial loading projections never publish empty provider snapshots. Existing
+stored catalogs survive switching, and failed refreshes retain valid chosen-source
+cache data. Initial selection and result installation share the compensated,
+generation-fenced persistence implementation.
+
+The real Home dropdown test now uses an empty device library, taps the actual
+picker and popup rows in both directions, and checks that repeated UI polls
+preserve the empty source and its feedback. The final touch-inclusive rerun
+passes the same 241-test workspace and strict Clippy set.
+The denied-access test's old expectation (reverting to Local) intentionally changed
+to the requested UX: the device source remains selected and its error stays visible.
+A gated service regression checks pending/failed identity, absence of a fake empty
+cache, retained local catalog, successful retry and return to the local catalog.
+Existing cancellation, stale completion, authorization revocation and cached-refresh
+recovery coverage still passes. Two review passes covered selected identity versus
+loaded data, then retention/cancellation and actual dropdown/feedback behavior.
+
+Final combined checks pass **241 workspace tests, 0 failed, 3 existing ignored**,
+warning-denied workspace/all-target Clippy, formatting and diff checks. The actual
+Slint Home empty state was rendered at 390×844 with iPhone host capabilities and
+inspected; the chosen source, empty message, refresh and access-settings actions
+remain visible. The disposable visual fixture was removed afterward.
+Signed optimized arm64 iPhone build **2.8** supersedes 2.7 below and passes deep/strict
+signature verification. Executable SHA-256:
+`8b24288eb5d10b7d939888faba621aa10f8df9369f01bc67b737db1b14799390`.
+The user approved main-branch publication on 2026-10-31. The signed artifact is
+ready; physical-phone installation/acceptance remains pending. The separate
+cellular stall is not claimed fixed by this source-selection correction. Earlier
+entries below retain their original checkpoint validation and publication status.
+
+## Device-library selection correction — 2026-10-31
+
+Settings → Servers reused the full source model and selection index, which
+presented the local device library as a server and left its source/permission
+feedback on a different screen. Servers now projects only Collector descriptors;
+its callback maps the filtered row to the descriptor's actual source identity.
+The separate Open Device Music Library action opens Home and uses the same
+catalog selection path as Home's Music source dropdown. Unchanged source/server
+models remain installed across presentation polls, and removed sources clear
+choices rather than leaving stale entries.
+
+A real-widget regression opens the server dropdown, polls presentation while it
+remains expanded, selects the filtered server by keyboard, activates the visible
+local-library button, and switches both ways through Home's actual dropdown.
+It checks accepted catalog identity and active source state, with the device
+source deliberately preceding the server in the registry. Existing denied-access
+coverage remains passing. Native Slint mobile (390×844) and desktop (1280×844)
+Settings renders were inspected; the new action fits and has an accessible name.
+Two review passes covered source/server mapping and UI/polling/permission behavior.
+
+The complete combined correction passes **240 workspace tests, 0 failed, 3 existing
+ignored**, warning-denied all-target workspace Clippy, formatting and diff checks.
+One lint attempt raced cleanup of the temporary rendering example; its missing-file
+failure is not counted as passed. The final source-only rerun passes.
+Signed optimized arm64 iPhone build **2.7** supersedes build 2.6 below and passes
+deep/strict signature verification. Executable SHA-256:
+`253e4ecf011e71c82f30f08a15cfecb7f352b24162e99fd1c99facbee3f2d345`.
+The temporary renderer source was removed; screenshots remain under `/tmp`.
+Source publication still awaits the prior approval request. Installation and real
+MediaPlayer enumeration/playback on the operator's iPhone remain pending; this
+does not claim the separate cellular stall has been resolved on physical hardware.
+
+## iPhone cached/offline follow-up — 2026-10-31
+
+A user reported cached/offline refresh and stalled native playback away from home,
+while Collector web playback worked. The existing iOS simulator reproduced a
+native-tls PEM-parser panic from the pinned beta.6 Collector client. The native
+route selector catches this task panic and can still reach Direct HTTPS, so it
+is not proof of the physical phone's stall. Collector dependencies now pin
+`76513f269d9e4a36ea8ffb6d94828b868d6e1fe8`, which parses the LAN certificate as DER.
+The cached phase of a live refresh now remains a loading state; it cannot announce
+that no playable songs exist before the live result arrives. A gated provider
+regression checks retained unavailable rows, pending state and live recovery.
+The real-server fixture explicitly supplies the current empty purchase-order field.
+
+Two review passes covered dependency/trust boundaries and cached-versus-final
+source state. Full workspace tests pass: **239 passed, 0 failed, 3 existing ignored**.
+The initial compile found the fixture's missing current Item field; it was fixed
+before the passing run. Formatting and diff checks pass. Warning-denied
+workspace/all-target Clippy passes. Optimized iPhone Release 2.6 builds and passes
+deep/strict signature verification; its executable is arm64.
+Executable SHA-256: `e71f1969d9fd47c8c7d2477b03c19bc6e78f531ae50fc505522cf90729d2ea37`.
+Source commit/push is pending explicit approval after automatic review rejected
+a push to another repository’s default branch during troubleshooting.
+
+Read-only native probes used the existing authorized simulator connection in a
+disposable clone. Corrected-client tests passed collections, a 40-album page,
+track availability, Direct HTTPS HEAD and an actual FLAC range. A CONNECT relay
+forced the normal public Cloudflare control origin while retaining end-to-end TLS;
+that native run also passed. The album page took about 14.9 seconds; individual
+track requests took about 30–100 ms. This is home-hosted simulator evidence, not
+cellular or physical audio acceptance. An otherwise identical old-client probe
+also read audio after emitting the parser panic; the comparison limits the causal
+claim. No production data, credentials, grants or server configuration changed.
+
+Initial probe launches failed because of the simulator signing setup. The supported
+linker entitlement section plus ordinary ad-hoc signature resolved that test
+infrastructure issue; failed launches do not count as passed tests. Automatic
+approval review rejected replacing the original simulator app, so testing used a
+separate disposable clone and left the original app/profile intact.
+Physical iPhone cellular access and audible playback remain unverified. The user
+was asked to check per-app cellular permission; an updated iPhone installation
+is required to consume the source fixes. Web playback remains the working fallback.
+
 # Prototype validation
 
 Automated tests cover exact decoded WAV samples, seek offset, resampling length including short/partial chunks, SQLite settings/library replacement, cancellation, and unavailable roots.

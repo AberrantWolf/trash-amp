@@ -157,3 +157,25 @@ This service does not grant background execution time. iOS interruption policy,
 audio-session deactivation, suspended downloads and
 hardware playback still need platform qualification. The iOS host now supplies
 background-accessible credentials; locked-device behavior still needs a device check.
+
+## Cached network sources
+
+A cached projection accepted while a live refresh is pending preserves browsing
+and download availability, but remains a loading state. Only the settled result
+can report an empty or unplayable library. Cached metadata is not a downloaded
+audio file and does not establish a working connection. The gated-provider test
+covers cached unavailable tracks followed by a playable live result.
+
+The Home picker projects every registered music source. Settings' server picker
+projects only Collector descriptors and maps that filtered row back to the
+registered source identity. Its local-library shortcut opens Home and invokes
+the same catalog selection command, preserving visible loading/permission/error
+states. Presentation polls retain unchanged dropdown models so an open picker
+can keep focus and selection until the user commits it.
+
+A registered source is selected before its asynchronous read finishes. Empty
+results remain valid selections; failed or permission-denied loads retain that
+source's error state rather than reverting the picker. The initial empty loading
+projection is not written to the provider snapshot cache. Existing local/provider
+catalogs remain stored, and retries reuse the selected source. Generation fencing
+and compensated selection persistence apply to initial selection and data updates.

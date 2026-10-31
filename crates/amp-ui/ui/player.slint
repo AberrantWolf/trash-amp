@@ -33,6 +33,10 @@ export component PlayerWindow inherits Window {
     in property <[string]> sources;
     in-out property <int> source-index;
     callback source-changed(int);
+    in property <[string]> servers;
+    in-out property <int> server-index;
+    callback server-changed(int);
+    callback open-device-library();
     in-out property <bool> lists-open;
     in-out property <int> settings-tab;
     in-out property <string> server-url;
@@ -418,7 +422,8 @@ export component PlayerWindow inherits Window {
                     if root.settings-tab == 1: VerticalLayout {
                         spacing: 10px;
                         Text { text: "Servers"; color: Theme.text; font-weight: 600; }
-                        ComboBox { model: root.sources; current-index <=> root.source-index; accessible-label: "Server to manage"; selected(i) => { root.source-changed(self.current-index); } }
+                        ComboBox { model: root.servers; current-index <=> root.server-index; accessible-label: "Server to manage"; enabled: root.servers.length > 0; selected(_) => { root.server-changed(self.current-index); } }
+                        if root.device-library-available: Button { text: "Open Device Music Library"; clicked => { root.open-device-library(); } }
                         LineEdit { text <=> root.server-url; placeholder-text: "https://collector.example:8443"; accessible-label: "Collector server URL"; }
                         HorizontalLayout {
                             Button { text: "Connect / Reconnect"; enabled: !root.collector-busy; clicked => { root.connect-server(); } }

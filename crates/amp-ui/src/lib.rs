@@ -10,7 +10,7 @@ use amp_core::{
 };
 #[cfg(test)]
 use amp_library::Store;
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::{
     cell::RefCell,
     path::PathBuf,
@@ -142,27 +142,62 @@ fn wire_folder_selection(ui: &PlayerWindow, state: &Rc<RefCell<State>>) {
         }
     });
 }
+fn activate_music_source(
+    ui: &PlayerWindow,
+    catalog: &Catalog,
+    source: &amp_app::sources::SourceDescriptor,
+) {
+    ui.set_collector_active(source.provider == "collector");
+    ui.set_collector_online(false);
+    ui.set_connection_kind(ConnectionKind::Disconnected);
+    ui.set_device_library_active(source.provider == "apple-library");
+    ui.set_saved_lists(ModelRc::default());
+    ui.set_list_rows(ModelRc::default());
+    ui.set_collection_index(0);
+    catalog.select_source(source.id.clone());
+}
 fn wire_source_selection(ui: &PlayerWindow, state: &Rc<RefCell<State>>) {
+    let catalog = state.borrow().catalog.clone();
     let weak = ui.as_weak();
-    let state = state.clone();
+    let sources = catalog.clone();
     ui.on_source_changed(move |index| {
-        let snapshot = state.borrow().catalog.snapshot();
-        let Some(source) = usize::try_from(index)
+        let snapshot = sources.snapshot();
+        if let Some(source) = usize::try_from(index)
             .ok()
             .and_then(|i| snapshot.sources.get(i))
-        else {
-            return;
-        };
-        if let Some(ui) = weak.upgrade() {
-            ui.set_collector_active(source.provider == "collector");
-            ui.set_collector_online(false);
-            ui.set_connection_kind(ConnectionKind::Disconnected);
-            ui.set_device_library_active(source.provider == "apple-library");
-            ui.set_saved_lists(ModelRc::default());
-            ui.set_list_rows(ModelRc::default());
-            ui.set_collection_index(0);
+            && let Some(ui) = weak.upgrade()
+        {
+            activate_music_source(&ui, &sources, source);
         }
-        state.borrow().catalog.select_source(source.id.clone());
+    });
+    let weak = ui.as_weak();
+    let servers = catalog.clone();
+    ui.on_server_changed(move |index| {
+        let snapshot = servers.snapshot();
+        if let Some(source) = usize::try_from(index).ok().and_then(|i| {
+            snapshot
+                .sources
+                .iter()
+                .filter(|source| source.provider == "collector")
+                .nth(i)
+        }) && let Some(ui) = weak.upgrade()
+        {
+            activate_music_source(&ui, &servers, source);
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_open_device_library(move || {
+        let snapshot = catalog.snapshot();
+        if let Some(source) = snapshot
+            .sources
+            .iter()
+            .find(|source| source.provider == "apple-library")
+            && let Some(ui) = weak.upgrade()
+        {
+            ui.set_settings(false);
+            ui.set_home(true);
+            activate_music_source(&ui, &catalog, source);
+        }
     });
 }
 fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
@@ -269,26 +304,47 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
         ui.set_album_matching_status(status.into());
         ui.set_album_matching_rows(ModelRc::new(VecModel::from(rows)));
     }
-    if !snapshot.sources.is_empty() {
-        ui.set_sources(ModelRc::new(VecModel::from(
-            snapshot
-                .sources
-                .iter()
-                .map(|s| SharedString::from(&s.name))
-                .collect::<Vec<_>>(),
-        )));
+    {
+        let names = snapshot
+            .sources
+            .iter()
+            .map(|s| SharedString::from(&s.name))
+            .collect::<Vec<_>>();
+        if !ui.get_sources().iter().eq(names.iter().cloned()) {
+            ui.set_sources(ModelRc::new(VecModel::from(names)));
+        }
+        let servers = snapshot
+            .sources
+            .iter()
+            .filter(|source| source.provider == "collector")
+            .collect::<Vec<_>>();
+        let names = servers
+            .iter()
+            .map(|s| SharedString::from(&s.name))
+            .collect::<Vec<_>>();
+        if !ui.get_servers().iter().eq(names.iter().cloned()) {
+            ui.set_servers(ModelRc::new(VecModel::from(names)));
+        }
         let accepted = match &snapshot.source {
             CatalogSource::External(id) => id.as_str(),
             _ => "folders",
         };
         let id = snapshot.requested_source.as_deref().unwrap_or(accepted);
-        ui.set_source_index(
-            snapshot
-                .sources
-                .iter()
-                .position(|s| s.id == id)
-                .map_or(-1, |i| i as i32),
-        );
+        let index = snapshot
+            .sources
+            .iter()
+            .position(|s| s.id == id)
+            .map_or(-1, |i| i as i32);
+        if ui.get_source_index() != index {
+            ui.set_source_index(index);
+        }
+        let index = servers
+            .iter()
+            .position(|s| s.id == id)
+            .map_or(-1, |i| i as i32);
+        if ui.get_server_index() != index {
+            ui.set_server_index(index);
+        }
         ui.set_device_library_active(
             snapshot
                 .sources
@@ -2492,6 +2548,159 @@ mod tests {
         }
     }
     #[test]
+    fn server_picker_filters_sources_and_local_library_action_selects_the_registered_source() {
+        use amp_app::sources::{SourceDescriptor, SourceProvider};
+        use i_slint_backend_testing::ElementHandle;
+        use slint::platform::{Key, WindowEvent};
+        struct Provider;
+        impl SourceProvider for Provider {
+            fn descriptors(&self) -> anyhow::Result<Vec<SourceDescriptor>> {
+                Ok(vec![
+                    SourceDescriptor {
+                        id: "apple-library:device".into(),
+                        name: "Device Music Library".into(),
+                        provider: "apple-library".into(),
+                    },
+                    SourceDescriptor {
+                        id: "collector:test".into(),
+                        name: "Collector".into(),
+                        provider: "collector".into(),
+                    },
+                ])
+            }
+            fn load(
+                &self,
+                id: &str,
+                _: bool,
+                _: &dyn Fn() -> bool,
+            ) -> anyhow::Result<amp_app::catalog::ExternalCatalog> {
+                let mut library = if id == "apple-library:device" {
+                    Library::default()
+                } else {
+                    amp_library::demo_library()
+                };
+                library.id = id.into();
+                Ok(amp_app::catalog::ExternalCatalog {
+                    source: id.into(),
+                    online: None,
+                    library,
+                    artwork: Default::default(),
+                })
+            }
+        }
+        i_slint_backend_testing::init_no_event_loop();
+        let directory = tempfile_test_directory();
+        let services = TestServices::new(&directory.join("library.sqlite3"));
+        let catalog = services.catalog();
+        catalog.register_sources(vec![Arc::new(Provider)], false);
+        let initial = catalog.bootstrap_snapshot().unwrap();
+        let state = Rc::new(RefCell::new(State {
+            catalog: catalog.clone(),
+            playback: services.playback(),
+            folders: initial.folders,
+            catalog_revision: 0,
+            catalog_replacement: 0,
+            library: Library::default(),
+            artwork: Default::default(),
+            browser: Default::default(),
+            selected: None,
+            selected_sources: Default::default(),
+            preferences: initial.preferences,
+        }));
+        let ui = PlayerWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(390., 844.));
+        ui.set_settings(true);
+        ui.set_settings_tab(1);
+        wire_source_selection(&ui, &state);
+        render_catalog(&ui, &mut state.borrow_mut(), &mut 0);
+        ui.show().unwrap();
+        assert_eq!(ui.get_sources().row_count(), 2);
+        assert_eq!(
+            ui.get_servers().iter().collect::<Vec<_>>(),
+            vec![SharedString::from("Collector")]
+        );
+        let combo = ElementHandle::find_by_accessible_label(&ui, "Server to manage")
+            .next()
+            .unwrap();
+        combo.invoke_accessible_expand_action();
+        slint::platform::update_timers_and_animations();
+        for _ in 0..3 {
+            render_catalog(&ui, &mut state.borrow_mut(), &mut 0);
+            slint::platform::update_timers_and_animations();
+        }
+        assert_eq!(combo.accessible_expanded(), Some(true));
+        let key = |key: Key| {
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+            slint::platform::update_timers_and_animations();
+        };
+        key(Key::DownArrow);
+        key(Key::Return);
+        let wait_for = |id: &str| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while catalog.snapshot().source != CatalogSource::External(id.into())
+                || catalog.snapshot().scanning
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "source selection did not settle: {:?}",
+                    catalog.snapshot().source_message
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        wait_for("collector:test");
+        render_catalog(&ui, &mut state.borrow_mut(), &mut 0);
+        assert_eq!(ui.get_server_index(), 0);
+        assert_eq!(ui.get_source_index(), 1);
+        ElementHandle::find_by_accessible_label(&ui, "Open Device Music Library")
+            .next()
+            .unwrap()
+            .invoke_accessible_default_action();
+        wait_for("apple-library:device");
+        render_catalog(&ui, &mut state.borrow_mut(), &mut 0);
+        assert!(ui.get_home() && !ui.get_settings());
+        assert!(ui.get_device_library_active() && !ui.get_collector_active());
+        assert_eq!(ui.get_source_index(), 0);
+        assert_eq!(ui.get_server_index(), -1);
+        assert_eq!(state.borrow().library.id, "apple-library:device");
+        for (label, id) in [
+            ("Collector", "collector:test"),
+            ("Device Music Library", "apple-library:device"),
+        ] {
+            let source = ElementHandle::find_by_accessible_label(&ui, "Music source")
+                .next()
+                .unwrap();
+            source.mock_single_click(slint::platform::PointerEventButton::Left);
+            slint::platform::update_timers_and_animations();
+            for _ in 0..3 {
+                render_catalog(&ui, &mut state.borrow_mut(), &mut 0);
+                slint::platform::update_timers_and_animations();
+            }
+            assert_eq!(source.accessible_expanded(), Some(true));
+            ElementHandle::find_by_accessible_label(&ui, label)
+                .next()
+                .unwrap()
+                .mock_single_click(slint::platform::PointerEventButton::Left);
+            slint::platform::update_timers_and_animations();
+            wait_for(id);
+            render_catalog(&ui, &mut state.borrow_mut(), &mut 0);
+        }
+        assert!(ui.get_device_library_active() && !ui.get_collector_active());
+        assert_eq!(state.borrow().library.id, "apple-library:device");
+        assert!(state.borrow().library.albums.is_empty());
+        assert!(!ui.get_source_status().is_empty());
+        for _ in 0..3 {
+            render_catalog(&ui, &mut state.borrow_mut(), &mut 0);
+        }
+        assert_eq!(ui.get_source_index(), 0);
+        assert!(ui.get_device_library_active());
+        ui.hide().unwrap();
+    }
+
+    #[test]
     fn device_source_uses_registered_identity_and_exposes_permission_status() {
         use amp_app::sources::{SourceDescriptor, SourceProvider};
         struct Provider;
@@ -2567,10 +2776,12 @@ mod tests {
                 .contains("apple-library:device: Music library access denied")
         );
         assert!(ui.get_device_library_available());
+        assert!(ui.get_device_library_active());
+        assert_eq!(ui.get_source_index(), 1);
         assert_eq!(
             catalog.snapshot().source,
-            CatalogSource::Local,
-            "Failed access preserves the accepted source"
+            CatalogSource::External("apple-library:device".into()),
+            "Denied access keeps the chosen source selected and exposes the error"
         );
         ui.show().unwrap();
         assert!(

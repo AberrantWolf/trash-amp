@@ -155,6 +155,7 @@ impl Fixture {
             identifiers: vec![],
             specimens: vec![],
             wishlist: false,
+            purchase_orders: vec![],
             captures: vec![],
             assets: vec![],
             metadata: Default::default(),
