@@ -130,6 +130,8 @@ export component PlayerWindow inherits Window {
     callback open-artist(string);
     callback back();
     callback activate-selection();
+    in-out property <bool> collector-album-loading: false;
+    in-out property <bool> collector-list-loading: false;
     callback album-track-selected();
     in-out property <int> sort-order;
     callback sort-changed();
@@ -306,9 +308,9 @@ export component PlayerWindow inherits Window {
                 Text { text: root.connection-status; color: Theme.muted; wrap: word-wrap; }
                 HorizontalLayout {
                     ComboBox { model: root.saved-lists; current-index <=> root.list-index; selected(i) => { root.list-selected(self.current-index); } }
-                    IconButton { label: "Play"; icon: @image-url("icons/play.svg"); enabled: root.list-index > 0; clicked => { root.play-list(false); } }
-                    IconButton { label: "Shuffle"; icon: @image-url("icons/shuffle.svg"); enabled: root.list-index > 0; clicked => { root.play-list(true); } }
-                    IconButton { label: "Download list"; icon: @image-url("icons/download.svg"); enabled: !root.collector-busy && root.collector-online && root.list-index > 0; clicked => { root.download-action(2); } }
+                    IconButton { label: "Play"; icon: @image-url("icons/play.svg"); enabled: !root.collector-list-loading && root.list-rows.length > 0 && root.list-index > 0; clicked => { root.play-list(false); } }
+                    IconButton { label: "Shuffle"; icon: @image-url("icons/shuffle.svg"); enabled: !root.collector-list-loading && root.list-rows.length > 0 && root.list-index > 0; clicked => { root.play-list(true); } }
+                    IconButton { label: "Download list"; icon: @image-url("icons/download.svg"); enabled: !root.collector-list-loading && root.list-rows.length > 0 && !root.collector-busy && root.collector-online && root.list-index > 0; clicked => { root.download-action(2); } }
                     IconButton { label: "Remove list downloads"; icon: @image-url("icons/remove-download.svg"); enabled: root.list-index > 0; clicked => { root.download-action(3); } }
                 }
                 HorizontalLayout {
@@ -326,9 +328,10 @@ export component PlayerWindow inherits Window {
                     IconButton { label: "Move down"; icon: @image-url("icons/down.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-entry >= 0; clicked => { root.list-command(7); } }
                 }
                 HorizontalLayout {
-                    Button { text: "Retry original changes"; enabled: !root.collector-busy && root.collector-online; clicked => { root.list-command(8); } }
+                    Button { text: "Retry original changes"; enabled: !root.collector-album-loading && !root.collector-busy && root.collector-online; clicked => { root.list-command(8); } }
                     Button { text: "Discard unresolved changes"; clicked => { root.list-command(9); } }
                 }
+                if root.collector-list-loading: Text { text: "Loading playlist entries…"; color: Theme.muted; wrap: word-wrap; }
                 ListView {
                     min-height: 180px; vertical-stretch: 1;
                     for item[i] in root.list-rows: BrowserItem { item: item; selected: i == root.list-entry; tap-to-play: root.tap-to-play;
@@ -543,7 +546,7 @@ export component PlayerWindow inherits Window {
                 }
                 if root.artist-view: Text { text: root.album-artist; color: Theme.muted; wrap: word-wrap; }
                 if !root.artist-view && !(root.show-queue && root.adhoc-queue && !root.artist-view): artist-link := FocusScope {
-                    enabled: root.tracks.length > 0;
+                    enabled: !root.collector-album-loading && root.tracks.length > 0;
                     height: 24px * root.text-scale;
                     accessible-role: button; accessible-label: "Artist: " + root.album-artist;
                     accessible-action-default => { root.open-artist(root.album-artist); }
@@ -567,8 +570,8 @@ export component PlayerWindow inherits Window {
                 if root.show-disc-selector && !root.artist-view && root.collector-active && !(root.show-queue && root.adhoc-queue && !root.artist-view): ComboBox { model: root.album-sources; current-index <=> root.album-source-index; selected(_) => { root.album-source-selected(self.current-index); } }
                 if !root.artist-view && !(root.show-queue && root.adhoc-queue && !root.artist-view): HorizontalLayout {
                     spacing: 6px; alignment: start;
-                    IconButton { label: "Play album"; icon: @image-url("icons/play.svg"); enabled: root.tracks.length > 0 && !root.album-ambiguous; clicked => { root.play-album(); } }
-                    if root.collector-active: IconButton { label: "Download album"; icon: @image-url("icons/download.svg"); enabled: !root.collector-busy && root.collector-online; clicked => { root.download-action(0); } }
+                    IconButton { label: "Play album"; icon: @image-url("icons/play.svg"); enabled: !root.collector-album-loading && root.tracks.length > 0 && !root.album-ambiguous; clicked => { root.play-album(); } }
+                    if root.collector-active: IconButton { label: "Download album"; icon: @image-url("icons/download.svg"); enabled: !root.collector-album-loading && !root.collector-busy && root.collector-online; clicked => { root.download-action(0); } }
                     if root.collector-active: IconButton { label: "Download track"; icon: @image-url("icons/download-track.svg"); enabled: !root.collector-busy && root.collector-online && root.selected-track >= 0; clicked => { root.download-action(6); } }
                     if root.collector-active: IconButton { label: "Remove download"; icon: @image-url("icons/remove-download.svg"); clicked => { root.download-action(1); } }
                     if !root.wide: Rectangle { horizontal-stretch: 1; }

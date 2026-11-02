@@ -25,6 +25,8 @@ struct SearchReply {
     query_version: u64,
     catalog_version: u64,
     results: Results,
+    remote: Library,
+    error: Option<String>,
 }
 pub(super) struct Browser {
     index: Arc<CatalogIndex>,
@@ -36,6 +38,9 @@ pub(super) struct Browser {
     rows: Vec<Action>,
     detail_rows: Vec<Action>,
     results: Results,
+    searching: bool,
+    search_library: Library,
+    search_cancel: Arc<std::sync::atomic::AtomicBool>,
     query_version: u64,
     catalog_version: u64,
     due: Option<Instant>,
@@ -56,6 +61,9 @@ impl Default for Browser {
             rows: vec![],
             detail_rows: vec![],
             results: Results::default(),
+            searching: false,
+            search_library: Library::default(),
+            search_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             query_version: 0,
             catalog_version: 0,
             due: None,
@@ -175,7 +183,7 @@ fn render_browser(ui: &PlayerWindow, s: &mut State) {
         }
         if rows.is_empty() {
             rows.push(label(
-                if b.due.is_some() {
+                if b.due.is_some() || b.searching {
                     "Searching…"
                 } else {
                     "No results"
@@ -185,6 +193,10 @@ fn render_browser(ui: &PlayerWindow, s: &mut State) {
             ));
             actions.push(Action::None);
         }
+    }
+    if !b.query.trim().is_empty() && ui.get_collector_active() && !ui.get_collector_online() {
+        rows.push(label("Offline track results cover cached albums".into(), 6));
+        actions.push(Action::None);
     }
     b.rows = actions;
     ui.set_browser_rows(artwork::model(rows, artwork_paths(&b.rows, &s.artwork)));
@@ -326,6 +338,10 @@ fn open(ui: &PlayerWindow, s: &mut State, target: Target) {
     );
 }
 fn schedule(s: &mut State) {
+    s.browser
+        .search_cancel
+        .store(true, std::sync::atomic::Ordering::Release);
+    s.browser.search_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     s.browser.query_version += 1;
     s.browser.due = Some(Instant::now() + Duration::from_millis(100));
 }
@@ -368,17 +384,38 @@ pub(super) fn poll(ui: &PlayerWindow, s: &mut State) {
     }
     if s.browser.due.is_some_and(|due| Instant::now() >= due) {
         s.browser.due = None;
+        s.browser.searching = true;
         let index = s.browser.index.clone();
         let query = s.browser.query.clone();
         let query_version = s.browser.query_version;
         let catalog_version = s.browser.catalog_version;
         let tx = s.browser.tx.clone();
+        let catalog = s.catalog.clone();
+        let cancelled = s.browser.search_cancel.clone();
         std::thread::spawn(move || {
-            let results = index.search(&query);
+            let mut results = index.search(&query);
+            let mut remote = Library::default();
+            let mut error = None;
+            match catalog.search_source(&query, &|| {
+                cancelled.load(std::sync::atomic::Ordering::Acquire)
+            }) {
+                Ok(Some(library)) => {
+                    results.tracks = CatalogIndex::new(&library).search(&query).tracks;
+                    remote = library;
+                }
+                Err(failure) => {
+                    error = Some(format!(
+                        "Online track search failed: {failure}; showing cached results"
+                    ))
+                }
+                Ok(None) => {}
+            }
             let _ = tx.send(SearchReply {
                 query_version,
                 catalog_version,
                 results,
+                remote,
+                error,
             });
         });
     }
@@ -386,7 +423,12 @@ pub(super) fn poll(ui: &PlayerWindow, s: &mut State) {
         if reply.query_version == s.browser.query_version
             && reply.catalog_version == s.browser.catalog_version
         {
+            s.browser.searching = false;
             s.browser.results = reply.results;
+            s.browser.search_library = reply.remote;
+            if let Some(error) = reply.error {
+                ui.set_status(error.into());
+            }
             render_browser(ui, s);
         }
     }
@@ -396,9 +438,9 @@ pub(super) fn resolve_track(s: &State, target: &Target) -> Option<Track> {
         s.library
             .albums
             .iter()
-            .find(|a| &a.id == album)?
-            .tracks
-            .iter()
+            .chain(s.browser.search_library.albums.iter())
+            .filter(|a| &a.id == album)
+            .flat_map(|a| a.tracks.iter())
             .find(|t| &t.id == track)
             .cloned()
     } else {
@@ -426,6 +468,7 @@ fn context_tracks(s: &State, detail: bool, index: usize) -> Vec<Track> {
         .library
         .albums
         .iter()
+        .chain(s.browser.search_library.albums.iter())
         .flat_map(|album| {
             album
                 .tracks
@@ -627,6 +670,13 @@ pub(super) fn mode_changed(ui: &PlayerWindow, s: &mut State) {
     s.browser.pending_open = None;
     ui.set_browser_y(0.0);
     render_browser(ui, s);
+}
+
+impl Drop for Browser {
+    fn drop(&mut self) {
+        self.search_cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 #[cfg(test)]
@@ -832,6 +882,8 @@ mod tests {
         s.browser
             .tx
             .send(SearchReply {
+                remote: Library::default(),
+                error: None,
                 query_version: 1,
                 catalog_version: s.browser.catalog_version,
                 results: stale.clone(),
@@ -840,6 +892,8 @@ mod tests {
         s.browser
             .tx
             .send(SearchReply {
+                remote: Library::default(),
+                error: None,
                 query_version: 2,
                 catalog_version: s.browser.catalog_version - 1,
                 results: stale,

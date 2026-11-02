@@ -77,6 +77,56 @@ impl SourceProvider for Adapter {
     fn observe(&self, changed: SourceObserver) {
         *self.source_observer.lock().unwrap() = Some(changed);
     }
+    fn load_incremental(
+        &self,
+        source: &str,
+        _interactive: bool,
+        cancelled: &dyn Fn() -> bool,
+        progress: &dyn Fn(amp_app::sources::SourceProgress),
+        publish: &dyn Fn(ExternalCatalog),
+    ) -> Result<ExternalCatalog> {
+        let key = key(self, source)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let snapshot =
+            runtime.block_on(self.refresh_catalog(key, cancelled, progress, &|snapshot| {
+                if let Ok(data) = catalog(self, key, Some(snapshot.clone()), true) {
+                    publish(data);
+                }
+            }));
+        catalog(self, key, Some(snapshot?), true)
+    }
+    fn search(
+        &self,
+        id: &str,
+        query: &str,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<Library>> {
+        let key = key(self, id)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime
+            .block_on(self.search_tracks(key, query, cancelled))
+            .map(Some)
+    }
+    fn has_artwork(&self) -> bool {
+        true
+    }
+    fn artwork(
+        &self,
+        data: &ExternalCatalog,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<BTreeMap<String, String>>> {
+        let key = key(self, &data.source)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime
+            .block_on(self.refresh_artwork(key, cancelled))
+            .map(Some)
+    }
     fn load(
         &self,
         source: &str,
@@ -118,6 +168,135 @@ fn retained_key(remote: &RemoteTrack) -> (String, String, String, String, u16) {
     )
 }
 impl Adapter {
+    pub async fn search_tracks(
+        &self,
+        key: ConnectionKey,
+        query: &str,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Library> {
+        let client = self.client(key)?;
+        let snapshot = self.display_snapshot(key)?.context("Library unavailable")?;
+        let mut result = Library {
+            id: connection_id(key),
+            root: connection_id(key),
+            ..Default::default()
+        };
+        let mut count = 0;
+        for collection in snapshot.collections.iter().filter(|c| c.can_browse) {
+            let mut cursor = None;
+            let mut seen = BTreeSet::new();
+            loop {
+                let page = remote_read(
+                    cancelled,
+                    client.songs(
+                        collection.id,
+                        &api::MusicSearchQuery {
+                            search: Some(query.into()),
+                            cursor,
+                            limit: Some(50),
+                        },
+                    ),
+                )
+                .await?;
+                for hit in page.items {
+                    count += 1;
+                    anyhow::ensure!(
+                        count <= 5000,
+                        "Search has too many results; narrow the query"
+                    );
+                    let id = hit.song.item_id;
+                    let index = result
+                        .albums
+                        .iter()
+                        .position(|a| a.id.item == id.to_string())
+                        .unwrap_or_else(|| {
+                            result.albums.push(Album {
+                                metadata: Default::default(),
+                                id: ItemId {
+                                    library: connection_id(key),
+                                    provider: "collector".into(),
+                                    item: id.to_string(),
+                                },
+                                title: hit.song.album.clone(),
+                                artist: hit.song.artist.clone(),
+                                tracks: Vec::new(),
+                                source_label: collection.name.clone(),
+                            });
+                            result.albums.len() - 1
+                        });
+                    for row in hit.sources.iter().filter(|row| row.primary_playback()) {
+                        let track = remote_track(key, id, collection.id, &hit.song.artist, row);
+                        if !result.albums[index].tracks.iter().any(|t| t.id == track.id) {
+                            result.albums[index].tracks.push(track);
+                        }
+                    }
+                }
+                cursor = page.next_cursor;
+                if let Some(c) = &cursor {
+                    anyhow::ensure!(
+                        seen.insert(c.clone()) && seen.len() <= 100,
+                        "Invalid song pagination"
+                    );
+                } else {
+                    break;
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    pub async fn refresh_artwork(
+        &self,
+        key: ConnectionKey,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<BTreeMap<String, String>> {
+        let snapshot = self.snapshot(key)?.context("Library unavailable")?;
+        let mut artwork = snapshot.artwork.clone();
+        let mut failures = 0;
+        for (id, (collection, asset, revision)) in &snapshot.artwork_descriptors {
+            check(cancelled)?;
+            if artwork
+                .get(id)
+                .is_some_and(|p| std::path::Path::new(p).is_file())
+            {
+                continue;
+            }
+            if let Ok(bytes) = remote_read(
+                cancelled,
+                self.client(key)?
+                    .thumbnail_at(*collection, *asset, Some(*revision)),
+            )
+            .await
+            {
+                check(cancelled)?;
+                let filename = hex::encode(Sha256::digest(
+                    format!("{}/{collection}/{asset}/{}", connection_id(key), revision.0)
+                        .as_bytes(),
+                ));
+                let path = self.root.join("art").join(filename);
+                self.prune_artwork(bytes.len() as u64)?;
+                std::fs::write(&path, bytes)?;
+                artwork.insert(id.clone(), path.to_string_lossy().into_owned());
+            } else {
+                failures += 1;
+            }
+        }
+        check(cancelled)?;
+        let latest = self.update_snapshot(key, |latest| {
+            check(cancelled)?;
+            for (id, path) in &artwork {
+                if latest.artwork_descriptors.get(id) == snapshot.artwork_descriptors.get(id) {
+                    latest.artwork.insert(id.clone(), path.clone());
+                }
+            }
+            Ok(())
+        })?;
+        if failures > 0 {
+            bail!("{failures} covers could not be loaded; titles are available");
+        }
+        Ok(latest.artwork)
+    }
+
     pub fn project_library(&self, library: &mut Library, online: bool) -> Result<()> {
         let downloaded = self
             .downloads()?
@@ -230,6 +409,10 @@ mod tests {
             collections: vec![],
             lists: vec![],
             album_collections: Default::default(),
+            album_revisions: Default::default(),
+            track_revisions: Default::default(),
+            artwork_descriptors: Default::default(),
+            summaries_pending: false,
             updated: 0,
         };
         let projected = catalog(&adapter, key, Some(snapshot), true).unwrap();

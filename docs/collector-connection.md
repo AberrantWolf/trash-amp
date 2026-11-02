@@ -33,12 +33,24 @@ fall back to the public control origin. Private includes any reachable trusted
 private route supported by the client; it does not prove physical LAN membership.
 Empty libraries cannot verify streaming until a playable track exists.
 
-While a library refresh is in progress, a banner above the playback controls shows
-the current album page and the number of albums loaded. Its progress bar advances
-after metadata and artwork responses within that page. Waiting for a page uses
-an activity indicator because the server does not advertise the library's total
-size. Playlist loading has its own stage. The banner clears after completion,
-failure, or a source switch; cached browsing remains available throughout.
+Library refresh checks the account, queries the authorized album count, then reads
+compact revision-bound title pages. The client publishes each page immediately and
+shows loaded albums against the queried total. All refresh, progress, retry and
+cache state lives in Trash Amp; Collector stores no client refresh session.
+Missing or changed artwork loads independently. Opening an album validates its
+track-cache header and requests bounded track pages only when needed. Lists load
+contents on open; online song search queries the server without loading every
+album. Pending projections and revision conflicts retry with cancellation and a
+bounded wait. Failures remain visible; a partial refresh never replaces the last
+complete persisted manifest. Source, selection and request serials fence late
+responses, including reopening the same album or list.
+
+Online playback opens the queued media target directly. Retained offline playback
+opens its file and validates recorded length, then reads on demand. Neither hashes
+the whole file before consumption. Open/read/EOF failures reach normal track error
+recovery, which records the failed attempt and advances the queue. Completed
+downloads still verify their full bytes; playback does not pre-detect same-length
+silent corruption.
 
 Credentials are stored through macOS Keychain. Enrollment supports system HTTPS
 trust and explicit owner PEM/pairing material for control. Private media uses

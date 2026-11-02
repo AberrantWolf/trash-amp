@@ -66,6 +66,16 @@ Fully disabled, mono-output, and unsupported-rate paths bypass the effect.
 Generation changes, underruns, and stream recreation clear filter history;
 ordinary pauses freeze it, and uninterrupted track boundaries retain it.
 
+## Incremental remote catalogs
+
+The source adapter owns remote count/page/cache protocols. `amp-app` accepts fenced
+incremental publications and owns source selection, while UI workers request album
+or list contents on demand and discard superseded replies. Completed manifests and
+per-album caches are distinct from transient partial pages; manifest commit merges
+concurrent album loads. Artwork and online song search have independent worker
+paths. Media resolution consumes queued targets without re-enumerating catalogs.
+See [Collector connection](collector-connection.md) for the current contract.
+
 ## Catalog and metadata
 
 One browsing source is active at a time; the catalog owner persists its stable source ID independently of UI/provider presentation. Provider media resolvers remain registered for the lifetime of playback, so queued items survive browsing-source changes. One folder library is active at a time. Each canonical folder path has its own catalog in `folder_libraries`, and `state.active_folder` records the last selected folder. Legacy `state.library` snapshots migrate transactionally on open. Selecting a saved folder loads its catalog without filesystem access; explicit refresh rescans it. Failed scans preserve the saved catalog. Cache stays on local storage; source media is read-only.

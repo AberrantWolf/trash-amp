@@ -7,6 +7,7 @@ use amp_collector::{
 use anyhow::Context;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 struct View {
     connections: Vec<SavedConnection>,
     selected: Option<ConnectionKey>,
@@ -30,6 +31,20 @@ enum Event {
     Message(String),
     Mutation(u64, ConnectionKey, anyhow::Result<()>),
     Downloads,
+    AlbumLoaded(
+        u64,
+        ConnectionKey,
+        amp_core::ItemId,
+        u64,
+        anyhow::Result<Box<amp_core::Album>>,
+    ),
+    ListLoaded(
+        u64,
+        ConnectionKey,
+        ids::CollectionListId,
+        u64,
+        anyhow::Result<()>,
+    ),
     Removed(ConnectionKey, anyhow::Result<()>),
     ConnectionChecked(u64, ConnectionKey, ConnectionState),
 }
@@ -44,6 +59,11 @@ pub struct Controller {
     connection_probe: Option<(u64, ConnectionKey, std::time::Instant, bool)>,
     open_url: crate::UrlOpener,
     source_revision: u64,
+    album_request: Option<(u64, amp_core::ItemId, u64)>,
+    read_serial: u64,
+    album_cancel: Arc<std::sync::atomic::AtomicBool>,
+    list_cancel: Arc<std::sync::atomic::AtomicBool>,
+    list_request: Option<(u64, ids::CollectionListId, u64)>,
 }
 fn connection_kind(state: ConnectionState) -> ConnectionKind {
     match state {
@@ -814,11 +834,120 @@ impl Controller {
             connection_probe: None,
             open_url,
             source_revision: state.borrow().catalog.snapshot().library_revision,
+            album_request: None,
+            read_serial: 0,
+            album_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            list_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            list_request: None,
         })
     }
     pub fn poll(&mut self) {
         let Some(ui) = self.ui.upgrade() else { return };
         let catalog = self.state.borrow().catalog.snapshot();
+        let selected = {
+            let state = self.state.borrow();
+            if ui.get_show_library()
+                || ui.get_show_queue()
+                || ui.get_lists_open()
+                || ui.get_artist_view()
+                || ui.get_home()
+                || ui.get_settings()
+            {
+                None
+            } else {
+                state
+                    .selected
+                    .and_then(|index| state.library.albums.get(index))
+                    .map(|a| a.id.clone())
+            }
+        };
+        let key = self.view.borrow().selected.filter(|key| {
+            catalog.generation == self.generation.current()
+                && catalog.source == CatalogSource::External(amp_collector::source_id(*key))
+        });
+        if let (Some(id), Some(key)) = (selected, key) {
+            let request = (catalog.generation, id.clone());
+            if catalog.source_online == Some(true)
+                && !self
+                    .album_request
+                    .as_ref()
+                    .is_some_and(|(version, id, _)| (*version, id) == (request.0, &request.1))
+            {
+                self.read_serial = self.read_serial.wrapping_add(1);
+                let serial = self.read_serial;
+                self.album_request = Some((request.0, request.1, serial));
+                self.album_cancel.store(true, Ordering::Release);
+                self.album_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let cancelled = self.album_cancel.clone();
+                ui.set_collector_album_loading(true);
+                ui.set_status("Loading album tracks…".into());
+                let adapter = self.adapter.clone();
+                let generation = self.generation.clone();
+                let tx = self.tx.clone();
+                let v = catalog.generation;
+                std::thread::spawn(move || {
+                    let result = (|| {
+                        runtime()?.block_on(adapter.load_album(key, id.item.parse()?, &|| {
+                            generation.current() != v || cancelled.load(Ordering::Acquire)
+                        }))
+                    })();
+                    let _ = tx.send(Event::AlbumLoaded(v, key, id, serial, result.map(Box::new)));
+                });
+            }
+        } else {
+            self.album_request = None;
+            self.album_cancel.store(true, Ordering::Release);
+            ui.set_collector_album_loading(false);
+        }
+        let list = if ui.get_lists_open() {
+            self.view.borrow().list.and_then(|index| {
+                self.view
+                    .borrow()
+                    .snapshot
+                    .as_ref()?
+                    .lists
+                    .get(index)
+                    .map(|l| (l.list.id, l.entries.items.len() as u32, l.list.entry_count))
+            })
+        } else {
+            None
+        };
+        if let (Some(key), Some((list, loaded, total))) = (key, list) {
+            let request = (catalog.generation, list);
+            if !catalog.scanning
+                && catalog.source_online == Some(true)
+                && loaded < total
+                && self
+                    .list_request
+                    .is_none_or(|(version, id, _)| (version, id) != request)
+            {
+                self.read_serial = self.read_serial.wrapping_add(1);
+                let serial = self.read_serial;
+                self.list_request = Some((request.0, request.1, serial));
+                ui.set_collector_list_loading(true);
+                ui.set_status("Loading playlist entries…".into());
+                self.list_cancel.store(true, Ordering::Release);
+                self.list_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let cancelled = self.list_cancel.clone();
+                let adapter = self.adapter.clone();
+                let generation = self.generation.clone();
+                let tx = self.tx.clone();
+                let v = catalog.generation;
+                std::thread::spawn(move || {
+                    let result = (|| {
+                        runtime()?.block_on(adapter.load_list(key, list, &|| {
+                            generation.current() != v || cancelled.load(Ordering::Acquire)
+                        }))
+                    })();
+                    let _ = tx.send(Event::ListLoaded(v, key, list, serial, result));
+                });
+            }
+        } else {
+            self.list_request = None;
+            ui.set_collector_list_loading(false);
+            self.list_cancel.store(true, Ordering::Release);
+        }
+
         if catalog.generation == self.generation.current()
             && self.source_revision != catalog.library_revision
         {
@@ -854,7 +983,7 @@ impl Controller {
                     .list
                     .and_then(|i| view.snapshot.as_ref()?.lists.get(i))
                     .map(|l| l.list.id);
-                view.snapshot = self.adapter.snapshot(key).ok().flatten();
+                view.snapshot = self.adapter.display_snapshot(key).ok().flatten();
                 if let Some(snapshot) = &mut view.snapshot {
                     snapshot.library = (*catalog.library).clone();
                     snapshot.artwork = (*catalog.artwork).clone();
@@ -975,6 +1104,44 @@ impl Controller {
                     }
                     ui.set_collector_online(online);
                 }
+                Event::AlbumLoaded(v, key, id, serial, result)
+                    if self.album_request.as_ref() == Some(&(v, id.clone(), serial))
+                        && v == current
+                        && self.view.borrow().selected == Some(key) =>
+                {
+                    ui.set_collector_album_loading(false);
+                    match result {
+                        Ok(album) => self.state.borrow().catalog.loaded_external_album(
+                            v,
+                            amp_collector::source_id(key),
+                            *album,
+                        ),
+                        Err(error) => {
+                            ui.set_status(format!("Could not load album tracks: {error}").into())
+                        }
+                    }
+                }
+                Event::ListLoaded(v, key, id, serial, result)
+                    if self.list_request == Some((v, id, serial))
+                        && v == current
+                        && self.view.borrow().selected == Some(key) =>
+                {
+                    ui.set_collector_list_loading(false);
+                    match result {
+                        Err(error) => {
+                            ui.set_status(format!("Could not load playlist: {error}").into())
+                        }
+                        Ok(()) => {
+                            let mut view = self.view.borrow_mut();
+                            if let Ok(Some(snapshot)) = self.adapter.snapshot(key) {
+                                view.list =
+                                    snapshot.lists.iter().position(|list| list.list.id == id);
+                                view.snapshot = Some(snapshot);
+                                render_list(&ui, &view, &self.adapter);
+                            }
+                        }
+                    }
+                }
                 Event::Downloads
                     if self.view.borrow().selected.is_some() && ui.get_collector_active() =>
                 {
@@ -1051,6 +1218,13 @@ fn read_trust(path: &Path) -> anyhow::Result<String> {
         anyhow::bail!("Trust file exceeds 64 KiB")
     };
     Ok(String::from_utf8(bytes)?)
+}
+
+impl Drop for Controller {
+    fn drop(&mut self) {
+        self.album_cancel.store(true, Ordering::Release);
+        self.list_cancel.store(true, Ordering::Release);
+    }
 }
 
 #[cfg(test)]
@@ -1172,6 +1346,10 @@ mod tests {
                 lists: vec![list],
                 artwork: Default::default(),
                 album_collections: Default::default(),
+                album_revisions: Default::default(),
+                track_revisions: Default::default(),
+                artwork_descriptors: Default::default(),
+                summaries_pending: false,
                 updated: 0,
             }),
             list: Some(0),
@@ -1380,6 +1558,178 @@ mod tests {
         drop(state);
         std::fs::remove_dir_all(data).unwrap();
     }
+    #[test]
+    fn obsolete_same_target_completions_do_not_settle_reopened_album_or_list() {
+        use amp_app::sources::{SourceDescriptor, SourceProvider};
+        struct OfflineSource {
+            id: String,
+            library: Library,
+        }
+        impl SourceProvider for OfflineSource {
+            fn descriptors(&self) -> anyhow::Result<Vec<SourceDescriptor>> {
+                Ok(vec![SourceDescriptor {
+                    id: self.id.clone(),
+                    name: "Offline fixture".into(),
+                    provider: "collector".into(),
+                }])
+            }
+            fn load(
+                &self,
+                _: &str,
+                _: bool,
+                _: &dyn Fn() -> bool,
+            ) -> anyhow::Result<amp_app::catalog::ExternalCatalog> {
+                Ok(amp_app::catalog::ExternalCatalog {
+                    source: self.id.clone(),
+                    online: Some(false),
+                    library: self.library.clone(),
+                    artwork: Default::default(),
+                })
+            }
+        }
+        i_slint_backend_testing::init_no_event_loop();
+        let data = std::env::temp_dir().join(format!("trash-load-fence-{}", uuid::Uuid::new_v4()));
+        let services = TestServices::new(&data.join("library.sqlite3"));
+        let key = ConnectionKey {
+            server_id: ids::ServerId::new(),
+            user_id: ids::UserId::new(),
+        };
+        let source = amp_collector::source_id(key);
+        let mut library = amp_library::demo_library();
+        library.id = source.clone();
+        library.root = source.clone();
+        library.albums.truncate(1);
+        library.albums[0].tracks.clear();
+        library.albums[0].id = amp_core::ItemId {
+            library: source.clone(),
+            provider: "collector".into(),
+            item: ids::ItemId::new().to_string(),
+        };
+        let album = library.albums[0].id.clone();
+        let catalog = services.catalog();
+        catalog.register_sources(
+            vec![Arc::new(OfflineSource {
+                id: source.clone(),
+                library: library.clone(),
+            })],
+            false,
+        );
+        catalog.bootstrap_snapshot().unwrap();
+        catalog.select_source(source.clone());
+        let started = std::time::Instant::now();
+        loop {
+            let snapshot = catalog.bootstrap_snapshot().unwrap();
+            if snapshot.source == CatalogSource::External(source.clone()) && !snapshot.scanning {
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(3));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let state = test_state(&services, library.clone());
+        state.borrow_mut().selected = Some(0);
+        let ui = PlayerWindow::new().unwrap();
+        ui.set_home(false);
+        ui.set_show_library(false);
+        ui.set_show_queue(false);
+        ui.set_artist_view(false);
+        let mut controller = Controller::new(
+            &ui,
+            &state,
+            Adapter::open(&data.join("collector")).unwrap(),
+            catalog.generation(),
+            |_, done| done(Ok(())),
+        )
+        .unwrap();
+        controller.view.borrow_mut().selected = Some(key);
+        let v = catalog.generation().current();
+        // Reopening A after A/B leaves the same target but a distinct attempt.
+        controller.album_request = Some((v, album.clone(), 3));
+        ui.set_collector_album_loading(true);
+        ui.set_status("Current album load".into());
+        controller
+            .tx
+            .send(Event::AlbumLoaded(
+                v,
+                key,
+                album.clone(),
+                1,
+                Err(anyhow::anyhow!("obsolete album failure")),
+            ))
+            .unwrap();
+        controller.poll();
+        assert!(ui.get_collector_album_loading());
+        assert!(!ui.get_status().contains("obsolete"));
+        controller
+            .tx
+            .send(Event::AlbumLoaded(
+                v,
+                key,
+                album,
+                3,
+                Err(anyhow::anyhow!("current album failure")),
+            ))
+            .unwrap();
+        controller.poll();
+        assert!(!ui.get_collector_album_loading());
+        assert!(ui.get_status().contains("current album failure"));
+        let list_id = ids::CollectionListId::new();
+        let list = api::CollectionListView {
+            list: api::CollectionListSummary {
+                id: list_id,
+                collection_id: ids::CollectionId::new(),
+                revision: ids::Revision(1),
+                name: "Fixture list".into(),
+                kind: ids::CollectionListKind::MusicTracks,
+                entry_count: 0,
+                can_edit: false,
+            },
+            entries: ids::Page {
+                items: Vec::new(),
+                next_cursor: None,
+            },
+        };
+        let snapshot:Snapshot=serde_json::from_value(serde_json::json!({"library":library,"collections":[],"lists":[list],"artwork":{},"album_collections":{},"updated":0})).unwrap();
+        {
+            let mut view = controller.view.borrow_mut();
+            view.snapshot = Some(snapshot);
+            view.list = Some(0);
+        }
+        ui.set_lists_open(true);
+        ui.set_collector_list_loading(true);
+        controller.list_request = Some((v, list_id, 9));
+        ui.set_status("Current list load".into());
+        controller
+            .tx
+            .send(Event::ListLoaded(
+                v,
+                key,
+                list_id,
+                7,
+                Err(anyhow::anyhow!("obsolete list failure")),
+            ))
+            .unwrap();
+        controller.poll();
+        assert!(ui.get_collector_list_loading());
+        assert!(!ui.get_status().contains("obsolete"));
+        controller
+            .tx
+            .send(Event::ListLoaded(
+                v,
+                key,
+                list_id,
+                9,
+                Err(anyhow::anyhow!("current list failure")),
+            ))
+            .unwrap();
+        controller.poll();
+        assert!(!ui.get_collector_list_loading());
+        assert!(ui.get_status().contains("current list failure"));
+        drop(controller);
+        drop(state);
+        drop(services);
+        std::fs::remove_dir_all(data).unwrap();
+    }
+
     #[test]
     fn collector_download_completions_do_not_rewrite_device_music_tracks() {
         i_slint_backend_testing::init_no_event_loop();

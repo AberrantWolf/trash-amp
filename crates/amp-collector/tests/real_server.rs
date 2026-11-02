@@ -359,6 +359,7 @@ impl Fixture {
         }
     }
     async fn enroll(&self, secrets: &Secrets) -> ConnectionKey {
+        while self._state.service.rebuild_next_library_entry().unwrap() {}
         let client = self.pairing.lan_client().unwrap();
         let base = self.pairing.endpoints[0].url.to_string();
         let mut pending =
@@ -488,7 +489,7 @@ async fn refresh_retains_every_album_across_bounded_pages() {
     let mut expected = std::collections::BTreeSet::from([first.to_string()]);
     // Cross multiple refresh pages, including a final partial page. Albums
     // without media must also survive pagination alongside the playable album.
-    for index in 0..41 {
+    for index in 0..204 {
         let id = ItemId::new();
         let item = Item {
             lifecycle: Default::default(),
@@ -536,27 +537,21 @@ async fn refresh_retains_every_album_across_bounded_pages() {
     let progress = progress.into_inner().unwrap();
     let pages = progress
         .iter()
-        .filter(|value| value.completed == 1 && value.total.is_some_and(|total| total > 1))
+        .filter(|p| p.total.is_some())
         .collect::<Vec<_>>();
-    assert_eq!(pages.len(), 3);
-    for page in pages {
-        let updates = progress
-            .iter()
-            .filter(|value| {
-                value
-                    .message
-                    .split(" · ")
-                    .take(2)
-                    .eq(page.message.split(" · ").take(2))
-                    && value.total == page.total
-            })
-            .collect::<Vec<_>>();
-        let completed = updates
-            .iter()
-            .map(|value| value.completed)
-            .collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(completed, (1..=page.total.unwrap()).collect());
-    }
+    assert!(pages.len() > 1, "fixture must cross a page boundary");
+    assert_eq!(
+        pages.first().unwrap().completed,
+        0,
+        "count must be published before title-page progress"
+    );
+    assert!(
+        pages
+            .windows(2)
+            .all(|pair| pair[0].completed < pair[1].completed)
+    );
+    assert!(pages.iter().all(|page| page.total == Some(expected.len())));
+    assert_eq!(pages.last().unwrap().completed, expected.len());
     let actual = snapshot
         .library
         .albums
@@ -571,7 +566,22 @@ async fn refresh_retains_every_album_across_bounded_pages() {
             .library
             .albums
             .iter()
-            .any(|album| { album.id.item == first.to_string() && !album.tracks.is_empty() })
+            .all(|album| album.tracks.is_empty()),
+        "title refresh must not fetch album tracks"
+    );
+    adapter.load_album(key, first, &|| false).await.unwrap();
+    assert!(
+        !adapter
+            .snapshot(key)
+            .unwrap()
+            .unwrap()
+            .library
+            .albums
+            .iter()
+            .find(|album| album.id.item == first.to_string())
+            .unwrap()
+            .tracks
+            .is_empty()
     );
     assert_eq!(
         adapter.snapshot(key).unwrap().unwrap().library.albums.len(),
@@ -596,8 +606,8 @@ async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
             .save_connection(&credential, credential.pairing.endpoints[0].url.to_string())
             .unwrap();
     }
-    let a = adapter.refresh(one, &|| false).await.unwrap();
-    let b = adapter.refresh(two, &|| false).await.unwrap();
+    let a = refresh_open(&adapter, one).await;
+    let b = refresh_open(&adapter, two).await;
     adapter.select(Some(two)).unwrap();
     let matching = adapter.album_matching_url(&a.library.albums[0].id).unwrap();
     assert_eq!(
@@ -682,7 +692,7 @@ async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
             .await
             .unwrap();
     }
-    let snapshot = adapter.refresh(one, &|| false).await.unwrap();
+    let snapshot = refresh_open(&adapter, one).await;
     assert_eq!(snapshot.lists[0].entries.items.len(), 2);
     assert_ne!(
         snapshot.lists[0].entries.items[0].id,
@@ -752,7 +762,7 @@ async fn digital_flac_mp3_stream_seek_download_and_offline_reopen() {
     let key = fixture.enroll(&secrets).await;
     let cache = tempfile::tempdir().unwrap();
     let adapter = Adapter::with_credentials(cache.path(), secrets.clone()).unwrap();
-    let snapshot = adapter.refresh(key, &|| false).await.unwrap();
+    let snapshot = refresh_open(&adapter, key).await;
     let album = snapshot
         .library
         .albums
@@ -851,7 +861,7 @@ async fn purchased_originals_reach_the_real_audio_output_callback() {
     let key = fixture.enroll(&secrets).await;
     let cache = tempfile::tempdir().unwrap();
     let adapter = Adapter::with_credentials(cache.path(), secrets).unwrap();
-    let snapshot = adapter.refresh(key, &|| false).await.unwrap();
+    let snapshot = refresh_open(&adapter, key).await;
     let tracks = snapshot
         .library
         .albums
@@ -910,7 +920,7 @@ async fn connection_indicator_respects_public_streaming_policy() {
                 fixture.pairing.endpoints[0].url.to_string(),
             )
             .unwrap();
-        adapter.refresh(key, &|| false).await.unwrap();
+        refresh_open(&adapter, key).await;
         let probe = adapter.clone();
         assert_eq!(
             tokio::task::spawn_blocking(move || probe.connection_state(key))
@@ -960,7 +970,7 @@ fn direct_https_adapter_fixture() {
         .enable_all()
         .build()
         .unwrap();
-    let snapshot = runtime.block_on(adapter.refresh(key, &|| false)).unwrap();
+    let snapshot = runtime.block_on(refresh_open(&adapter, key));
     let expected = match std::env::var("TRASH_AMP_HTTPS_EXPECTED").unwrap().as_str() {
         "lan" => ConnectionState::Lan,
         "direct" => ConnectionState::Direct,
@@ -1070,4 +1080,110 @@ async fn direct_https_stream_seek_download_and_offline_with_route_indicator() {
             );
         }
     }
+}
+
+// Media journeys explicitly load the album/list/artwork layers they exercise.
+#[cfg(test)]
+async fn refresh_open(
+    adapter: &amp_collector::Adapter,
+    key: ConnectionKey,
+) -> amp_collector::Snapshot {
+    let snapshot = adapter.refresh(key, &|| false).await.unwrap();
+    for album in &snapshot.library.albums {
+        adapter
+            .load_album(key, album.id.item.parse().unwrap(), &|| false)
+            .await
+            .unwrap();
+    }
+    for list in &snapshot.lists {
+        adapter
+            .load_list(key, list.list.id, &|| false)
+            .await
+            .unwrap();
+    }
+    adapter.refresh_artwork(key, &|| false).await.unwrap();
+    adapter.snapshot(key).unwrap().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn selected_album_loads_before_the_title_refresh_commits_its_manifest() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let item = ItemId::new();
+    let fixture = Fixture::new(item, "Selected album").await;
+    let secrets = Arc::new(Secrets::default());
+    let key = fixture.enroll(&secrets).await;
+    let root = tempfile::tempdir().unwrap();
+    let adapter = Adapter::with_credentials(root.path(), secrets).unwrap();
+    let loaded = Mutex::new(false);
+    let snapshot = adapter
+        .refresh_incremental(key, &|| false, &|_| {}, &|page| {
+            if page
+                .library
+                .albums
+                .iter()
+                .any(|a| a.id.item == item.to_string())
+            {
+                assert!(
+                    adapter.snapshot(key).unwrap().is_none(),
+                    "the final manifest must still be uncommitted"
+                );
+                let a = adapter.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    let _ = tx.send(runtime.block_on(a.load_album(key, item, &|| false)));
+                });
+                let album = rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("album load stalled behind title refresh")
+                    .unwrap();
+                assert!(!album.tracks.is_empty());
+                *loaded.lock().unwrap() = true;
+            }
+        })
+        .await
+        .unwrap();
+    assert!(*loaded.lock().unwrap());
+    assert!(!snapshot.library.albums[0].tracks.is_empty());
+    let search = adapter.search_tracks(key, "Song", &|| false).await.unwrap();
+    assert!(
+        !search.albums.is_empty(),
+        "online song search must work independently of album opening"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn client_requeries_counts_and_pages_until_pending_details_settle_without_loading_tracks() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let fixture = Fixture::new(ItemId::new(), "Existing album").await;
+    let secrets = Arc::new(Secrets::default());
+    let key = fixture.enroll(&secrets).await;
+    // Publication changes the catalog after the first background backfill.
+    fixture.add_digital_purchase();
+    let root = tempfile::tempdir().unwrap();
+    let adapter = Adapter::with_credentials(root.path(), secrets).unwrap();
+    let observed_pending = std::sync::atomic::AtomicBool::new(false);
+    let result = adapter
+        .refresh_catalog(key, &|| false, &|_| {}, &|snapshot| {
+            if snapshot.summaries_pending {
+                observed_pending.store(true, std::sync::atomic::Ordering::Release);
+                while fixture._state.service.rebuild_next_library_entry().unwrap() {}
+            }
+        })
+        .await
+        .unwrap();
+    assert!(observed_pending.load(std::sync::atomic::Ordering::Acquire));
+    assert!(!result.summaries_pending);
+    assert_eq!(result.library.albums.len(), 2);
+    assert!(
+        result
+            .library
+            .albums
+            .iter()
+            .all(|album| album.tracks.is_empty()),
+        "retries must remain title-only reads"
+    );
 }

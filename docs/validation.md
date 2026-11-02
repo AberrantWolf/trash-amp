@@ -1,3 +1,54 @@
+## Published Collector pin and final review — 2026-11-02
+
+All Collector production and test dependencies now pin
+[`fb0354665e48f399cdd640ca1d395712ae567ddf`](https://github.com/AberrantWolf/junk-collector/commit/fb0354665e48f399cdd640ca1d395712ae567ddf),
+verified on GitHub main. That commit includes the complete layered-refresh,
+playback, album-adoption/manual-mapping and automatic-cover work. Cargo.lock
+resolves all Collector crates from that Git revision. The development-only
+`local-collector.toml` override has been removed.
+
+Review adds immediate zero-of-total progress after the count response, before
+waiting for any title page. The real TLS regression checks typed progress rather
+than display wording. Shared client validation also protects direct track-page
+reads against non-advancing/skipped cursors, inconsistent totals, stale revisions
+and malformed pending responses.
+
+The actual Git dependency passes **248 workspace tests, zero failures, three
+existing ignores** and strict workspace/all-target Clippy with `--locked`.
+The first test invocation resolved the new source into Cargo.lock, then executed
+the workspace tests; Clippy validates that resulting lock without updates.
+Commands use the existing native target cache, with no path override. Logs:
+`/private/tmp/trash-layered-git-pin-tests.log` and
+`/private/tmp/trash-layered-git-pin-clippy.log`. Formatting/diff checks pass.
+Collector's fresh complete-source qualification passes 606 Rust tests and its six
+affected browser journeys; unchanged journeys retain the dated all-30 baseline.
+
+The user approved main integration and removal of the isolated worktree on
+2026-11-02. Integration preserves the validated runtime source and published
+Collector pin; formatting and diff checks were repeated before merging.
+
+## Layered refresh and demand-driven playback — 2026-11-02
+
+This source delivery supersedes the within-page eager track/artwork loading below.
+Counts and bounded title pages now drive client-owned progress; tracks/lists load
+on demand, artwork loads independently, and online search uses server queries.
+No Collector client sessions or whole-file playback verification are introduced.
+Regression coverage includes real TLS pagination, a selected album finishing at the
+last-page callback before manifest commit, pending projections during refresh,
+stale same-target reopen responses, offline demand reads and existing queue-error
+recovery. Workspace tests pass **248 tests, zero failures, three existing ignores**;
+strict workspace/all-target Clippy, format and diff checks pass. Native Slint loading
+states were rendered and inspected at 390×844 and 1100×760. Coordinated Collector
+qualification passes 602 Rust tests and all 30 broad browser journeys, with focused
+follow-ups after the final artwork and busy-response changes. Full evidence and
+failed attempts are retained in Collector's
+`docs/validation/layered-library-refresh-2026-11-02.md` record.
+
+Initial implementation used the isolated `codex/layered-library-refresh`
+worktree. Initial qualification used `--config local-collector.toml --locked` with local path
+overrides. The published Git pin above supersedes that development setup.
+This is not a phone installation or release qualification.
+
 ## Library refresh progress — 2026-11-02
 
 Library loading now publishes worker progress to the catalog snapshot through an

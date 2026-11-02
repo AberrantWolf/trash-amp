@@ -166,6 +166,42 @@ impl Catalog {
     pub fn register_sources(&self, providers: Vec<Arc<dyn SourceProvider>>, folders: bool) {
         self.send(Command::RegisterSources(providers, folders));
     }
+    /// Called on a search worker; selection and returned results stay client-owned.
+    pub fn search_source(
+        &self,
+        query: &str,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<Library>> {
+        let before = self.snapshot();
+        let Source::External(expected) = before.source else {
+            return Ok(None);
+        };
+        if before.source_online != Some(true) {
+            return Ok(None);
+        }
+        let (tx, rx) = mpsc::channel();
+        self.send(Command::SearchProvider(tx));
+        let provider = loop {
+            if cancelled() || self.generation.current() != before.generation {
+                return Ok(None);
+            }
+            match rx.recv_timeout(std::time::Duration::from_millis(20)) {
+                Ok(provider) => break provider,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => return Ok(None),
+            }
+        };
+        if let Some((id, provider)) = provider
+            && id == expected
+        {
+            provider.search(&id, query, cancelled)
+        } else {
+            Ok(None)
+        }
+    }
+    pub fn loaded_external_album(&self, version: u64, source: String, album: Album) {
+        self.send(Command::ExternalAlbum(version, source, album));
+    }
     pub fn source_changed(&self, change: SourceChange) {
         self.send(Command::SourceChanged(change));
     }
@@ -376,10 +412,13 @@ impl Drop for CatalogService {
 }
 
 enum Command {
+    ExternalAlbum(u64, String, Album),
+    SearchProvider(mpsc::Sender<Option<(String, Arc<dyn SourceProvider>)>>),
     RegisterSources(Vec<Arc<dyn SourceProvider>>, bool),
     SourceChanged(SourceChange),
     RefreshSources,
     SourceArtwork(SourceRequest, BTreeMap<String, String>),
+    SourceArtworkFailed(SourceRequest, String),
     OpenSource(u64, String, bool, RefreshKind),
     SourceLoaded(SourceRequest, bool, Result<ExternalCatalog>),
     SourceProgress(SourceRequest, SourceProgress),
@@ -808,8 +847,18 @@ impl Worker {
                         let _ = tx.send(Command::SourceProgress(request.clone(), progress));
                     }
                 };
-                let result =
-                    provider.load_with_progress(&request.id, interactive, &obsolete, &progress);
+                let publish = |data| {
+                    if !obsolete() {
+                        let _ = tx.send(Command::SourceLoaded(request.clone(), false, Ok(data)));
+                    }
+                };
+                let result = provider.load_incremental(
+                    &request.id,
+                    interactive,
+                    &obsolete,
+                    &progress,
+                    &publish,
+                );
                 // Only adapters that actually supply artwork retain another catalog.
                 let artwork_catalog = if provider.has_artwork() {
                     result.as_ref().ok().cloned()
@@ -819,9 +868,17 @@ impl Worker {
                 let _ = tx.send(Command::SourceLoaded(request.clone(), true, result));
                 if let Some(data) = artwork_catalog
                     && !obsolete()
-                    && let Ok(Some(artwork)) = provider.artwork(&data, &obsolete)
                 {
-                    let _ = tx.send(Command::SourceArtwork(request, artwork));
+                    match provider.artwork(&data, &obsolete) {
+                        Ok(Some(artwork)) => {
+                            let _ = tx.send(Command::SourceArtwork(request, artwork));
+                        }
+                        Err(error) => {
+                            let _ =
+                                tx.send(Command::SourceArtworkFailed(request, error.to_string()));
+                        }
+                        Ok(None) => {}
+                    }
                 }
             });
         if let Err(error) = spawned {
@@ -882,6 +939,12 @@ impl Worker {
                     self.open_source(self.generation.current(), id, false, RefreshKind::Live)?;
                 }
             }
+            Command::SourceArtworkFailed(request, error)
+                if self.source_request_current(&request) =>
+            {
+                self.notice(format!("Artwork refresh incomplete: {error}"));
+                self.queue_source_refresh(request.id, RefreshKind::Cached);
+            }
             Command::SourceArtwork(request, artwork)
                 if self.source_request_current(&request)
                     && self.state.source == Source::External(request.id.clone())
@@ -895,6 +958,33 @@ impl Worker {
                     self.state.library.clone(),
                     self.state.artwork.clone(),
                 );
+            }
+            Command::ExternalAlbum(version, source, album)
+                if self.current(version)
+                    && self.state.source == Source::External(source.clone()) =>
+            {
+                if let Some(row) = Arc::make_mut(&mut self.state.library)
+                    .albums
+                    .iter_mut()
+                    .find(|row| row.id == album.id)
+                {
+                    row.tracks = album.tracks;
+                    self.state.library_revision += 1;
+                    self.playback.refresh_catalog_metadata(
+                        self.state.library.clone(),
+                        self.state.artwork.clone(),
+                    );
+                }
+            }
+            Command::SearchProvider(reply) => {
+                let selected = match &self.state.source {
+                    Source::External(id) => self
+                        .source_registry
+                        .get(id)
+                        .map(|provider| (id.clone(), provider.clone())),
+                    _ => None,
+                };
+                let _ = reply.send(selected);
             }
             Command::SourceChanged(change) => {
                 let SourceChange { id, refresh } = change;
@@ -972,6 +1062,8 @@ impl Worker {
                                 .count();
                             self.state.source_message = Some(if !final_result {
                                 "Loading music library…".into()
+                            } else if total == 0 && !data.library.albums.is_empty() {
+                                format!("{} albums", data.library.albums.len())
                             } else if total == 0 {
                                 "No music found in this library.".into()
                             } else if playable == 0 {
