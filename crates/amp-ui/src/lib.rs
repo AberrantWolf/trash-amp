@@ -1277,6 +1277,60 @@ impl TestServices {
 mod tests {
     use super::*;
     #[test]
+    fn playback_dock_fills_phone_width_and_wraps_status_without_losing_tracks() {
+        use i_slint_backend_testing::ElementHandle;
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.set_show_library(false);
+        ui.show().unwrap();
+        for (width, height, wide, scale) in [
+            (390., 844., false, 1.),
+            (375., 812., false, 1.5),
+            (980., 680., true, 1.),
+        ] {
+            ui.set_wide(wide);
+            ui.set_text_scale(scale);
+            ui.window().set_size(slint::LogicalSize::new(width, height));
+            ui.set_status("Playing".into());
+            let status = || {
+                ElementHandle::find_by_accessible_label(&ui, "Playback status")
+                    .next()
+                    .unwrap()
+            };
+            let single_line_height = status().size().height;
+            ui.set_status("Playing downloaded audio. The server is unavailable; reconnect to refresh your library.".into());
+            let dock = ElementHandle::find_by_accessible_label(&ui, "Playback dock")
+                .next()
+                .unwrap();
+            let frame = if wide { 12. } else { 0. };
+            assert!((dock.absolute_position().x - frame).abs() < 1.);
+            assert!((dock.size().width - (width - frame * 2.)).abs() < 1.);
+            assert!(
+                (dock.absolute_position().y + dock.size().height - (height - frame)).abs() < 1.
+            );
+            if !wide {
+                assert!(
+                    status().size().height > single_line_height,
+                    "Phone status wraps"
+                );
+                assert!(
+                    (status().absolute_position().x + status().size().width / 2. - width / 2.)
+                        .abs()
+                        < 1.,
+                    "Phone status is centered"
+                );
+            }
+            let tracks = ElementHandle::find_by_accessible_label(&ui, "Album tracks")
+                .next()
+                .unwrap();
+            assert!(
+                tracks.size().height > 200.,
+                "The dock leaves a useful track viewport"
+            );
+            assert!(status().absolute_position().y + status().size().height <= height - 8.);
+        }
+    }
+    #[test]
     fn library_progress_advances_with_responses_and_hides_when_loading_ends() {
         use amp_app::sources::SourceProgress;
         use i_slint_backend_testing::ElementHandle;
@@ -2314,7 +2368,7 @@ mod tests {
             .next()
             .unwrap();
         assert!(
-            (browser.absolute_position().y - 16.).abs() < 1.,
+            (browser.absolute_position().y - 4.).abs() < 1.,
             "No toolbar above browsing"
         );
         assert!(
@@ -2349,7 +2403,7 @@ mod tests {
                 ui.window().set_size(slint::LogicalSize::new(390.0, 760.0));
                 slint::platform::update_timers_and_animations();
                 if show_library {
-                    assert!((pane_width() - 358.0).abs() < 1.0);
+                    assert!((pane_width() - 390.0).abs() < 1.0);
                 }
                 ui.window().set_size(slint::LogicalSize::new(980.0, 680.0));
                 ui.set_wide(true);

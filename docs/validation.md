@@ -810,3 +810,51 @@ workspace all-target Clippy and formatting pass. AVFoundation tests ran outside
 macOS seatbelt. No new UI layout, release, live-service or device acceptance is
 claimed. Both applications retain shared revision
 `0becbd0c382df3d494244c7ccc20de05cba580cf`.
+
+## Edge-to-edge layout — 2026-11-02
+
+The phone layout uses full-width Home, Settings, library, and playback surfaces.
+Its content retains local gutters, with only a 4-point gap below the top safe
+area. The dock background reaches the bottom edge and its foreground consumes
+the system bottom inset once. The inset is omitted while the software keyboard
+is visible. Touch layouts use these surfaces even when a wide viewport enables
+two columns; desktop windows retain a 12-point frame and rounded panels.
+Phone playback status is centered, wraps, and determines its row's height.
+The album-review sheet now respects safe areas and the keyboard boundary.
+
+Design references: [Apple Layout](https://developer.apple.com/design/human-interface-guidelines/layout)
+and [Android edge-to-edge design](https://developer.android.com/design/ui/mobile/guides/layout-and-content/edge-to-edge).
+Backgrounds may reach screen edges; foreground controls and text respect system
+insets. Native status bar visibility remains unchanged.
+
+Inspected headless Skia renders at 390×844, 375×812 with 1.5× text, 980×680,
+and 740×350, plus phone Home. Review images are in `screenshots/layout/`.
+These renders do not emulate hardware cutouts or native status bars. UI regression
+coverage checks dock bounds, centered wrapping, and remaining track space alongside
+the existing navigation, text scaling, input, and appearance checks.
+
+Native simulator follow-up: built and ad-hoc signed the worktree app with
+`scripts/bundle-ios.sh --simulator`, installed it on iPhone 18 Pro / iOS 27.0
+(402×874 points), and exercised it with a temporary XCTest UI harness. The native
+safe-area test passes in portrait Dark, landscape Dark, portrait Light with 1.5×
+text, and Settings. All 46 Rust UI tests, formatting, and diff checks pass.
+
+Portrait controls begin below the 62-point system top inset; the detail header
+starts at y=82 (62 + 4 + 16). The system clock, connectivity, and battery remain
+visible and legible in both appearances. The portrait dock spans x=0…402 and ends
+at y=874. Its centered status text ends at y=840, leaving the 34-point bottom
+safe area intact even when it wraps at larger text sizes. In landscape, controls
+remain inside the 62-point side insets and text clears the bottom gesture area;
+visual review caught and fixed background strips beside the dock by continuing
+its surface through those side insets. Touch-layout status stays centered in
+landscape too.
+
+Native captures are `screenshots/layout/ios-simulator-*.png`; the rounded Dark
+capture uses `simctl io screenshot --mask=black`, including the camera island and
+physical corner mask. The XCTest result is one passing safe-area test, one skipped
+keyboard test, and zero failures. Software-keyboard avoidance is **not verified**:
+the simulator exposes its keyboard offscreen (y=891 on an 874-point screen), even
+after a restart and temporarily disabling its hardware-keyboard preference. That
+preference was restored. Hardware-keyboard search input works. A first-run Music
+Library permission alert was dismissed before the final captures. No physical
+phone test or merge was performed.

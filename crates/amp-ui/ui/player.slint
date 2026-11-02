@@ -169,6 +169,8 @@ export component PlayerWindow inherits Window {
     private property <length> desktop-library-width: min(max(220px * root.text-scale, root.library-width * root.text-scale * 1px), root.content-width * 0.45);
     in property <bool> wide: true;
     in property <bool> touch-input;
+    private property <bool> edge-to-edge: root.touch-input || !root.wide;
+    private property <length> dock-bottom-inset: root.edge-to-edge && root.virtual-keyboard-size.height == 0px ? root.safe-area-insets.bottom : 0px;
     out property <bool> tap-to-play: root.touch-input || !root.wide;
     in property <bool> short: false;
     changed short => { if root.short { root.search-editing = false; } }
@@ -187,12 +189,19 @@ export component PlayerWindow inherits Window {
     callback previous(); callback next(); callback seek(float);
     callback preferences-changed(); callback clear-queue();
     forward-focus: keyboard;
+    // Continue the dock surface through landscape cutout/gesture side insets.
+    // Foreground controls still live inside the safe-area content below.
+    if root.edge-to-edge: Rectangle {
+        y: keyboard.y + keyboard.height - playback-dock.height;
+        width: root.width; height: playback-dock.height;
+        background: Theme.transport;
+    }
     keyboard := FocusScope {
       enabled: root.error-message == "";
       x: root.safe-area-insets.left;
       y: root.safe-area-insets.top;
       width: root.width - root.safe-area-insets.left - root.safe-area-insets.right;
-      height: max(0px, min(root.height - root.safe-area-insets.bottom,
+      height: max(0px, min(root.height - (root.edge-to-edge ? 0px : root.safe-area-insets.bottom),
           root.virtual-keyboard-size.height > 0px ? root.virtual-keyboard-position.y : root.height)
           - root.safe-area-insets.top);
       key-pressed(event) => {
@@ -211,16 +220,21 @@ export component PlayerWindow inherits Window {
         return reject;
       }
       VerticalLayout {
-        padding: 16px; spacing: 8px;
+        // Phone surfaces meet the display edges; spacing belongs to their content.
+        // Keep a modest frame and separated panels in a desktop window.
+        padding: root.edge-to-edge ? 0px : 12px;
+        padding-top: root.edge-to-edge ? 4px : 12px;
+        spacing: root.edge-to-edge ? 0px : 8px;
         // Source and library selection live on Home, never above the track list.
         if root.settings || root.lists-open: HorizontalLayout {
-            height: 44px; spacing: 8px;
+            height: 52px; spacing: 8px;
+            padding-left: root.wide ? 0px : 16px; padding-right: root.wide ? 0px : 16px;
             IconButton { label: "Home"; icon: @image-url("icons/home.svg"); clicked => { root.home = true; keyboard.focus(); } }
             Text { text: root.settings ? "Settings" : "Lists"; color: Theme.text; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
         }
         if root.home: Rectangle {
             accessible-role: groupbox; accessible-label: "Home page";
-            background: Theme.raised; border-radius: 6px;
+            background: Theme.raised; border-radius: root.edge-to-edge ? 0px : 6px;
             home-scroll := ScrollView {
                 mouse-drag-pan-enabled: true;
                 width: 100%; height: 100%;
@@ -230,7 +244,7 @@ export component PlayerWindow inherits Window {
                     x: max(0px, (home-scroll.visible-width - self.width) / 2);
                     width: min(home-scroll.visible-width, 560px);
                     height: home-scroll.content-height;
-                    padding: root.wide ? 24px : 12px; spacing: 16px;
+                    padding: root.wide ? 24px : 16px; spacing: 16px;
                     HorizontalLayout {
                         spacing: 12px;
                         Text { text: "Home"; color: Theme.text; font-size: 27px * root.text-scale; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
@@ -293,7 +307,7 @@ export component PlayerWindow inherits Window {
             }
         }
         if root.lists-open: Rectangle {
-            background: Theme.raised; border-radius: 6px;
+            background: Theme.raised; border-radius: root.edge-to-edge ? 0px : 6px;
             collector-scroll := ScrollView {
                 mouse-drag-pan-enabled: true;
                 width: 100%; height: 100%;
@@ -301,7 +315,7 @@ export component PlayerWindow inherits Window {
                 content-height: max(self.visible-height, collector-content.min-height);
                 collector-content := VerticalLayout {
                 width: collector-scroll.content-width; height: collector-scroll.content-height;
-                padding: 12px; spacing: 8px;
+                padding: root.wide ? 12px : 16px; spacing: 8px;
                 Text { text: "Lists"; color: Theme.text; font-size: 20px * root.text-scale; font-weight: 600; }
                 Text { text: root.connection-status; color: Theme.muted; wrap: word-wrap; }
                 HorizontalLayout {
@@ -340,7 +354,7 @@ export component PlayerWindow inherits Window {
             }
         }
         if root.settings: Rectangle {
-            background: Theme.raised; border-radius: 8px;
+            background: Theme.raised; border-radius: root.edge-to-edge ? 0px : 8px;
             settings-scroll := ScrollView {
                 mouse-drag-pan-enabled: true;
                 width: 100%; height: 100%;
@@ -349,7 +363,7 @@ export component PlayerWindow inherits Window {
                 settings-content := VerticalLayout {
                     width: settings-scroll.visible-width;
                     height: settings-scroll.content-height;
-                    padding: 12px; spacing: 12px;
+                    padding: root.wide ? 12px : 16px; spacing: 12px;
                     Text { text: "Settings"; color: Theme.text; font-size: 20px * root.text-scale; font-weight: 600; }
                     HorizontalLayout {
                         spacing: 6px;
@@ -469,7 +483,7 @@ export component PlayerWindow inherits Window {
                 max-width: root.wide ? root.desktop-library-width : 10000px;
                 min-width: root.wide ? root.desktop-library-width : 0px;
                 horizontal-stretch: root.wide ? 0 : 1;
-                background: Theme.raised; border-radius: 6px;
+                background: Theme.raised; border-radius: root.edge-to-edge ? 0px : 6px;
                 HorizontalLayout {
                     x: 8px; y: 8px; width: parent.width - 16px; height: 44px; spacing: 6px;
                     IconButton { label: "Home"; icon: @image-url("icons/home.svg"); clicked => { root.home = true; keyboard.focus(); } }
@@ -533,6 +547,7 @@ export component PlayerWindow inherits Window {
             }
             if root.wide || !root.show-library: VerticalLayout {
                 min-width: 0px; horizontal-stretch: 1;
+                padding: root.wide ? 0px : 16px;
                 spacing: 10px;
                 HorizontalLayout {
                     spacing: 8px;
@@ -669,11 +684,20 @@ export component PlayerWindow inherits Window {
                 }
             }
         }
-        Rectangle {
-            height: 104px * root.text-scale;
-            background: Theme.transport; border-radius: 9px;
-            VerticalLayout {
-                padding: 8px; spacing: 4px;
+        if root.short && !root.home && !root.settings && !root.lists-open: Rectangle {
+            min-height: 0px; vertical-stretch: 1;
+        }
+        playback-dock := Rectangle {
+            accessible-role: region; accessible-label: "Playback dock";
+            // The dock continues behind the home indicator. Only its foreground
+            // consumes the bottom inset, once; no floating card above an empty chin.
+            height: max(104px * root.text-scale + root.dock-bottom-inset, transport-content.min-height);
+            background: Theme.transport; border-radius: root.edge-to-edge ? 0px : 9px;
+            transport-content := VerticalLayout {
+                padding: root.wide ? 8px : 16px;
+                padding-top: root.wide ? 8px : 12px;
+                padding-bottom: max(8px, root.dock-bottom-inset);
+                spacing: 4px;
                 HorizontalLayout {
                     spacing: 10px;
                     if root.short && !root.home && !root.settings && !root.lists-open: IconButton { label: "Home"; icon: @image-url("icons/home.svg"); button-size: 40px; clicked => { root.home = true; keyboard.focus(); } }
@@ -706,8 +730,18 @@ export component PlayerWindow inherits Window {
                     Rectangle { height: 100%; width: parent.width * root.scan-progress; background: Theme.accent; }
                 }
                 HorizontalLayout {
-                    height: 18px * root.text-scale; spacing: 6px;
-                    Text { text: root.status; color: Theme.muted; overflow: elide; vertical-alignment: center; font-size: 11px * root.text-scale; accessible-label: "Playback status"; horizontal-stretch: 1; }
+                    height: max(18px * root.text-scale, playback-status.preferred-height); spacing: 6px;
+                    // Balance the connection icon so multiline phone status stays
+                    // centered and clear of the display's lower corner curves.
+                    if root.edge-to-edge: Rectangle { width: 24px * root.text-scale; }
+                    playback-status := Text {
+                        text: root.status; color: Theme.muted;
+                        wrap: root.edge-to-edge ? TextWrap.word-wrap : TextWrap.no-wrap;
+                        overflow: root.edge-to-edge ? TextOverflow.clip : TextOverflow.elide;
+                        horizontal-alignment: root.edge-to-edge ? TextHorizontalAlignment.center : TextHorizontalAlignment.left;
+                        vertical-alignment: center; font-size: 11px * root.text-scale;
+                        accessible-label: "Playback status"; horizontal-stretch: 1;
+                    }
                     ConnectionIndicator { kind: root.connection-kind; text-scale: root.text-scale; available-width: parent.width; }
                 }
             }
@@ -732,8 +766,10 @@ export component PlayerWindow inherits Window {
         dismissed => { root.error-message = ""; }
     }
     if root.album-matching-open: Rectangle {
-        x: max(8px, (root.width - self.width) / 2); y: 12px;
-        width: min(root.width - 16px, 760px); height: root.height - 24px;
+        x: root.safe-area-insets.left + max(8px, (keyboard.width - self.width) / 2);
+        y: root.safe-area-insets.top + 8px;
+        width: min(keyboard.width - 16px, 760px);
+        height: max(0px, min(root.height - root.safe-area-insets.bottom, keyboard.y + keyboard.height) - self.y - 8px);
         background: Theme.raised; border-color: Theme.muted; border-width: 1px; border-radius: 8px;
         VerticalLayout {
             padding: 12px; spacing: 8px;
