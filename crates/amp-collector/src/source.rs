@@ -119,12 +119,20 @@ impl SourceProvider for Adapter {
         data: &ExternalCatalog,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Option<BTreeMap<String, String>>> {
+        self.artwork_incremental(data, cancelled, &|_| {})
+    }
+    fn artwork_incremental(
+        &self,
+        data: &ExternalCatalog,
+        cancelled: &dyn Fn() -> bool,
+        publish: &dyn Fn(BTreeMap<String, String>),
+    ) -> Result<Option<BTreeMap<String, String>>> {
         let key = key(self, &data.source)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         runtime
-            .block_on(self.refresh_artwork(key, cancelled))
+            .block_on(self.refresh_artwork_incremental(key, cancelled, publish))
             .map(Some)
     }
     fn load(
@@ -250,24 +258,34 @@ impl Adapter {
         key: ConnectionKey,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<BTreeMap<String, String>> {
+        self.refresh_artwork_incremental(key, cancelled, &|_| {})
+            .await
+    }
+    pub async fn refresh_artwork_incremental(
+        &self,
+        key: ConnectionKey,
+        cancelled: &dyn Fn() -> bool,
+        publish: &dyn Fn(BTreeMap<String, String>),
+    ) -> Result<BTreeMap<String, String>> {
         let snapshot = self.snapshot(key)?.context("Library unavailable")?;
-        let mut artwork = snapshot.artwork.clone();
         let mut failures = 0;
+        let mut first_failure = None;
         for (id, (collection, asset, revision)) in &snapshot.artwork_descriptors {
             check(cancelled)?;
-            if artwork
+            if snapshot
+                .artwork
                 .get(id)
                 .is_some_and(|p| std::path::Path::new(p).is_file())
             {
                 continue;
             }
-            if let Ok(bytes) = remote_read(
+            let result = remote_read(
                 cancelled,
                 self.client(key)?
                     .thumbnail_at(*collection, *asset, Some(*revision)),
             )
-            .await
-            {
+            .await;
+            if let Ok(bytes) = result {
                 check(cancelled)?;
                 let filename = hex::encode(Sha256::digest(
                     format!("{}/{collection}/{asset}/{}", connection_id(key), revision.0)
@@ -276,25 +294,34 @@ impl Adapter {
                 let path = self.root.join("art").join(filename);
                 self.prune_artwork(bytes.len() as u64)?;
                 std::fs::write(&path, bytes)?;
-                artwork.insert(id.clone(), path.to_string_lossy().into_owned());
+                // Commit each success before publication. Cancellation or a later
+                // failed cover cannot discard already downloaded artwork.
+                let latest = self.update_snapshot(key, |latest| {
+                    check(cancelled)?;
+                    if latest.artwork_descriptors.get(id) == snapshot.artwork_descriptors.get(id) {
+                        latest
+                            .artwork
+                            .insert(id.clone(), path.to_string_lossy().into_owned());
+                    }
+                    Ok(())
+                })?;
+                check(cancelled)?;
+                publish(latest.artwork);
             } else {
                 failures += 1;
+                if first_failure.is_none() {
+                    first_failure = result.err().map(|error| format!("{error:#}"));
+                }
             }
         }
         check(cancelled)?;
-        let latest = self.update_snapshot(key, |latest| {
-            check(cancelled)?;
-            for (id, path) in &artwork {
-                if latest.artwork_descriptors.get(id) == snapshot.artwork_descriptors.get(id) {
-                    latest.artwork.insert(id.clone(), path.clone());
-                }
-            }
-            Ok(())
-        })?;
         if failures > 0 {
-            bail!("{failures} covers could not be loaded; titles are available");
+            bail!(
+                "{failures} covers could not be loaded; titles are available. First failure: {}",
+                first_failure.unwrap_or_default()
+            );
         }
-        Ok(latest.artwork)
+        Ok(self.snapshot(key)?.context("Library unavailable")?.artwork)
     }
 
     pub fn project_library(&self, library: &mut Library, online: bool) -> Result<()> {

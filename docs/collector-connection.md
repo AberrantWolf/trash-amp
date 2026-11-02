@@ -45,6 +45,15 @@ bounded wait. Failures remain visible; a partial refresh never replaces the last
 complete persisted manifest. Source, selection and request serials fence late
 responses, including reopening the same album or list.
 
+Artwork uses each album row's collection ID, artwork Asset ID and numeric asset
+revision with the authenticated control-origin thumbnail route. It does not use
+the audio media service or provider-preview endpoint. Successful covers are saved
+and displayed individually; a failed cover reports its request error while other
+covers remain visible. Useful committed title rows can still load artwork if
+summary polling later fails. Refresh retries missing covers, and cancellation
+retains covers already committed. See Collector's `docs/album-metadata-consumers.md`
+for the consumer request sequence and troubleshooting contract.
+
 Online playback opens the queued media target directly. Retained offline playback
 opens its file and validates recorded length, then reads on demand. Neither hashes
 the whole file before consumption. Open/read/EOF failures reach normal track error

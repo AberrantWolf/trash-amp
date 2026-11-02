@@ -105,6 +105,16 @@ pub trait SourceProvider: Send + Sync {
     ) -> Result<Option<std::collections::BTreeMap<String, String>>> {
         Ok(None)
     }
+    /// Publish usable covers before the batch settles. A later error must retain
+    /// earlier publications; callbacks carry the same source/request fence.
+    fn artwork_incremental(
+        &self,
+        catalog: &ExternalCatalog,
+        cancelled: &dyn Fn() -> bool,
+        _publish: &dyn Fn(std::collections::BTreeMap<String, String>),
+    ) -> Result<Option<std::collections::BTreeMap<String, String>>> {
+        self.artwork(catalog, cancelled)
+    }
     /// False prevents cached metadata from being exposed after permission revocation.
     fn cache_allowed(&self) -> bool {
         self.access_status() == AccessStatus::Authorized

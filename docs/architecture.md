@@ -135,6 +135,14 @@ The persisted `browse_artists` preference accepts the former `sort_by_artist` fi
 
 ## Collector adapter
 
+Artwork is an independent incremental stage. The catalog owner fences each cover
+publication with the same source/request ticket as the title load. A title load
+that published useful pages before failing still permits artwork for those rows;
+the title failure stays visible. The adapter commits each downloaded cover before
+publishing it, so a later failed cover or cancellation retains earlier successes.
+An artwork-stage error never schedules a cache reload that could supersede that
+stage's own callbacks.
+
 See [Collector connection](collector-connection.md). `amp-core` contains neutral
 source coordinates and availability only. `amp-collector` owns HTTP, Keychain,
 SQLite snapshots, artwork, receipts and explicit download mechanisms. `amp-audio`

@@ -1115,6 +1115,130 @@ fn old_request_artwork_is_rejected_even_within_the_same_selection_generation() {
 }
 
 #[test]
+fn artwork_still_loads_when_titles_publish_before_summary_refresh_fails() {
+    struct PartialSource;
+    impl SourceProvider for PartialSource {
+        fn descriptors(&self) -> Result<Vec<SourceDescriptor>> {
+            Ok(vec![SourceDescriptor {
+                id: "partial".into(),
+                name: "Partial".into(),
+                provider: "test".into(),
+            }])
+        }
+        fn load(&self, _: &str, _: bool, _: &dyn Fn() -> bool) -> Result<ExternalCatalog> {
+            unreachable!("incremental load is used")
+        }
+        fn load_incremental(
+            &self,
+            _: &str,
+            _: bool,
+            _: &dyn Fn() -> bool,
+            _: &dyn Fn(SourceProgress),
+            publish: &dyn Fn(ExternalCatalog),
+        ) -> Result<ExternalCatalog> {
+            publish(ExternalCatalog {
+                source: "partial".into(),
+                online: Some(true),
+                library: library("partial", "Published album"),
+                artwork: BTreeMap::new(),
+            });
+            anyhow::bail!("Album details are still updating")
+        }
+        fn has_artwork(&self) -> bool {
+            true
+        }
+        fn artwork(
+            &self,
+            _: &ExternalCatalog,
+            _: &dyn Fn() -> bool,
+        ) -> Result<Option<BTreeMap<String, String>>> {
+            Ok(Some(BTreeMap::from([("album".into(), "cover.png".into())])))
+        }
+    }
+    let h = Harness::simple(&[]);
+    let catalog = h.handle();
+    catalog.register_sources(vec![Arc::new(PartialSource)], false);
+    read(&catalog);
+    catalog.select_source("partial".into());
+    wait(|| catalog.snapshot().artwork.contains_key("album"));
+    let snapshot = read(&catalog);
+    assert_eq!(snapshot.library.albums[0].title, "Published album");
+    assert!(
+        snapshot
+            .source_message
+            .as_ref()
+            .unwrap()
+            .contains("still updating")
+    );
+}
+
+#[test]
+fn successful_artwork_is_visible_before_a_later_cover_failure() {
+    struct Covers {
+        gate: Mutex<mpsc::Receiver<()>>,
+    }
+    impl SourceProvider for Covers {
+        fn descriptors(&self) -> Result<Vec<SourceDescriptor>> {
+            Ok(vec![SourceDescriptor {
+                id: "covers".into(),
+                name: "Covers".into(),
+                provider: "test".into(),
+            }])
+        }
+        fn load(&self, _: &str, _: bool, _: &dyn Fn() -> bool) -> Result<ExternalCatalog> {
+            Ok(ExternalCatalog {
+                source: "covers".into(),
+                online: Some(true),
+                library: library("covers", "Album"),
+                artwork: BTreeMap::new(),
+            })
+        }
+        fn has_artwork(&self) -> bool {
+            true
+        }
+        fn artwork_incremental(
+            &self,
+            _: &ExternalCatalog,
+            _: &dyn Fn() -> bool,
+            publish: &dyn Fn(BTreeMap<String, String>),
+        ) -> Result<Option<BTreeMap<String, String>>> {
+            publish(BTreeMap::from([("album".into(), "ready.png".into())]));
+            self.gate
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(3))?;
+            anyhow::bail!("second cover timed out")
+        }
+    }
+    let h = Harness::simple(&[]);
+    let catalog = h.handle();
+    let (release, gate) = mpsc::channel();
+    catalog.register_sources(
+        vec![Arc::new(Covers {
+            gate: Mutex::new(gate),
+        })],
+        false,
+    );
+    read(&catalog);
+    catalog.select_source("covers".into());
+    wait(|| catalog.snapshot().artwork.contains_key("album"));
+    assert_eq!(read(&catalog).artwork.get("album").unwrap(), "ready.png");
+    release.send(()).unwrap();
+    wait(|| {
+        catalog
+            .snapshot()
+            .notice
+            .as_ref()
+            .is_some_and(|n| n.message.contains("second cover timed out"))
+    });
+    assert_eq!(read(&catalog).artwork.get("album").unwrap(), "ready.png");
+    assert_eq!(
+        h.store().provider_snapshot("covers").unwrap().unwrap().1["album"],
+        "ready.png"
+    );
+}
+
+#[test]
 fn availability_projection_does_not_fetch_live_data_or_cancel_mutation_generation() {
     struct Projection {
         live_calls: AtomicUsize,

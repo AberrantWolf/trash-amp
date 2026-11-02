@@ -849,6 +849,97 @@ async fn digital_flac_mp3_stream_seek_download_and_offline_reopen() {
     .unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn artwork_publishes_and_persists_successes_despite_other_cover_failure_or_cancellation() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let item = ItemId::new();
+    let fixture = Fixture::new(item, "Cover control").await;
+    fixture.add_digital_purchase();
+    let service = &fixture._state.service;
+    let original = service.item_presented(&fixture.owner, item).unwrap();
+    let cover = service
+        .create_asset(
+            &fixture.owner,
+            collector_app::CreateAssetCommand {
+                collection_id: original.collection_id,
+                subject: AssetSubject::Item { item_id: item },
+                kind: AssetKind::Cover,
+                visibility: Visibility::Shared,
+                alt_text: "Control cover".into(),
+            },
+            include_bytes!("fixtures/digital-audio/cover.png"),
+            &command(),
+        )
+        .unwrap();
+    let secrets = Arc::new(Secrets::default());
+    let key = fixture.enroll(&secrets).await;
+    let root = tempfile::tempdir().unwrap();
+    let adapter = Adapter::with_credentials(root.path(), secrets.clone()).unwrap();
+    let snapshot = adapter.refresh(key, &|| false).await.unwrap();
+    assert_eq!(snapshot.artwork_descriptors.len(), 2);
+    service
+        .tombstone_asset(&fixture.owner, cover.id, cover.revision, &command())
+        .unwrap();
+    let publications = Mutex::new(Vec::new());
+    let error = adapter
+        .refresh_artwork_incremental(key, &|| false, &|artwork| {
+            for path in artwork.values() {
+                assert!(
+                    std::fs::read(path)
+                        .unwrap()
+                        .starts_with(b"\x89PNG\r\n\x1a\n")
+                );
+            }
+            publications.lock().unwrap().push(artwork);
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("1 covers could not be loaded"));
+    assert!(
+        error.to_string().contains("not found"),
+        "keep the actual request failure visible: {error}"
+    );
+    assert_eq!(publications.lock().unwrap().len(), 1);
+    let saved = adapter.snapshot(key).unwrap().unwrap();
+    assert_eq!(saved.artwork.len(), 1);
+    assert!(!saved.artwork.contains_key(&item.to_string()));
+
+    // A fresh cache cancels immediately after its first successful publication.
+    // Both covers are valid again through a fresh, current title descriptor.
+    service
+        .create_asset(
+            &fixture.owner,
+            collector_app::CreateAssetCommand {
+                collection_id: original.collection_id,
+                subject: AssetSubject::Item { item_id: item },
+                kind: AssetKind::Cover,
+                visibility: Visibility::Shared,
+                alt_text: "Replacement cover".into(),
+            },
+            include_bytes!("fixtures/digital-audio/cover.png"),
+            &command(),
+        )
+        .unwrap();
+    while service.rebuild_next_library_entry().unwrap() {}
+    let other_root = tempfile::tempdir().unwrap();
+    let other = Adapter::with_credentials(other_root.path(), secrets).unwrap();
+    other.refresh(key, &|| false).await.unwrap();
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let error = other
+        .refresh_artwork_incremental(
+            key,
+            &|| cancelled.load(std::sync::atomic::Ordering::Acquire),
+            &|artwork| {
+                assert_eq!(artwork.len(), 1);
+                cancelled.store(true, std::sync::atomic::Ordering::Release);
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("Cancelled"));
+    assert_eq!(other.snapshot(key).unwrap().unwrap().artwork.len(), 1);
+}
+
 /// Manual qualification uses the actual default output device and the ordinary
 /// decoder/resampler/ring-buffer callback. Ordinary CI never requires a device.
 #[tokio::test(flavor = "multi_thread")]

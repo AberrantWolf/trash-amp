@@ -847,8 +847,12 @@ impl Worker {
                         let _ = tx.send(Command::SourceProgress(request.clone(), progress));
                     }
                 };
-                let publish = |data| {
+                let latest_page = std::cell::RefCell::new(None);
+                let publish = |data: ExternalCatalog| {
                     if !obsolete() {
+                        if provider.has_artwork() {
+                            *latest_page.borrow_mut() = Some(data.clone());
+                        }
                         let _ = tx.send(Command::SourceLoaded(request.clone(), false, Ok(data)));
                     }
                 };
@@ -861,7 +865,11 @@ impl Worker {
                 );
                 // Only adapters that actually supply artwork retain another catalog.
                 let artwork_catalog = if provider.has_artwork() {
-                    result.as_ref().ok().cloned()
+                    result
+                        .as_ref()
+                        .ok()
+                        .cloned()
+                        .or_else(|| latest_page.into_inner())
                 } else {
                     None
                 };
@@ -869,7 +877,12 @@ impl Worker {
                 if let Some(data) = artwork_catalog
                     && !obsolete()
                 {
-                    match provider.artwork(&data, &obsolete) {
+                    let publish = |artwork| {
+                        if !obsolete() {
+                            let _ = tx.send(Command::SourceArtwork(request.clone(), artwork));
+                        }
+                    };
+                    match provider.artwork_incremental(&data, &obsolete, &publish) {
                         Ok(Some(artwork)) => {
                             let _ = tx.send(Command::SourceArtwork(request, artwork));
                         }
@@ -943,7 +956,6 @@ impl Worker {
                 if self.source_request_current(&request) =>
             {
                 self.notice(format!("Artwork refresh incomplete: {error}"));
-                self.queue_source_refresh(request.id, RefreshKind::Cached);
             }
             Command::SourceArtwork(request, artwork)
                 if self.source_request_current(&request)
