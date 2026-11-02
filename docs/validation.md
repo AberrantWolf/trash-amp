@@ -909,3 +909,25 @@ after a restart and temporarily disabling its hardware-keyboard preference. That
 preference was restored. Hardware-keyboard search input works. A first-run Music
 Library permission alert was dismissed before the final captures. No physical
 phone test or merge was performed.
+
+## Collector search review fixes — 2026-11-02
+
+Online song results now supplement local token matches instead of replacing them.
+Results are deduplicated by album/track identity, sorted consistently by display
+labels, and use fresh online metadata when identities overlap. Playback resolution
+uses that same fresh track. Clearing search does not enumerate the remote catalog.
+
+A search-selected track is retained as a pending navigation target until its album
+arrives. Catalog installation then restores its source, selected row, and scroll
+position. Subsequent catalog/artwork updates preserve that selection by track
+identity. A new selection, disc choice, source replacement, or Back navigation
+prevents the old target from taking over.
+
+Regression coverage exercises an empty online response for a cross-field query,
+overlapping/new online hits and playback metadata, clearing search, and the actual
+Collector catalog-install path with an alternate source and scroll target. It also
+checks later refreshes, a subsequent user selection, and navigation away before
+hydration completes.
+
+Validation: all 251 workspace tests pass (three existing opt-in tests ignored),
+along with warning-denied workspace/all-target Clippy, formatting, and diff checks.

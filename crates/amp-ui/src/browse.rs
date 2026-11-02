@@ -45,6 +45,7 @@ pub(super) struct Browser {
     catalog_version: u64,
     due: Option<Instant>,
     pending_open: Option<(Instant, Target)>,
+    pending_track: Option<Target>,
     tx: mpsc::Sender<SearchReply>,
     rx: mpsc::Receiver<SearchReply>,
 }
@@ -68,6 +69,7 @@ impl Default for Browser {
             catalog_version: 0,
             due: None,
             pending_open: None,
+            pending_track: None,
             tx,
             rx,
         }
@@ -282,6 +284,10 @@ pub(super) fn show_playback_queue(ui: &PlayerWindow, s: &mut State) {
     render_browser(ui, s);
 }
 fn show_target(ui: &PlayerWindow, s: &mut State, target: &Target) {
+    s.browser.pending_track = None;
+    if matches!(target, Target::Track { .. }) {
+        s.browser.pending_track = Some(target.clone());
+    }
     match target {
         Target::Artist(name) => {
             render_artist(ui, s, name);
@@ -309,6 +315,7 @@ fn show_target(ui: &PlayerWindow, s: &mut State, target: &Target) {
                     {
                         ui.set_selected_track(i as i32);
                         ui.set_track_y(-(i as f32 * 48.0 * ui.get_text_scale()));
+                        s.browser.pending_track = None;
                     }
                 } else {
                     ui.set_track_y(0.0);
@@ -316,6 +323,55 @@ fn show_target(ui: &PlayerWindow, s: &mut State, target: &Target) {
             }
         }
     }
+}
+// A search result can arrive before its album's tracks. Apply its source and
+// row only once the album is hydrated, and only while that navigation is current.
+fn restore_pending_track(ui: &PlayerWindow, s: &mut State) {
+    let Some(target @ Target::Track { .. }) = s.browser.pending_track.clone() else {
+        return;
+    };
+    if s.browser.detail.as_ref() != Some(&target) {
+        s.browser.pending_track = None;
+        return;
+    }
+    let Target::Track { album, track } = &target else {
+        unreachable!()
+    };
+    if !s
+        .library
+        .albums
+        .iter()
+        .any(|a| &a.id == album && a.tracks.iter().any(|t| &t.id == track))
+    {
+        return;
+    }
+    let showing_library = ui.get_show_library();
+    let showing_queue = ui.get_show_queue();
+    show_target(ui, s, &target);
+    ui.set_show_library(showing_library);
+    ui.set_show_queue(showing_queue);
+}
+
+fn merge_track_results(local: Vec<Entry>, online: Vec<Entry>) -> Vec<Entry> {
+    fn id_key(id: &amp_core::ItemId) -> (String, String, String) {
+        (id.library.clone(), id.provider.clone(), id.item.clone())
+    }
+    let mut matches = std::collections::BTreeMap::new();
+    for entry in local.into_iter().chain(online) {
+        if let Target::Track { album, track } = &entry.target {
+            // Prefer current online metadata for overlapping identities.
+            matches.insert((id_key(album), id_key(track)), entry);
+        }
+    }
+    let mut tracks = matches.into_values().collect::<Vec<_>>();
+    tracks.sort_by_cached_key(|entry| {
+        (
+            amp_core::browse::normalized(&entry.title),
+            amp_core::browse::normalized(&entry.artist),
+            amp_core::browse::normalized(&entry.album),
+        )
+    });
+    tracks
 }
 fn open(ui: &PlayerWindow, s: &mut State, target: Target) {
     s.browser.pending_open = None;
@@ -350,6 +406,7 @@ pub(super) fn rebuild(ui: &PlayerWindow, s: &mut State, reset: bool) {
     s.browser.catalog_version += 1;
     if reset {
         s.browser.pending_open = None;
+        s.browser.pending_track = None;
         s.browser.query.clear();
         s.browser.section = None;
         s.browser.detail = None;
@@ -368,6 +425,7 @@ pub(super) fn rebuild(ui: &PlayerWindow, s: &mut State, reset: bool) {
     if let Some(Target::Artist(name)) = s.browser.detail.clone() {
         render_artist(ui, s, &name);
     }
+    restore_pending_track(ui, s);
     render_browser(ui, s);
 }
 pub(super) fn poll(ui: &PlayerWindow, s: &mut State) {
@@ -396,11 +454,20 @@ pub(super) fn poll(ui: &PlayerWindow, s: &mut State) {
             let mut results = index.search(&query);
             let mut remote = Library::default();
             let mut error = None;
-            match catalog.search_source(&query, &|| {
-                cancelled.load(std::sync::atomic::Ordering::Acquire)
-            }) {
+            match if query.trim().is_empty() {
+                Ok(None)
+            } else {
+                catalog.search_source(&query, &|| {
+                    cancelled.load(std::sync::atomic::Ordering::Acquire)
+                })
+            } {
                 Ok(Some(library)) => {
-                    results.tracks = CatalogIndex::new(&library).search(&query).tracks;
+                    // Collector's phrase search is narrower than our token search.
+                    // Supplement local matches instead of discarding them.
+                    results.tracks = merge_track_results(
+                        results.tracks,
+                        CatalogIndex::new(&library).search(&query).tracks,
+                    );
                     remote = library;
                 }
                 Err(failure) => {
@@ -435,10 +502,11 @@ pub(super) fn poll(ui: &PlayerWindow, s: &mut State) {
 }
 pub(super) fn resolve_track(s: &State, target: &Target) -> Option<Track> {
     if let Target::Track { album, track } = target {
-        s.library
+        s.browser
+            .search_library
             .albums
             .iter()
-            .chain(s.browser.search_library.albums.iter())
+            .chain(s.library.albums.iter())
             .filter(|a| &a.id == album)
             .flat_map(|a| a.tracks.iter())
             .find(|t| &t.id == track)
@@ -665,6 +733,7 @@ pub(super) fn wire(ui: &PlayerWindow, state: &Rc<RefCell<State>>) {
 pub(super) fn clear_track_context(s: &mut State) {
     s.browser.selected_result = None;
     s.browser.pending_open = None;
+    s.browser.pending_track = None;
 }
 pub(super) fn mode_changed(ui: &PlayerWindow, s: &mut State) {
     s.browser.pending_open = None;
@@ -712,6 +781,123 @@ mod tests {
         ui.set_search_text(query.into());
         s.browser.results = s.browser.index.search(query);
         render_browser(ui, s);
+    }
+    #[test]
+    fn online_search_preserves_local_token_matches_and_merges_fresh_tracks_once() {
+        use amp_app::sources::{SourceDescriptor, SourceProvider};
+        use amp_core::MediaAccess;
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct SearchSource {
+            local: Library,
+            remote: Arc<Mutex<Library>>,
+            calls: Arc<AtomicUsize>,
+        }
+        impl SourceProvider for SearchSource {
+            fn descriptors(&self) -> anyhow::Result<Vec<SourceDescriptor>> {
+                Ok(vec![SourceDescriptor {
+                    id: "search-test".into(),
+                    name: "Search test".into(),
+                    provider: "test".into(),
+                }])
+            }
+            fn load(
+                &self,
+                _: &str,
+                _: bool,
+                _: &dyn Fn() -> bool,
+            ) -> anyhow::Result<amp_app::catalog::ExternalCatalog> {
+                Ok(amp_app::catalog::ExternalCatalog {
+                    source: "search-test".into(),
+                    online: Some(true),
+                    library: self.local.clone(),
+                    artwork: Default::default(),
+                })
+            }
+            fn search(
+                &self,
+                _: &str,
+                _: &str,
+                _: &dyn Fn() -> bool,
+            ) -> anyhow::Result<Option<Library>> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Ok(Some(self.remote.lock().unwrap().clone()))
+            }
+        }
+        let (ui, state, path, service) = setup("online-merge");
+        let mut local = state.borrow().library.clone();
+        local.albums.truncate(1);
+        local.albums[0].tracks.truncate(2);
+        state.borrow_mut().library = local.clone();
+        rebuild(&ui, &mut state.borrow_mut(), true);
+        let remote = Arc::new(Mutex::new(Library::default()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let catalog = service.catalog();
+        catalog.register_sources(
+            vec![Arc::new(SearchSource {
+                local: local.clone(),
+                remote: remote.clone(),
+                calls: calls.clone(),
+            })],
+            false,
+        );
+        catalog.bootstrap_snapshot().unwrap();
+        catalog.select_source("search-test".into());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while catalog.bootstrap_snapshot().unwrap().source_online != Some(true) {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let search = |query: &str| {
+            ui.set_search_text(query.into());
+            ui.invoke_search_changed();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                poll(&ui, &mut state.borrow_mut());
+                if state.borrow().browser.due.is_none() && !state.borrow().browser.searching {
+                    break;
+                }
+                assert!(Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        // Words match different fields locally; the server's phrase search can
+        // successfully return no hits for exactly this query.
+        search("Movement fixture");
+        assert_eq!(state.borrow().browser.results.tracks.len(), 2);
+        let mut online = local;
+        online.albums[0].tracks.remove(0);
+        online.albums[0].tracks[0].title = "Movement 2 refreshed".into();
+        online.albums[0].tracks[0].access = MediaAccess::Managed {
+            provider: "demo".into(),
+            item: "fresh-media".into(),
+        };
+        let mut added = online.albums[0].tracks[0].clone();
+        added.id.item = "online-only".into();
+        added.title = "Movement 3".into();
+        online.albums[0].tracks.push(added);
+        *remote.lock().unwrap() = online;
+        search("Movement fixture");
+        let s = state.borrow();
+        let entries = &s.browser.results.tracks;
+        assert_eq!(
+            entries.iter().map(|e| e.title.as_str()).collect::<Vec<_>>(),
+            ["Movement 1", "Movement 2 refreshed", "Movement 3"]
+        );
+        let track = resolve_track(&s, &entries[1].target).unwrap();
+        assert!(matches!(track.access, MediaAccess::Managed { item, .. } if item == "fresh-media"));
+        drop(s);
+        let before = calls.load(Ordering::Relaxed);
+        search("");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            before,
+            "Clearing search must not enumerate the online song catalog"
+        );
+        drop(state);
+        let _ = std::fs::remove_file(path);
     }
     #[test]
     fn progressive_queue_navigation_restores_artist_and_allows_reopening_it() {

@@ -107,6 +107,16 @@ fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, adapter: 
     };
     let showing_library = ui.get_show_library();
     let showing_queue = ui.get_show_queue();
+    let selected_track = s.selected.filter(|_| same).and_then(|index| {
+        usize::try_from(ui.get_selected_track())
+            .ok()
+            .and_then(|row| {
+                displayed_tracks(&s, index)
+                    .get(row)
+                    .map(|track| track.id.clone())
+            })
+    });
+    let track_y = ui.get_track_y();
     if let Some(snapshot) = &view.snapshot {
         s.library = snapshot.library.clone();
         if let Some(collection) = view.collection {
@@ -151,12 +161,20 @@ fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, adapter: 
     s.selected = None;
     sort_albums(ui, &mut s);
     albums(ui, &s);
-    browse::rebuild(ui, &mut s, !same);
     if let Some(index) = selected.and_then(|id| s.library.albums.iter().position(|a| a.id == id)) {
         select(ui, &mut s, index);
         ui.set_show_library(showing_library);
         ui.set_show_queue(showing_queue);
+        if let Some(row) = selected_track.and_then(|id| {
+            displayed_tracks(&s, index)
+                .iter()
+                .position(|track| track.id == id)
+        }) {
+            ui.set_selected_track(row as i32);
+            ui.set_track_y(track_y);
+        }
     }
+    browse::rebuild(ui, &mut s, !same);
     if s.selected.is_none() {
         ui.set_album_art(slint::Image::default());
     }
@@ -455,6 +473,7 @@ impl Controller {
                 } else {
                     return;
                 }
+                browse::clear_track_context(&mut s);
                 select(&ui, &mut s, index);
             });
         }
@@ -1245,6 +1264,120 @@ mod tests {
             selected_sources: Default::default(),
             preferences: Preferences::default(),
         }))
+    }
+    #[test]
+    fn lazy_album_install_restores_search_track_source_and_scroll_without_reviving_back_navigation()
+    {
+        i_slint_backend_testing::init_no_event_loop();
+        let data = std::env::temp_dir().join(format!("trash-lazy-search-{}", uuid::Uuid::new_v4()));
+        let services = TestServices::new(&data.join("library.sqlite3"));
+        let adapter = Adapter::open(&data.join("collector")).unwrap();
+        let mut full = amp_library::demo_library();
+        full.albums.truncate(1);
+        let mut alternate = full.albums[0].tracks.clone();
+        for track in &mut alternate {
+            track.id.item.push_str("-alternate");
+            track.title = format!("Alternate {}", track.title);
+        }
+        full.albums[0].tracks.extend(alternate);
+        for (i, track) in full.albums[0].tracks.iter_mut().enumerate() {
+            track.source = Some(amp_core::SourceCoordinates {
+                connection: "c".into(),
+                collection: "c".into(),
+                item: "i".into(),
+                capture: "c".into(),
+                representation: if i < 10 { "A" } else { "B" }.into(),
+                track: (i % 10 + 1) as u16,
+            });
+        }
+        let state = test_state(&services, full.clone());
+        let ui = PlayerWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(980., 460.));
+        ui.show().unwrap();
+        browse::wire(&ui, &state);
+        let snapshot: Snapshot = serde_json::from_value(serde_json::json!({
+            "library": full, "collections": [], "lists": [], "artwork": {}, "album_collections": {}, "updated": 0
+        })).unwrap();
+        let mut view = View {
+            connections: vec![],
+            selected: None,
+            snapshot: Some(snapshot),
+            list: None,
+            collection: None,
+            online: true,
+            connection: ConnectionState::Connected,
+            operation: None,
+        };
+        install(&ui, &state, &view, &adapter);
+        ui.set_home(false);
+        ui.set_search_text("Alternate Movement 8".into());
+        ui.invoke_search_changed();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let row = loop {
+            browse::poll(&ui, &mut state.borrow_mut());
+            if let Some(row) = ui
+                .get_browser_rows()
+                .iter()
+                .position(|r| r.kind == 3 && r.title == "Alternate Movement 8")
+            {
+                break row;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        // Retained/online search results can precede the album's actual tracks.
+        view.snapshot.as_mut().unwrap().library.albums[0]
+            .tracks
+            .clear();
+        install(&ui, &state, &view, &adapter);
+        ui.invoke_browse_action(false, row as i32, 0);
+        assert_eq!(ui.get_selected_track(), -1);
+        assert_eq!(ui.get_tracks().row_count(), 0);
+        view.snapshot.as_mut().unwrap().library = full.clone();
+        install(&ui, &state, &view, &adapter);
+        assert_eq!(ui.get_album_source_index(), 2);
+        assert_eq!(ui.get_tracks().row_count(), 10);
+        assert_eq!(ui.get_selected_track(), 7);
+        assert!(
+            ui.get_track_y() < 0.,
+            "The search-selected song must be scrolled into view"
+        );
+        assert_eq!(
+            displayed_tracks(&state.borrow(), 0)[7].title,
+            "Alternate Movement 8"
+        );
+        install(&ui, &state, &view, &adapter);
+        assert_eq!(
+            ui.get_selected_track(),
+            7,
+            "Later artwork/catalog updates must preserve the restored song"
+        );
+        assert!(ui.get_track_y() < 0.);
+        ui.set_selected_track(0);
+        ui.invoke_album_track_selected();
+        install(&ui, &state, &view, &adapter);
+        assert_eq!(
+            ui.get_selected_track(),
+            0,
+            "A later user selection must not be replaced by the old search target"
+        );
+
+        // A second cold open is abandoned before its completion arrives.
+        ui.invoke_back();
+        view.snapshot.as_mut().unwrap().library.albums[0]
+            .tracks
+            .clear();
+        install(&ui, &state, &view, &adapter);
+        ui.invoke_browse_action(false, row as i32, 0);
+        assert_eq!(ui.get_tracks().row_count(), 0);
+        ui.invoke_back();
+        view.snapshot.as_mut().unwrap().library = full;
+        install(&ui, &state, &view, &adapter);
+        assert!(ui.get_show_library(), "Late hydration must not undo Back");
+        assert_eq!(ui.get_selected_track(), -1);
+        drop(state);
+        drop(services);
+        std::fs::remove_dir_all(data).unwrap();
     }
     #[test]
     fn disc_choice_survives_navigation_without_removing_searchable_tracks() {
