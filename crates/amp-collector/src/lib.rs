@@ -13,12 +13,12 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -94,6 +94,14 @@ pub struct Snapshot {
     pub artwork: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub album_collections: std::collections::BTreeMap<String, ids::CollectionId>,
+    #[serde(default)]
+    pub album_revisions: BTreeMap<String, String>,
+    #[serde(default)]
+    pub track_revisions: BTreeMap<String, String>,
+    #[serde(default)]
+    pub artwork_descriptors: BTreeMap<String, (ids::CollectionId, ids::AssetId, ids::Revision)>,
+    #[serde(default)]
+    pub summaries_pending: bool,
     pub updated: u64,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -133,6 +141,8 @@ pub struct ListCommand {
     pub update: Option<api::UpdateCollectionList>,
     pub receipt: String,
 }
+type LoadedAlbumTracks = BTreeMap<(ConnectionKey, String), (String, Vec<Track>)>;
+
 pub struct Adapter {
     _profile_lock: std::fs::File,
     secrets: Arc<dyn NativeCredentialStorage>,
@@ -141,6 +151,9 @@ pub struct Adapter {
     media: Mutex<Vec<(ConnectionKey, MediaCancellation)>>,
     downloads_cancel: AtomicBool,
     source_observer: Mutex<Option<amp_app::sources::SourceObserver>>,
+    loaded_tracks: Mutex<LoadedAlbumTracks>,
+    refresh_epoch: AtomicU64,
+    staged: Mutex<BTreeMap<ConnectionKey, (u64, Snapshot)>>,
     download_token: Mutex<Option<MediaCancellation>>,
 }
 impl amp_app::downloads::Backend for Adapter {
@@ -223,12 +236,108 @@ impl Adapter {
             media: Mutex::new(vec![]),
             downloads_cancel: AtomicBool::new(false),
             source_observer: Mutex::new(None),
+            loaded_tracks: Mutex::new(BTreeMap::new()),
+            refresh_epoch: AtomicU64::new(0),
+            staged: Mutex::new(BTreeMap::new()),
             download_token: Mutex::new(None),
         }))
     }
     fn put(&self, kind: &str, id: &str, value: &impl Serialize) -> Result<()> {
         self.db.lock().unwrap().execute("INSERT INTO records VALUES (?1,?2,?3) ON CONFLICT(kind,id) DO UPDATE SET value=excluded.value", params![kind,id,serde_json::to_string(value)?])?;
         Ok(())
+    }
+    fn commit_refresh(
+        &self,
+        key: ConnectionKey,
+        epoch: u64,
+        mut snapshot: Snapshot,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Snapshot> {
+        use rusqlite::OptionalExtension;
+        let staged = self.staged.lock().unwrap();
+        anyhow::ensure!(
+            staged
+                .get(&key)
+                .is_some_and(|(current, _)| *current == epoch),
+            "Refresh superseded"
+        );
+        let db = self.db.lock().unwrap();
+        let previous: Option<String> = db
+            .query_row(
+                "SELECT value FROM records WHERE kind='snapshot' AND id=?",
+                [connection_id(key)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(raw) = previous {
+            let latest: Snapshot = serde_json::from_str(&raw)?;
+            for album in &mut snapshot.library.albums {
+                if latest.album_revisions.get(&album.id.item)
+                    == snapshot.album_revisions.get(&album.id.item)
+                {
+                    if let Some(current) = latest
+                        .library
+                        .albums
+                        .iter()
+                        .find(|current| current.id == album.id)
+                    {
+                        album.tracks = current.tracks.clone();
+                    }
+                    if let Some(revision) = latest.track_revisions.get(&album.id.item) {
+                        snapshot
+                            .track_revisions
+                            .insert(album.id.item.clone(), revision.clone());
+                    }
+                }
+            }
+            for (id, path) in latest.artwork {
+                if latest.artwork_descriptors.get(&id) == snapshot.artwork_descriptors.get(&id) {
+                    snapshot.artwork.insert(id, path);
+                }
+            }
+            for list in &mut snapshot.lists {
+                if let Some(current) = latest.lists.iter().find(|current| {
+                    current.list.id == list.list.id && current.list.revision == list.list.revision
+                }) {
+                    *list = current.clone();
+                }
+            }
+        }
+        // Album-open work can finish after the final page callback but before
+        // the first complete manifest exists. Merge it at the commit boundary.
+        {
+            let loaded = self.loaded_tracks.lock().unwrap();
+            for album in &mut snapshot.library.albums {
+                if let Some((revision, tracks)) = loaded.get(&(key, album.id.item.clone())) {
+                    album.tracks = tracks.clone();
+                    snapshot
+                        .track_revisions
+                        .insert(album.id.item.clone(), revision.clone());
+                }
+            }
+        }
+        check(cancelled)?;
+        db.execute("INSERT INTO records VALUES ('snapshot',?1,?2) ON CONFLICT(kind,id) DO UPDATE SET value=excluded.value",params![connection_id(key),serde_json::to_string(&snapshot)?])?;
+        Ok(snapshot)
+    }
+    fn update_snapshot(
+        &self,
+        key: ConnectionKey,
+        update: impl FnOnce(&mut Snapshot) -> Result<()>,
+    ) -> Result<Snapshot> {
+        let db = self.db.lock().unwrap();
+        let raw: String = db.query_row(
+            "SELECT value FROM records WHERE kind='snapshot' AND id=?",
+            [connection_id(key)],
+            |r| r.get(0),
+        )?;
+        let mut snapshot: Snapshot = serde_json::from_str(&raw)?;
+        update(&mut snapshot)?;
+        db.execute(
+            "UPDATE records SET value=? WHERE kind='snapshot' AND id=?",
+            params![serde_json::to_string(&snapshot)?, connection_id(key)],
+        )?;
+        Ok(snapshot)
     }
     fn get<T: serde::de::DeserializeOwned>(&self, kind: &str, id: &str) -> Result<Option<T>> {
         use rusqlite::OptionalExtension;
@@ -281,6 +390,12 @@ impl Adapter {
     }
     pub fn select(&self, key: Option<ConnectionKey>) -> Result<()> {
         self.put("setting", "selected", &key)
+    }
+    pub fn display_snapshot(&self, key: ConnectionKey) -> Result<Option<Snapshot>> {
+        if let Some((_, snapshot)) = self.staged.lock().unwrap().get(&key) {
+            return Ok(Some(snapshot.clone()));
+        }
+        self.snapshot(key)
     }
     pub fn snapshot(&self, key: ConnectionKey) -> Result<Option<Snapshot>> {
         self.get("snapshot", &connection_id(key))
@@ -519,190 +634,464 @@ impl Adapter {
         cancelled: &dyn Fn() -> bool,
         progress: &dyn Fn(amp_app::sources::SourceProgress),
     ) -> Result<Snapshot> {
-        let report = |completed, total, message| {
-            progress(amp_app::sources::SourceProgress {
-                completed,
-                total,
-                message,
+        self.refresh_catalog(key, cancelled, progress, &|_| {})
+            .await
+    }
+    pub async fn refresh_catalog(
+        &self,
+        key: ConnectionKey,
+        cancelled: &dyn Fn() -> bool,
+        progress: &dyn Fn(amp_app::sources::SourceProgress),
+        publish: &dyn Fn(&Snapshot),
+    ) -> Result<Snapshot> {
+        let started = std::time::Instant::now();
+        loop {
+            match self
+                .refresh_incremental(key, cancelled, progress, publish)
+                .await
+            {
+                Ok(snapshot) if !snapshot.summaries_pending => return Ok(snapshot),
+                Ok(snapshot) => {
+                    anyhow::ensure!(
+                        started.elapsed() < std::time::Duration::from_secs(20),
+                        "Album details are still updating; titles are available. Refresh again shortly"
+                    );
+                    progress(amp_app::sources::SourceProgress {
+                        completed: snapshot.library.albums.len(),
+                        total: None,
+                        message: "Album titles loaded; updating details…".into(),
+                    });
+                }
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<ids::Error>(),
+                        Some(ids::Error::Conflict)
+                    ) && started.elapsed() < std::time::Duration::from_secs(20) =>
+                {
+                    progress(amp_app::sources::SourceProgress {
+                        completed: 0,
+                        total: None,
+                        message: "Library changed; refreshing album count…".into(),
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+            remote_read(cancelled, async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                Ok(())
             })
-        };
-        report(0, None, "Connecting to music library…".into());
+            .await?;
+        }
+    }
+    pub async fn refresh_incremental(
+        &self,
+        key: ConnectionKey,
+        cancelled: &dyn Fn() -> bool,
+        progress: &dyn Fn(amp_app::sources::SourceProgress),
+        publish: &dyn Fn(&Snapshot),
+    ) -> Result<Snapshot> {
+        let epoch = self.refresh_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        self.staged.lock().unwrap().insert(
+            key,
+            (
+                epoch,
+                self.snapshot(key)?.unwrap_or(Snapshot {
+                    library: Library::default(),
+                    collections: Vec::new(),
+                    lists: Vec::new(),
+                    artwork: BTreeMap::new(),
+                    album_collections: BTreeMap::new(),
+                    album_revisions: BTreeMap::new(),
+                    track_revisions: BTreeMap::new(),
+                    artwork_descriptors: BTreeMap::new(),
+                    summaries_pending: false,
+                    updated: now(),
+                }),
+            ),
+        );
+        struct Stage<'a>(&'a Adapter, ConnectionKey, u64);
+        impl Drop for Stage<'_> {
+            fn drop(&mut self) {
+                let mut staged = self.0.staged.lock().unwrap();
+                if staged
+                    .get(&self.1)
+                    .is_some_and(|(epoch, _)| *epoch == self.2)
+                {
+                    staged.remove(&self.1);
+                }
+            }
+        }
+        let _stage = Stage(self, key, epoch);
+        progress(amp_app::sources::SourceProgress {
+            completed: 0,
+            total: None,
+            message: "Checking login…".into(),
+        });
         let client = self.client(key)?;
-        let collections = client.collections().await?;
+        remote_read(cancelled, client.principal()).await?;
         check(cancelled)?;
-        report(1, Some(1), "Connected to music library".into());
-        let mut albums_loaded = 0;
-        let mut page_number = 0;
+        let collections = remote_read(cancelled, client.collections()).await?;
+        let summary = remote_read(
+            cancelled,
+            client.library_summary(&ids::BrowseQuery::default()),
+        )
+        .await?;
+        let previous = self.snapshot(key)?;
         let mut snapshot = Snapshot {
             library: Library {
-                scan: None,
                 id: connection_id(key),
                 root: connection_id(key),
                 ..Default::default()
             },
             collections,
-            lists: vec![],
-            artwork: Default::default(),
-            album_collections: Default::default(),
+            lists: Vec::new(),
+            artwork: BTreeMap::new(),
+            album_collections: BTreeMap::new(),
+            album_revisions: BTreeMap::new(),
+            track_revisions: BTreeMap::new(),
+            artwork_descriptors: BTreeMap::new(),
+            summaries_pending: false,
             updated: now(),
         };
+        let total = summary.total_items as usize;
+        progress(amp_app::sources::SourceProgress {
+            completed: 0,
+            total: Some(total),
+            message: format!("Loading albums · 0 / {total}"),
+        });
+        let mut cursor = None;
+        let mut seen = BTreeSet::new();
+        loop {
+            check(cancelled)?;
+            let page = remote_read(
+                cancelled,
+                client.albums(&ids::BrowseQuery {
+                    revision: Some(summary.catalog_revision.clone()),
+                    cursor,
+                    limit: Some(200),
+                    ..Default::default()
+                }),
+            )
+            .await?;
+            check(cancelled)?;
+            anyhow::ensure!(
+                page.catalog_revision == summary.catalog_revision,
+                "Library changed; refresh again"
+            );
+            for row in page.items {
+                snapshot.summaries_pending |= row.summary_pending;
+                let id = row.id.to_string();
+                anyhow::ensure!(
+                    !snapshot.album_revisions.contains_key(&id),
+                    "Repeated album in catalog"
+                );
+                let old = previous
+                    .as_ref()
+                    .and_then(|p| p.library.albums.iter().find(|a| a.id.item == id));
+                let cached: Option<(String, Vec<Track>)> =
+                    self.get("album_tracks", &format!("{}/{id}", connection_id(key)))?;
+                let tracks = cached
+                    .as_ref()
+                    .map(|(_, tracks)| tracks.clone())
+                    .unwrap_or_else(|| old.map(|a| a.tracks.clone()).unwrap_or_default());
+                if let Some((revision, _)) = cached {
+                    snapshot.track_revisions.insert(id.clone(), revision);
+                }
+                if let Some(revision) = previous.as_ref().and_then(|p| p.track_revisions.get(&id)) {
+                    snapshot
+                        .track_revisions
+                        .insert(id.clone(), revision.clone());
+                }
+                snapshot
+                    .album_collections
+                    .insert(id.clone(), row.collection_id);
+                snapshot
+                    .album_revisions
+                    .insert(id.clone(), row.row_revision);
+                if let (Some(asset), Some(revision)) = (row.artwork, row.artwork_revision) {
+                    let descriptor = (row.collection_id, asset, revision);
+                    snapshot.artwork_descriptors.insert(id.clone(), descriptor);
+                    if let Some(old) = previous
+                        .as_ref()
+                        .filter(|p| p.artwork_descriptors.get(&id) == Some(&descriptor))
+                        .and_then(|p| p.artwork.get(&id))
+                        .filter(|path| std::path::Path::new(path).is_file())
+                    {
+                        snapshot.artwork.insert(id.clone(), old.clone());
+                    }
+                }
+                let label = snapshot
+                    .collections
+                    .iter()
+                    .find(|c| c.id == row.collection_id)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_default();
+                snapshot.library.albums.push(Album {
+                    metadata: Default::default(),
+                    id: ItemId {
+                        library: connection_id(key),
+                        provider: "collector".into(),
+                        item: id,
+                    },
+                    title: row.title,
+                    artist: row.artist,
+                    tracks,
+                    source_label: label,
+                });
+            }
+            {
+                let loaded = self.loaded_tracks.lock().unwrap();
+                for album in &mut snapshot.library.albums {
+                    if let Some((revision, tracks)) = loaded.get(&(key, album.id.item.clone())) {
+                        album.tracks = tracks.clone();
+                        snapshot
+                            .track_revisions
+                            .insert(album.id.item.clone(), revision.clone());
+                    }
+                }
+            }
+            {
+                let mut staged = self.staged.lock().unwrap();
+                anyhow::ensure!(
+                    staged
+                        .get(&key)
+                        .is_some_and(|(current, _)| *current == epoch),
+                    "Refresh superseded"
+                );
+                staged.insert(key, (epoch, snapshot.clone()));
+            }
+            publish(&snapshot);
+            progress(amp_app::sources::SourceProgress {
+                completed: snapshot.library.albums.len(),
+                total: Some(total),
+                message: format!(
+                    "Loading albums · {} / {total}",
+                    snapshot.library.albums.len()
+                ),
+            });
+            cursor = page.next_cursor;
+            if let Some(c) = &cursor {
+                anyhow::ensure!(
+                    seen.insert(c.clone()) && seen.len() <= 10000,
+                    "Invalid album pagination"
+                );
+            } else {
+                break;
+            }
+        }
+        anyhow::ensure!(
+            snapshot.library.albums.len() == total,
+            "Incomplete album catalog"
+        );
         for collection in snapshot.collections.iter().filter(|c| c.can_browse) {
             let mut cursor = None;
             let mut seen = BTreeSet::new();
             loop {
                 check(cancelled)?;
-                page_number += 1;
-                let message = |loaded| {
-                    format!("Loading albums · page {page_number} · {loaded} albums loaded")
-                };
-                report(0, None, message(albums_loaded));
-                let page = client
-                    .albums(&ids::BrowseQuery {
-                        collection_id: Some(collection.id),
-                        cursor,
-                        // Album presentation can be costly on a remote archive.
-                        // Keep each page within the client's request deadline.
-                        limit: Some(20),
-                        ..Default::default()
-                    })
-                    .await?;
-                let total = 1
-                    + page.items.len()
-                    + page.items.iter().filter(|a| a.artwork.is_some()).count();
-                let mut completed = 1;
-                report(completed, Some(total), message(albums_loaded));
-                for album in page.items {
-                    check(cancelled)?;
-                    let result = client.music_tracks(album.id).await;
-                    completed += 1;
-                    report(completed, Some(total), message(albums_loaded));
-                    let playback = result?;
-                    let mut tracks = vec![];
-                    let mut coordinates = BTreeSet::new();
-                    for row in playback.iter().filter(|t| {
-                        t.primary_playback()
-                            && t.album_selection == api::MusicAlbumSelection::Included
-                    }) {
-                        if coordinates.insert((
-                            row.capture_id,
-                            row.source_representation_id,
-                            row.track_position,
-                        )) {
-                            tracks.push(remote_track(
-                                key,
-                                album.id,
-                                collection.id,
-                                &album.artist,
-                                row,
-                            ));
-                        }
-                    }
-                    tracks.sort_by_key(|t| (t.disc, t.number));
-                    let item = album.id.to_string();
-                    snapshot
-                        .album_collections
-                        .insert(item.clone(), collection.id);
-                    if let Some(asset) = album.artwork {
-                        check(cancelled)?;
-                        let result = client.thumbnail(collection.id, asset).await;
-                        completed += 1;
-                        report(completed, Some(total), message(albums_loaded));
-                        if let Ok(bytes) = result {
-                            let filename = hex::encode(Sha256::digest(
-                                format!("{}/{}/{asset}", connection_id(key), collection.id)
-                                    .as_bytes(),
-                            ));
-                            let path = self.root.join("art").join(filename);
-                            self.prune_artwork(bytes.len() as u64)?;
-                            std::fs::write(&path, bytes)?;
-                            snapshot
-                                .artwork
-                                .insert(item.clone(), path.to_string_lossy().into_owned());
-                        }
-                    }
-                    albums_loaded += 1;
-                    report(completed, Some(total), message(albums_loaded));
-                    snapshot.library.albums.push(Album {
-                        metadata: Default::default(),
-                        id: ItemId {
-                            library: connection_id(key),
-                            provider: "collector".into(),
-                            item,
-                        },
-                        title: album.title,
-                        artist: album.artist,
-                        tracks,
-                        source_label: collection.name.clone(),
-                    });
-                }
-                cursor = page.next_cursor;
-                match &cursor {
-                    None => break,
-                    Some(c) => {
-                        if !seen.insert(c.clone()) || seen.len() > 10000 {
-                            bail!("Invalid album pagination")
-                        }
-                    }
-                }
-            }
-            let mut cursor = None;
-            let mut seen = BTreeSet::new();
-            loop {
-                check(cancelled)?;
-                report(
-                    0,
-                    None,
-                    format!("Loading playlists · {albums_loaded} albums loaded"),
-                );
-                let page = client
-                    .lists(
+                let page = remote_read(
+                    cancelled,
+                    client.lists(
                         collection.id,
                         &api::CollectionListsQuery {
                             search: None,
                             cursor,
                             limit: Some(100),
                         },
-                    )
-                    .await?;
-                let total = 1 + page
+                    ),
+                )
+                .await?;
+                for list in page
                     .items
-                    .iter()
-                    .filter(|list| list.kind == ids::CollectionListKind::MusicTracks)
-                    .count();
-                let mut completed = 1;
-                report(
-                    completed,
-                    Some(total),
-                    format!("Loading playlists · {albums_loaded} albums loaded"),
-                );
-                for list in page.items {
-                    check(cancelled)?;
-                    if list.kind == ids::CollectionListKind::MusicTracks {
-                        snapshot
-                            .lists
-                            .push(client.list_snapshot(collection.id, list.id).await?);
-                        completed += 1;
-                        report(
-                            completed,
-                            Some(total),
-                            format!("Loading playlists · {albums_loaded} albums loaded"),
-                        );
-                    }
+                    .into_iter()
+                    .filter(|l| l.kind == ids::CollectionListKind::MusicTracks)
+                {
+                    let cached = previous.as_ref().and_then(|p| {
+                        p.lists
+                            .iter()
+                            .find(|l| l.list.id == list.id && l.list.revision == list.revision)
+                    });
+                    snapshot
+                        .lists
+                        .push(cached.cloned().unwrap_or(api::CollectionListView {
+                            list,
+                            entries: ids::Page {
+                                items: Vec::new(),
+                                next_cursor: None,
+                            },
+                        }));
                 }
                 cursor = page.next_cursor.map(|c| c.parse()).transpose()?;
-                match cursor {
-                    None => break,
-                    Some(c) => {
-                        if !seen.insert(c) || seen.len() > 10000 {
-                            bail!("Invalid list pagination")
-                        }
-                    }
+                if let Some(c) = &cursor {
+                    anyhow::ensure!(
+                        seen.insert(*c) && seen.len() <= 10000,
+                        "Invalid list pagination"
+                    );
+                } else {
+                    break;
                 }
             }
         }
         check(cancelled)?;
-        self.put("snapshot", &connection_id(key), &snapshot)?;
-        Ok(snapshot)
+        self.commit_refresh(key, epoch, snapshot, cancelled)
+    }
+    /// Album-open work; the manifest refresh never calls this method.
+    pub async fn load_album(
+        &self,
+        key: ConnectionKey,
+        item: ids::ItemId,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Album> {
+        let client = self.client(key)?;
+        let started = std::time::Instant::now();
+        let summary = loop {
+            let summary = remote_read(cancelled, client.track_summary(item)).await?;
+            if !summary.pending {
+                break summary;
+            }
+            anyhow::ensure!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "Album tracks are still updating; reopen or refresh to retry"
+            );
+            remote_read(cancelled, async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                Ok(())
+            })
+            .await?;
+        };
+        check(cancelled)?;
+        let id = item.to_string();
+        let snapshot = self
+            .display_snapshot(key)?
+            .context("Refresh library first")?;
+        let mut album = snapshot
+            .library
+            .albums
+            .iter()
+            .find(|album| album.id.item == id)
+            .cloned()
+            .context("Album no longer in library")?;
+        if snapshot.track_revisions.get(&id) == Some(&summary.tracks_revision) {
+            return Ok(album);
+        }
+        let mut query = api::TrackPageQuery {
+            revision: Some(summary.tracks_revision.clone()),
+            ..Default::default()
+        };
+        let mut tracks = Vec::new();
+        let mut coordinates = BTreeSet::new();
+        loop {
+            let page = remote_read(cancelled, client.track_page(item, &query)).await?;
+            check(cancelled)?;
+            anyhow::ensure!(
+                !page.summary.pending && page.summary.tracks_revision == summary.tracks_revision,
+                "Album changed; reopen to retry"
+            );
+            for row in page.items.iter().filter(|t| {
+                t.primary_playback() && t.album_selection == api::MusicAlbumSelection::Included
+            }) {
+                if coordinates.insert((
+                    row.capture_id,
+                    row.source_representation_id,
+                    row.track_position,
+                )) {
+                    let artist = snapshot
+                        .library
+                        .albums
+                        .iter()
+                        .find(|a| a.id.item == id)
+                        .map(|a| a.artist.as_str())
+                        .unwrap_or("");
+                    tracks.push(remote_track(
+                        key,
+                        item,
+                        *snapshot
+                            .album_collections
+                            .get(&id)
+                            .context("Album collection missing")?,
+                        artist,
+                        row,
+                    ));
+                }
+            }
+            if let Some(cursor) = page.next_cursor {
+                anyhow::ensure!(Some(cursor) > query.cursor, "Invalid track pagination");
+                query.cursor = Some(cursor);
+            } else {
+                break;
+            }
+        }
+        tracks.sort_by_key(|t| (t.disc, t.number));
+        check(cancelled)?;
+        let revision = summary.tracks_revision;
+        self.put(
+            "album_tracks",
+            &format!("{}/{id}", connection_id(key)),
+            &(revision.clone(), tracks.clone()),
+        )?;
+        self.loaded_tracks
+            .lock()
+            .unwrap()
+            .insert((key, id.clone()), (revision.clone(), tracks.clone()));
+        album.tracks = tracks.clone();
+        if self.snapshot(key)?.is_some() {
+            self.update_snapshot(key, |current| {
+                check(cancelled)?;
+                if let Some(row) = current
+                    .library
+                    .albums
+                    .iter_mut()
+                    .find(|row| row.id.item == id)
+                {
+                    row.tracks = tracks.clone();
+                    current.track_revisions.insert(id.clone(), revision.clone());
+                }
+                Ok(())
+            })?;
+        }
+        if let Some((_, stage)) = self.staged.lock().unwrap().get_mut(&key)
+            && let Some(row) = stage
+                .library
+                .albums
+                .iter_mut()
+                .find(|row| row.id.item == id)
+        {
+            row.tracks = tracks;
+            stage.track_revisions.insert(id, revision);
+        }
+        Ok(album)
+    }
+    pub async fn load_list(
+        &self,
+        key: ConnectionKey,
+        list: ids::CollectionListId,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<()> {
+        let snapshot = self.snapshot(key)?.context("Library unavailable")?;
+        let index = snapshot
+            .lists
+            .iter()
+            .position(|l| l.list.id == list)
+            .context("List unavailable")?;
+        let original_revision = snapshot.lists[index].list.revision;
+        let value = self
+            .client(key)?
+            .list_snapshot(snapshot.lists[index].list.collection_id, list)
+            .await?;
+        check(cancelled)?;
+        self.update_snapshot(key, |snapshot| {
+            check(cancelled)?;
+            if let Some(row) = snapshot.lists.iter_mut().find(|l| l.list.id == list) {
+                anyhow::ensure!(
+                    row.list.revision == original_revision
+                        || row.list.revision == value.list.revision,
+                    "Playlist changed; reopen to retry"
+                );
+                *row = value;
+            }
+            Ok(())
+        })?;
+        self.notify_availability(key);
+        Ok(())
     }
     pub fn list_tracks(&self, key: ConnectionKey, list: &api::CollectionListView) -> Vec<Track> {
         (0..list.entries.items.len())
@@ -1209,6 +1598,7 @@ fn download_id(remote: &RemoteTrack) -> Result<String> {
 }
 struct CachedReader {
     file: std::fs::File,
+    length: u64,
     cancellation: MediaCancellation,
 }
 impl Read for CachedReader {
@@ -1216,7 +1606,22 @@ impl Read for CachedReader {
         if self.cancellation.is_cancelled() {
             return Err(std::io::Error::other("Playback cancelled"));
         };
-        self.file.read(bytes)
+        use std::io::Seek;
+        let position = self.file.stream_position()?;
+        let wanted = bytes
+            .len()
+            .min(self.length.saturating_sub(position) as usize);
+        if wanted == 0 {
+            return Ok(0);
+        }
+        let count = self.file.read(&mut bytes[..wanted])?;
+        if count == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Downloaded audio ended before its recorded length",
+            ));
+        }
+        Ok(count)
     }
 }
 impl std::io::Seek for CachedReader {
@@ -1245,28 +1650,19 @@ impl amp_audio::MediaResolver for Adapter {
             .unwrap()
             .push((remote.key, cancellation.clone()));
         if let Some(record) = self.retained_download(&remote)? {
-            let mut file = std::fs::File::open(self.root.join("audio").join(&record.id))?;
-            let mut hash = Sha256::new();
-            let mut buffer = [0; 65536];
-            let mut length = 0;
-            loop {
-                if cancellation.is_cancelled() {
-                    bail!("Playback cancelled")
-                };
-                let n = file.read(&mut buffer)?;
-                if n == 0 {
-                    break;
-                }
-                hash.update(&buffer[..n]);
-                length += n as u64;
+            let file = std::fs::File::open(self.root.join("audio").join(&record.id))?;
+            let length = file.metadata()?.len();
+            if length != record.bytes {
+                bail!(
+                    "Downloaded audio has a different recorded length; remove and download again"
+                );
             }
-            if length != record.bytes || hex::encode(hash.finalize()) != record.digest {
-                bail!("Downloaded audio is corrupt; remove and download again")
-            }
-            use std::io::Seek;
-            file.rewind()?;
             return Ok(amp_audio::ByteSource::new(
-                CachedReader { file, cancellation },
+                CachedReader {
+                    file,
+                    cancellation,
+                    length,
+                },
                 record
                     .remote
                     .audio
@@ -1279,25 +1675,10 @@ impl amp_audio::MediaResolver for Adapter {
         // HTTPS with scoped grants. It owns retries and public fallback policy;
         // the enrolled account and offline-cache identity stay unchanged.
         let client = self.client(remote.key)?;
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        let rows=rt.block_on(async {
-            let request=client.music_tracks(remote.item);tokio::pin!(request);
-            loop {
-                if cancellation.is_cancelled() {return Err(ids::Error::JobCancelled)}
-                tokio::select! {result=&mut request=>return result,_=tokio::time::sleep(std::time::Duration::from_millis(20))=>{}}
-            }
-        })?;
-        let audio = rows
-            .iter()
-            .find(|a| {
-                a.capture_id == remote.capture
-                    && a.source_representation_id == remote.source
-                    && a.track_position == remote.position
-                    && a.primary_playback()
-            })
-            .context("Source no longer available")?;
+        let audio = remote
+            .audio
+            .as_ref()
+            .context("Track media information is missing; reopen the album")?;
         let api::MusicTrackAvailabilityState::Available {
             representation_id,
             file_index,
@@ -1335,6 +1716,16 @@ fn media_hint(
         _ => None,
     };
     amp_audio::MediaHint::new(length, extension, media_type)
+}
+
+async fn remote_read<T>(
+    cancelled: &dyn Fn() -> bool,
+    request: impl std::future::Future<Output = ids::Result<T>>,
+) -> Result<T> {
+    tokio::select! {
+        result=request => Ok(result?),
+        _=async { loop { if cancelled() {break;} tokio::time::sleep(std::time::Duration::from_millis(20)).await; } } => bail!("Cancelled"),
+    }
 }
 
 #[cfg(test)]
@@ -1515,6 +1906,10 @@ mod tests {
                 lists: vec![],
                 artwork: Default::default(),
                 album_collections: Default::default(),
+                album_revisions: Default::default(),
+                track_revisions: Default::default(),
+                artwork_descriptors: Default::default(),
+                summaries_pending: false,
                 updated: 7,
             };
             a.put("snapshot", &connection_id(key), &snapshot).unwrap();
@@ -1611,7 +2006,7 @@ mod tests {
         );
     }
     #[test]
-    fn completed_audio_is_retained_offline_and_corruption_fails_closed() {
+    fn offline_playback_uses_recorded_length_without_whole_file_verification() {
         use amp_audio::MediaResolver;
         let root = tempfile::tempdir().unwrap();
         let a = Adapter::with_credentials(root.path(), Arc::new(MemorySecrets::default())).unwrap();
@@ -1626,6 +2021,24 @@ mod tests {
         let mut actual = vec![];
         reader.reader_mut().read_to_end(&mut actual).unwrap();
         assert_eq!(actual, data);
+        // Same-length changes are consumed directly; playback is not an integrity scan.
+        let changed = vec![b'x'; data.len()];
+        std::fs::write(a.root.join("audio").join(&d.id), &changed).unwrap();
+        let mut reader = a.resolve(&t).unwrap();
+        let mut first = [0; 1];
+        reader.reader_mut().read_exact(&mut first).unwrap();
+        assert_eq!(first, [b'x']);
+        // A real length/read failure remains visible to the caller.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(a.root.join("audio").join(&d.id))
+            .unwrap()
+            .set_len(0)
+            .unwrap();
+        assert_eq!(
+            reader.reader_mut().read(&mut first).unwrap_err().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
         std::fs::write(a.root.join("audio").join(&d.id), b"corrupt").unwrap();
         assert!(a.resolve(&t).is_err());
         a.remove_download(&t).unwrap();
@@ -1661,7 +2074,11 @@ mod tests {
         let file = tempfile::tempfile().unwrap();
         let cancellation = MediaCancellation::default();
         cancellation.cancel();
-        let mut reader = CachedReader { file, cancellation };
+        let mut reader = CachedReader {
+            file,
+            cancellation,
+            length: 0,
+        };
         assert_ne!(
             reader.read(&mut [0u8; 1]).unwrap_err().kind(),
             std::io::ErrorKind::Interrupted

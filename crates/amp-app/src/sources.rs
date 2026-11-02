@@ -75,6 +75,26 @@ pub trait SourceProvider: Send + Sync {
     ) -> Result<ExternalCatalog> {
         self.load(id, interactive, cancelled)
     }
+    /// Intermediate pages are transient client-side presentation, not complete caches.
+    fn load_incremental(
+        &self,
+        id: &str,
+        interactive: bool,
+        cancelled: &dyn Fn() -> bool,
+        progress: &dyn Fn(SourceProgress),
+        _publish: &dyn Fn(ExternalCatalog),
+    ) -> Result<ExternalCatalog> {
+        self.load_with_progress(id, interactive, cancelled, progress)
+    }
+    /// Optional online search. Results are transient and must not replace the catalog.
+    fn search(
+        &self,
+        _id: &str,
+        _query: &str,
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<amp_core::Library>> {
+        Ok(None)
+    }
     fn has_artwork(&self) -> bool {
         false
     }
