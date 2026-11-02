@@ -28,9 +28,13 @@ export component BrowserItem inherits Rectangle {
             clicked => { focus.focus(); if root.item.kind == 3 { root.pointer-activate(); } else { root.activate(); } }
             double-clicked => { if root.item.kind == 3 && !root.tap-to-play { root.play(); } }
         }
-        Image { source: root.item.artwork; x: 6px; y: 6px; width: 40px; height: 40px; image-fit: contain; }
+        if root.item.kind == 1 || root.item.kind == 3 || root.item.kind == 5: Image {
+            source: root.item.artwork; x: 6px; y: 6px;
+            width: root.item.kind == 5 ? 20px : 40px; height: self.width;
+            image-fit: contain;
+        }
         VerticalLayout {
-            padding-left: root.item.kind == 1 || root.item.kind == 3 ? 52px : 8px; padding-right: 8px; padding-top: 5px; padding-bottom: 5px; spacing: 2px;
+            padding-left: root.item.kind == 5 ? 32px : root.item.kind == 1 || root.item.kind == 3 ? 52px : 8px; padding-right: 8px; padding-top: 5px; padding-bottom: 5px; spacing: 2px;
             Text { text: root.item.title; color: root.item.kind == 0 || root.item.kind == 6 ? Theme.muted : Theme.text;
                 font-size: (root.item.kind == 5 ? 12px : 14px) * root.text-scale;
                 font-weight: root.item.kind == 5 || root.item.kind == 6 ? 400 : 600;
