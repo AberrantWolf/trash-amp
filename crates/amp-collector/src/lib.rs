@@ -511,9 +511,28 @@ impl Adapter {
         key: ConnectionKey,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Snapshot> {
+        self.refresh_with_progress(key, cancelled, &|_| {}).await
+    }
+    pub async fn refresh_with_progress(
+        &self,
+        key: ConnectionKey,
+        cancelled: &dyn Fn() -> bool,
+        progress: &dyn Fn(amp_app::sources::SourceProgress),
+    ) -> Result<Snapshot> {
+        let report = |completed, total, message| {
+            progress(amp_app::sources::SourceProgress {
+                completed,
+                total,
+                message,
+            })
+        };
+        report(0, None, "Connecting to music library…".into());
         let client = self.client(key)?;
         let collections = client.collections().await?;
         check(cancelled)?;
+        report(1, Some(1), "Connected to music library".into());
+        let mut albums_loaded = 0;
+        let mut page_number = 0;
         let mut snapshot = Snapshot {
             library: Library {
                 scan: None,
@@ -532,17 +551,32 @@ impl Adapter {
             let mut seen = BTreeSet::new();
             loop {
                 check(cancelled)?;
+                page_number += 1;
+                let message = |loaded| {
+                    format!("Loading albums · page {page_number} · {loaded} albums loaded")
+                };
+                report(0, None, message(albums_loaded));
                 let page = client
                     .albums(&ids::BrowseQuery {
                         collection_id: Some(collection.id),
                         cursor,
-                        limit: Some(100),
+                        // Album presentation can be costly on a remote archive.
+                        // Keep each page within the client's request deadline.
+                        limit: Some(20),
                         ..Default::default()
                     })
                     .await?;
+                let total = 1
+                    + page.items.len()
+                    + page.items.iter().filter(|a| a.artwork.is_some()).count();
+                let mut completed = 1;
+                report(completed, Some(total), message(albums_loaded));
                 for album in page.items {
                     check(cancelled)?;
-                    let playback = client.music_tracks(album.id).await?;
+                    let result = client.music_tracks(album.id).await;
+                    completed += 1;
+                    report(completed, Some(total), message(albums_loaded));
+                    let playback = result?;
                     let mut tracks = vec![];
                     let mut coordinates = BTreeSet::new();
                     for row in playback.iter().filter(|t| {
@@ -570,7 +604,10 @@ impl Adapter {
                         .insert(item.clone(), collection.id);
                     if let Some(asset) = album.artwork {
                         check(cancelled)?;
-                        if let Ok(bytes) = client.thumbnail(collection.id, asset).await {
+                        let result = client.thumbnail(collection.id, asset).await;
+                        completed += 1;
+                        report(completed, Some(total), message(albums_loaded));
+                        if let Ok(bytes) = result {
                             let filename = hex::encode(Sha256::digest(
                                 format!("{}/{}/{asset}", connection_id(key), collection.id)
                                     .as_bytes(),
@@ -583,6 +620,8 @@ impl Adapter {
                                 .insert(item.clone(), path.to_string_lossy().into_owned());
                         }
                     }
+                    albums_loaded += 1;
+                    report(completed, Some(total), message(albums_loaded));
                     snapshot.library.albums.push(Album {
                         metadata: Default::default(),
                         id: ItemId {
@@ -610,6 +649,11 @@ impl Adapter {
             let mut seen = BTreeSet::new();
             loop {
                 check(cancelled)?;
+                report(
+                    0,
+                    None,
+                    format!("Loading playlists · {albums_loaded} albums loaded"),
+                );
                 let page = client
                     .lists(
                         collection.id,
@@ -620,12 +664,29 @@ impl Adapter {
                         },
                     )
                     .await?;
+                let total = 1 + page
+                    .items
+                    .iter()
+                    .filter(|list| list.kind == ids::CollectionListKind::MusicTracks)
+                    .count();
+                let mut completed = 1;
+                report(
+                    completed,
+                    Some(total),
+                    format!("Loading playlists · {albums_loaded} albums loaded"),
+                );
                 for list in page.items {
                     check(cancelled)?;
                     if list.kind == ids::CollectionListKind::MusicTracks {
                         snapshot
                             .lists
-                            .push(client.list_snapshot(collection.id, list.id).await?)
+                            .push(client.list_snapshot(collection.id, list.id).await?);
+                        completed += 1;
+                        report(
+                            completed,
+                            Some(total),
+                            format!("Loading playlists · {albums_loaded} albums loaded"),
+                        );
                     }
                 }
                 cursor = page.next_cursor.map(|c| c.parse()).transpose()?;

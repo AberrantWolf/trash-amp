@@ -313,6 +313,8 @@ fn mobile_pause_releases_output_without_reopening_until_play_and_restores_audibl
 #[derive(Default)]
 struct NetworkGate {
     blocked: Mutex<bool>,
+    // When set, allow this prefix through before blocking subsequent reads.
+    prefix_bytes: AtomicUsize,
     changed: Condvar,
     entered: AtomicBool,
     reads: AtomicUsize,
@@ -329,8 +331,10 @@ struct NetworkReader {
 }
 impl std::io::Read for NetworkReader {
     fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let prefix = self.gate.prefix_bytes.load(Ordering::Acquire);
+        let position = self.bytes.position() as usize;
         let mut blocked = self.gate.blocked.lock().unwrap();
-        while *blocked {
+        while *blocked && (prefix == 0 || position >= prefix) {
             self.gate.entered.store(true, Ordering::Release);
             let (guard, timeout) = self
                 .gate
@@ -343,7 +347,12 @@ impl std::io::Read for NetworkReader {
             }
         }
         self.gate.reads.fetch_add(1, Ordering::Relaxed);
-        std::io::Read::read(&mut self.bytes, bytes)
+        let count = if *blocked && prefix > position {
+            bytes.len().min(prefix - position)
+        } else {
+            bytes.len()
+        };
+        std::io::Read::read(&mut self.bytes, &mut bytes[..count])
     }
 }
 impl std::io::Seek for NetworkReader {
@@ -359,6 +368,9 @@ struct NetworkResolver {
 impl MediaResolver for NetworkResolver {
     fn resolve(&self, _: &Track) -> Result<ByteSource> {
         self.opens.fetch_add(1, Ordering::Relaxed);
+        if self.gate.prefix_bytes.load(Ordering::Acquire) > 0 {
+            *self.gate.blocked.lock().unwrap() = true;
+        }
         Ok(ByteSource::new(
             NetworkReader {
                 bytes: std::io::Cursor::new(self.bytes.clone()),
@@ -374,6 +386,48 @@ impl MediaResolver for NetworkResolver {
     fn cancel(&self) {
         self.gate.release();
     }
+}
+
+#[test]
+fn mobile_starts_playback_before_fifteen_second_read_ahead_is_downloaded() {
+    let (_dir, mut track) = tests::fixture(44_100, 44_100 * 40);
+    let MediaAccess::File { locator } = &track.access else {
+        unreachable!()
+    };
+    let gate = Arc::new(NetworkGate::default());
+    // WAV header plus two seconds of 16-bit stereo. Keep the rest of the
+    // source unavailable until we have heard actual samples from the callback.
+    gate.prefix_bytes
+        .store(44 + 44_100 * 4 * 2, Ordering::Release);
+    let resolver = Arc::new(NetworkResolver {
+        bytes: std::fs::read(locator).unwrap(),
+        gate: gate.clone(),
+        opens: AtomicUsize::new(0),
+    });
+    track.access = MediaAccess::Managed {
+        provider: "network-test".into(),
+        item: "track".into(),
+    };
+    let harness = Harness::with_resolver(
+        Some(Device::new("mobile", 44_100)),
+        None,
+        true,
+        Some(resolver),
+    );
+    harness.player.play(vec![track], 0);
+    let output = harness.session(0);
+    wait(|| gate.entered.load(Ordering::Acquire));
+    assert!(output.running.load(Ordering::Acquire));
+    let available = output.consumer.lock().unwrap().slots();
+    assert!(available >= 44_100);
+    assert!(available < output::buffer_capacity(44_100, true));
+    assert_frames(&output.render(44_100), 0);
+    assert_eq!(harness.player.snapshot().seconds, 1.0);
+    assert_eq!(harness.player.snapshot().underruns, 0);
+    gate.release();
+    output.wait_frames(output::buffer_capacity(44_100, true));
+    assert_frames(&output.render(147), 44_100);
+    assert!(harness.player.event().is_none());
 }
 
 #[test]

@@ -109,7 +109,7 @@ only for this session.
 - Mobile single-tap playback from a track through the remaining album, playlist, or visible track results. Playable tracks have no availability label; exceptions use smaller, muted text.
 - Space to play/pause and Left/Right to go previous/next when browsing. Focused controls retain their native keyboard behavior; Enter plays a selected track. Previous restarts after three seconds.
 - OS media keys and Now Playing metadata through Souvlaki (macOS integrated; Windows/Linux still need platform validation).
-- Audio read-ahead defaults to 15 seconds. Settings → General offers a saved 3–60 second buffer; restart the app to apply changes. Larger buffers help cover cellular stalls but use more memory. iOS pauses on output disconnection and audio interruptions, keeping the transport button in sync when returning to the app.
+- Audio read-ahead defaults to 15 seconds. Playback starts as decoded samples become available while read-ahead continues; it does not wait for the buffer to fill. Settings → General offers a saved 3–60 second buffer; restart the app to apply changes. Larger buffers help cover cellular stalls but use more memory. iOS pauses on output disconnection and audio interruptions, keeping the transport button in sync when returning to the app.
 - Audio-output recovery preserves the queue and playback position, pauses on device loss or a default-output change, and reconnects in the background. Press Play to resume; an explicit Play request while disconnected is retained.
 - File discovery counts and scan progress, with four parallel tag readers and artwork skipped to reduce network traffic.
 

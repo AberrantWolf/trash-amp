@@ -33,6 +33,14 @@ pub struct SourceChange {
 }
 pub type SourceObserver = Arc<dyn Fn(SourceChange) + Send + Sync>;
 
+/// Progress within the current loading stage; an absent total means discovery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceProgress {
+    pub completed: usize,
+    pub total: Option<usize>,
+    pub message: String,
+}
+
 /// Load/cache/artwork methods run on job threads. Descriptors and access status
 /// must be quick, must not request permission, and may run on the catalog owner.
 pub trait SourceProvider: Send + Sync {
@@ -58,6 +66,15 @@ pub trait SourceProvider: Send + Sync {
         interactive: bool,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<ExternalCatalog>;
+    fn load_with_progress(
+        &self,
+        id: &str,
+        interactive: bool,
+        cancelled: &dyn Fn() -> bool,
+        _progress: &dyn Fn(SourceProgress),
+    ) -> Result<ExternalCatalog> {
+        self.load(id, interactive, cancelled)
+    }
     fn has_artwork(&self) -> bool {
         false
     }

@@ -1,5 +1,7 @@
 //! Catalog jobs, accepted completion and persistence. No UI event loop is needed.
-use crate::sources::{AccessStatus, RefreshKind, SourceChange, SourceDescriptor, SourceProvider};
+use crate::sources::{
+    AccessStatus, RefreshKind, SourceChange, SourceDescriptor, SourceProgress, SourceProvider,
+};
 use crate::{Notice, Playback};
 use amp_core::{Album, Library, Preferences};
 use amp_library::{FilesystemProvider, SavedFolder, ScanProgress, ScanResult, Store};
@@ -38,6 +40,7 @@ pub struct Snapshot {
     /// Completed source jobs, including failures; independent of catalog publication.
     pub source_load_revision: u64,
     pub source_message: Option<String>,
+    pub source_progress: Option<SourceProgress>,
     pub scanning: bool,
     pub enriching: bool,
     pub matching_busy: bool,
@@ -304,6 +307,7 @@ impl CatalogService {
             source_online: None,
             source_load_revision: 0,
             source_message: None,
+            source_progress: None,
             scanning: false,
             enriching: false,
             matching_busy: false,
@@ -378,6 +382,7 @@ enum Command {
     SourceArtwork(SourceRequest, BTreeMap<String, String>),
     OpenSource(u64, String, bool, RefreshKind),
     SourceLoaded(SourceRequest, bool, Result<ExternalCatalog>),
+    SourceProgress(SourceRequest, SourceProgress),
     Invalidate(u64),
     Scan(u64, PathBuf),
     Saved(u64, String),
@@ -733,6 +738,7 @@ impl Worker {
             return Ok(());
         }
         self.state.requested_source = Some(id.clone());
+        self.state.source_progress = None;
         let access = provider.access_status();
         self.state.source_access = Some(access);
         self.state.source_message = Some(if access == AccessStatus::NotDetermined {
@@ -797,7 +803,13 @@ impl Worker {
                 if obsolete() {
                     return;
                 }
-                let result = provider.load(&request.id, interactive, &obsolete);
+                let progress = |progress| {
+                    if !obsolete() {
+                        let _ = tx.send(Command::SourceProgress(request.clone(), progress));
+                    }
+                };
+                let result =
+                    provider.load_with_progress(&request.id, interactive, &obsolete, &progress);
                 // Only adapters that actually supply artwork retain another catalog.
                 let artwork_catalog = if provider.has_artwork() {
                     result.as_ref().ok().cloned()
@@ -816,6 +828,7 @@ impl Worker {
             self.state.scanning = false;
             self.source_job = None;
             self.state.requested_source = None;
+            self.state.source_progress = None;
             self.state.source_message =
                 Some(format!("Could not start music library load: {error}"));
             return Err(error.into());
@@ -895,6 +908,7 @@ impl Worker {
                         .is_some_and(|job| job.request.id == id)
                     {
                         self.source_job = None;
+                        self.state.source_progress = None;
                     }
                     self.revoke_access(&id)?;
                 }
@@ -932,6 +946,7 @@ impl Worker {
                     self.source_job.as_mut().unwrap().loading = false;
                     self.state.scanning = false;
                     self.state.requested_source = None;
+                    self.state.source_progress = None;
                 }
                 let completion = (|| -> Result<()> {
                     // Access can be revoked after a job returned data but before it is admitted.
@@ -984,6 +999,12 @@ impl Worker {
                     self.queue_source_refresh(request.id, refresh);
                 }
             }
+            Command::SourceProgress(request, progress)
+                if self.source_request_current(&request)
+                    && self.source_job.as_ref().is_some_and(|job| job.loading) =>
+            {
+                self.state.source_progress = Some(progress);
+            }
             Command::Invalidate(v) if self.current(v) => {
                 let flushed = self.flush_metadata();
                 self.state.generation = v;
@@ -998,6 +1019,7 @@ impl Worker {
                 self.state.requested_source = None;
                 self.state.source_access = None;
                 self.state.source_message = None;
+                self.state.source_progress = None;
                 self.state.enriching = false;
                 self.state.progress = None;
                 self.state.notice = None;

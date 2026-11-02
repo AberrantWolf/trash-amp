@@ -200,6 +200,28 @@ fn wire_source_selection(ui: &PlayerWindow, state: &Rc<RefCell<State>>) {
         }
     });
 }
+fn render_source_progress(
+    ui: &PlayerWindow,
+    loading: bool,
+    progress: Option<&amp_app::sources::SourceProgress>,
+) {
+    ui.set_source_loading(loading);
+    ui.set_source_progress_message(
+        progress
+            .map(|progress| progress.message.clone())
+            .unwrap_or_else(|| "Loading music library…".into())
+            .into(),
+    );
+    let fraction = progress.and_then(|progress| {
+        progress
+            .total
+            .filter(|total| *total > 0)
+            .map(|total| (progress.completed as f32 / total as f32).clamp(0.0, 1.0))
+    });
+    ui.set_source_progress(fraction.unwrap_or(0.0));
+    ui.set_source_progress_indeterminate(fraction.is_none());
+}
+
 fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
     let snapshot = state.catalog.snapshot();
     if snapshot.generation != state.catalog.generation().current() {
@@ -363,6 +385,11 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
         folder_choices(ui, state);
     }
     ui.set_source_status(snapshot.source_message.clone().unwrap_or_default().into());
+    render_source_progress(
+        ui,
+        snapshot.scanning && snapshot.requested_source.is_some(),
+        snapshot.source_progress.as_ref(),
+    );
     if state.catalog_revision != snapshot.library_revision || ui.get_scan_summary().is_empty() {
         render_scan_status(
             ui,
@@ -1249,6 +1276,42 @@ impl TestServices {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn library_progress_advances_with_responses_and_hides_when_loading_ends() {
+        use amp_app::sources::SourceProgress;
+        use i_slint_backend_testing::ElementHandle;
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(390., 740.));
+        ui.set_home(true);
+        render_source_progress(&ui, true, None);
+        ui.show().unwrap();
+        assert!(ui.get_source_progress_indeterminate());
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "Library loading progress")
+                .next()
+                .is_some()
+        );
+        let mut progress = SourceProgress {
+            completed: 1,
+            total: Some(4),
+            message: "Loading albums · page 2 · 20 albums loaded".into(),
+        };
+        render_source_progress(&ui, true, Some(&progress));
+        assert_eq!(ui.get_source_progress(), 0.25);
+        assert!(!ui.get_source_progress_indeterminate());
+        progress.completed = 3;
+        render_source_progress(&ui, true, Some(&progress));
+        assert_eq!(ui.get_source_progress(), 0.75);
+        assert_eq!(ui.get_source_progress_message(), progress.message);
+        render_source_progress(&ui, false, None);
+        assert!(!ui.get_source_loading());
+        assert!(
+            ElementHandle::find_by_accessible_label(&ui, "Library loading progress")
+                .next()
+                .is_none()
+        );
+    }
     #[test]
     fn incomplete_scan_banner_keeps_details_and_retry_separate_from_playback_notices() {
         use i_slint_backend_testing::ElementHandle;

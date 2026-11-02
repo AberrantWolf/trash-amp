@@ -77,7 +77,21 @@ impl SourceProvider for Adapter {
     fn observe(&self, changed: SourceObserver) {
         *self.source_observer.lock().unwrap() = Some(changed);
     }
-    fn load(&self, source: &str, _: bool, cancelled: &dyn Fn() -> bool) -> Result<ExternalCatalog> {
+    fn load(
+        &self,
+        source: &str,
+        interactive: bool,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<ExternalCatalog> {
+        self.load_with_progress(source, interactive, cancelled, &|_| {})
+    }
+    fn load_with_progress(
+        &self,
+        source: &str,
+        _: bool,
+        cancelled: &dyn Fn() -> bool,
+        progress: &dyn Fn(amp_app::sources::SourceProgress),
+    ) -> Result<ExternalCatalog> {
         let key = key(self, source)?;
         if self
             .connections()?
@@ -89,7 +103,7 @@ impl SourceProvider for Adapter {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        let snapshot = runtime.block_on(self.refresh(key, cancelled))?;
+        let snapshot = runtime.block_on(self.refresh_with_progress(key, cancelled, progress))?;
         catalog(self, key, Some(snapshot), true)
     }
 }

@@ -3,7 +3,7 @@ import { IconButton, ButtonHints } from "icon-button.slint";
 export { ButtonHints }
 import { TransportButton } from "transport-button.slint";
 import { Theme } from "theme.slint";
-import { Palette, Button, ScrollView, ListView, AboutSlint, ComboBox, LineEdit } from "std-widgets.slint";
+import { Palette, Button, ScrollView, ListView, AboutSlint, ComboBox, LineEdit, ProgressIndicator } from "std-widgets.slint";
 import { BrowserItem, BrowserRow } from "browser-item.slint";
 export { BrowserRow }
 import { TrackItem, TrackRow } from "track-item.slint";
@@ -46,6 +46,10 @@ export component PlayerWindow inherits Window {
     in property <bool> device-library-active;
     in property <bool> device-library-available;
     in property <string> source-status;
+    in property <bool> source-loading;
+    in property <float> source-progress;
+    in property <bool> source-progress-indeterminate;
+    in property <string> source-progress-message;
     callback music-access-settings();
     in property <bool> collector-online;
     in property <bool> collector-busy;
@@ -613,6 +617,26 @@ export component PlayerWindow inherits Window {
                 }
             }
         }
+        if root.source-loading: Rectangle {
+            vertical-stretch: 0;
+            background: Theme.surface; border-radius: 6px;
+            accessible-role: region; accessible-label: "Library loading progress";
+            VerticalLayout {
+                padding: 8px; spacing: 6px;
+                Text {
+                    text: root.source-progress-message;
+                    color: Theme.text; wrap: word-wrap;
+                    font-size: 12px * root.text-scale;
+                    accessible-live-region: polite;
+                }
+                ProgressIndicator {
+                    height: 4px;
+                    progress: root.source-progress;
+                    indeterminate: root.source-progress-indeterminate;
+                    accessible-label: "Current library page";
+                }
+            }
+        }
         if root.loading-files: FileLoadingStatus {
             message: root.loading-message; path: root.loading-path; compact: root.short;
             cancelled => { root.cancel-file-load(); }
@@ -677,7 +701,7 @@ export component PlayerWindow inherits Window {
                     playhead := TransportSeek { position <=> root.progress; seek(v) => { root.seek(v); } }
                     Text { text: root.duration; color: Theme.muted; width: 40px; vertical-alignment: center; }
                 }
-                if root.scanning: Rectangle {
+                if root.scanning && !root.source-loading: Rectangle {
                     height: 3px; background: Theme.hover;
                     Rectangle { height: 100%; width: parent.width * root.scan-progress; background: Theme.accent; }
                 }

@@ -821,6 +821,7 @@ struct TestProvider {
     fail: AtomicBool,
     gate: Mutex<Option<mpsc::Receiver<()>>>,
     changed: Mutex<Option<crate::sources::SourceObserver>>,
+    progress: Mutex<Vec<crate::sources::SourceProgress>>,
 }
 impl TestProvider {
     fn new() -> Arc<Self> {
@@ -830,10 +831,23 @@ impl TestProvider {
             fail: AtomicBool::new(false),
             gate: Mutex::default(),
             changed: Mutex::default(),
+            progress: Mutex::default(),
         })
     }
 }
 impl SourceProvider for TestProvider {
+    fn load_with_progress(
+        &self,
+        id: &str,
+        interactive: bool,
+        cancelled: &dyn Fn() -> bool,
+        progress: &dyn Fn(crate::sources::SourceProgress),
+    ) -> Result<ExternalCatalog> {
+        for value in self.progress.lock().unwrap().drain(..) {
+            progress(value);
+        }
+        self.load(id, interactive, cancelled)
+    }
     fn descriptors(&self) -> Result<Vec<SourceDescriptor>> {
         Ok(vec![SourceDescriptor {
             id: "native:test".into(),
@@ -866,6 +880,66 @@ impl SourceProvider for TestProvider {
         *self.changed.lock().unwrap() = Some(changed);
     }
 }
+#[test]
+fn source_progress_is_live_and_clears_on_completion_failure_and_cancellation() {
+    use crate::sources::SourceProgress;
+    let h = Harness::simple(&[]);
+    let catalog = h.handle();
+    let provider = TestProvider::new();
+    catalog.register_sources(vec![provider.clone()], false);
+    read(&catalog);
+    for attempt in 0..3 {
+        let (release, gate) = mpsc::channel();
+        *provider.gate.lock().unwrap() = Some(gate);
+        let progress = SourceProgress {
+            completed: 2,
+            total: Some(5),
+            message: "Loading page 2".into(),
+        };
+        *provider.progress.lock().unwrap() = vec![progress.clone()];
+        provider.fail.store(attempt == 1, Ordering::Release);
+        catalog.select_source("native:test".into());
+        wait(|| catalog.snapshot().source_progress.is_some());
+        let pending = read(&catalog);
+        assert!(pending.scanning);
+        assert_eq!(pending.source_progress, Some(progress.clone()));
+        let request = SourceRequest {
+            generation: pending.generation,
+            serial: attempt + 1,
+            id: "native:test".into(),
+        };
+        let mut stale = request.clone();
+        stale.serial += 100;
+        catalog.send(Command::SourceProgress(
+            stale,
+            SourceProgress {
+                completed: 5,
+                ..progress.clone()
+            },
+        ));
+        assert_eq!(read(&catalog).source_progress, Some(progress.clone()));
+        if attempt == 2 {
+            catalog.generation().advance();
+            assert!(read(&catalog).source_progress.is_none());
+        }
+        release.send(()).unwrap();
+        wait(|| !catalog.snapshot().scanning);
+        assert!(read(&catalog).source_progress.is_none());
+        // A provider reporting after its final result cannot revive the banner.
+        catalog.send(Command::SourceProgress(request, progress));
+        assert!(read(&catalog).source_progress.is_none());
+        if attempt == 1 {
+            assert!(
+                read(&catalog)
+                    .source_message
+                    .unwrap()
+                    .contains("Refresh unavailable")
+            );
+        }
+        wait(|| provider.gate.try_lock().is_ok());
+    }
+}
+
 #[test]
 fn registered_sources_load_persist_and_fail_refresh_without_ui() {
     let h = Harness::simple(&[]);

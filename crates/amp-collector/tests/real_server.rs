@@ -475,6 +475,111 @@ impl Fixture {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn refresh_retains_every_album_across_bounded_pages() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let first = ItemId::new();
+    let fixture = Fixture::new(first, "Playable album").await;
+    let collection = fixture
+        ._state
+        .service
+        .item_presented(&fixture.owner, first)
+        .unwrap()
+        .collection_id;
+    let mut expected = std::collections::BTreeSet::from([first.to_string()]);
+    // Cross multiple refresh pages, including a final partial page. Albums
+    // without media must also survive pagination alongside the playable album.
+    for index in 0..41 {
+        let id = ItemId::new();
+        let item = Item {
+            lifecycle: Default::default(),
+            id,
+            collection_id: collection,
+            revision: Revision(0),
+            title: format!("Album {index:02}"),
+            subtitle: "Fixture artist".into(),
+            identity_link: ItemIdentityLink::None,
+            domain: ModuleData {
+                module: ModuleId("org.junk.music".into()),
+                schema_version: 1,
+                payload: RawJson::from_value(serde_json::json!({"tracks": []})),
+            },
+            identity: IdentityState::Unidentified,
+            translations: vec![],
+            identifiers: vec![],
+            specimens: vec![],
+            wishlist: false,
+            purchase_orders: vec![],
+            captures: vec![],
+            assets: vec![],
+            metadata: Default::default(),
+            deleted: false,
+            updated_at: chrono::Utc::now(),
+        };
+        fixture
+            ._state
+            .service
+            .save_item(&fixture.owner, id, item.into(), Revision(0), &command())
+            .unwrap();
+        expected.insert(id.to_string());
+    }
+    let secrets = Arc::new(Secrets::default());
+    let key = fixture.enroll(&secrets).await;
+    let cache = tempfile::tempdir().unwrap();
+    let adapter = Adapter::with_credentials(cache.path(), secrets).unwrap();
+    let progress = Mutex::new(Vec::new());
+    let snapshot = adapter
+        .refresh_with_progress(key, &|| false, &|value| {
+            progress.lock().unwrap().push(value)
+        })
+        .await
+        .unwrap();
+    let progress = progress.into_inner().unwrap();
+    let pages = progress
+        .iter()
+        .filter(|value| value.completed == 1 && value.total.is_some_and(|total| total > 1))
+        .collect::<Vec<_>>();
+    assert_eq!(pages.len(), 3);
+    for page in pages {
+        let updates = progress
+            .iter()
+            .filter(|value| {
+                value
+                    .message
+                    .split(" · ")
+                    .take(2)
+                    .eq(page.message.split(" · ").take(2))
+                    && value.total == page.total
+            })
+            .collect::<Vec<_>>();
+        let completed = updates
+            .iter()
+            .map(|value| value.completed)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(completed, (1..=page.total.unwrap()).collect());
+    }
+    let actual = snapshot
+        .library
+        .albums
+        .iter()
+        .map(|album| album.id.item.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(actual, expected);
+    assert_eq!(snapshot.library.albums.len(), expected.len());
+    assert_eq!(snapshot.album_collections.len(), expected.len());
+    assert!(
+        snapshot
+            .library
+            .albums
+            .iter()
+            .any(|album| { album.id.item == first.to_string() && !album.tracks.is_empty() })
+    );
+    assert_eq!(
+        adapter.snapshot(key).unwrap().unwrap().library.albums.len(),
+        expected.len()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let item = ItemId::new();

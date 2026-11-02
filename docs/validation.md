@@ -1,3 +1,135 @@
+## Library refresh progress — 2026-11-02
+
+Library loading now publishes worker progress to the catalog snapshot through an
+optional provider progress callback. Progress messages are fenced by the same
+source generation and request serial as catalog completions. Completion, failure,
+cancellation, permission revocation and new source requests clear stale progress;
+a late callback cannot revive a finished load.
+
+Collector reports discovery and within-page progress after album metadata,
+track availability and artwork responses, with a page number and running count
+of loaded albums. Playlist discovery and snapshots have their own stage. The UI
+shows this in a banner above the transport controls, using a determinate bar for
+the current page and an activity indicator during discovery. It does not invent
+a percentage for the entire library, whose total is not supplied by the server.
+Cached browsing remains available while the new snapshot loads atomically.
+
+Regression coverage verifies all response steps across three real TLS catalog
+pages, live catalog progress, stale request rejection, completion/failure/
+cancellation cleanup and actual widget progress updates/visibility. The final
+workspace run passes **245 tests, zero failures, three existing ignores**. The
+initial sandboxed workspace run failed three Apple audio decoding tests because
+macOS media services were unavailable there; the complete rerun with native
+service access passes those tests. Formatting, diff checks and warning-denied
+workspace/all-target Clippy pass.
+
+The actual native 390×844 layout was rendered and inspected; the page/count text,
+progress bar and playback controls fit. The temporary preview example was removed.
+Screenshot: `target/diagnostics/iphone-cellular-2026-11-02/library-progress.png`.
+Optimized signed iPhone build **3.2** builds and passes deep/strict signature
+verification. Executable SHA-256:
+`a2d8d2295f9d26b40a75ba0b33e55576f890d2c5c7a29613706fcd66cc4089b5`.
+The phone remains on its existing build; installation and physical-device progress
+acceptance are pending reconnection. No source push or production server deployment
+was performed.
+
+## Catalog refresh timeout on the public route — 2026-11-02
+
+The displayed `Cached / offline` age belongs to the last fully published catalog;
+it does not establish a failed login. The phone's retained snapshot contains 40
+albums. The current live library has 84. Collection discovery alone, checked in
+the earlier physical-phone diagnosis below, does not exercise a full refresh.
+
+With the phone unplugged, an isolated clone of the existing enrolled iOS simulator
+reproduces the actual catalog request failure. A loopback CONNECT relay forces the
+public Cloudflare control route while retaining normal end-to-end TLS and host
+verification. No credential is exported or logged and the original simulator is
+unchanged. The ordinary 100-album request times out after **20.003 s**. Repeating
+that same page with a diagnostic 120-second per-request timeout returns all 84
+albums after **25.338 s**. All subsequent track, artwork and list requests succeed;
+the trace finishes with the complete catalog. This is a metadata response timeout,
+independent of the ten-second audio-range startup issue documented below.
+
+Trash Amp now requests **20 albums per refresh page**, retaining the existing
+cursor traversal, request timeout, atomic snapshot publication, cancellation and
+cached-data behavior. On the same public route with ordinary request deadlines,
+pages of 20/20/20/20/4 albums take **3.331/8.249/7.063/5.114/1.763 s**. The second
+collection is empty and also completes. The complete 84-album refresh, including
+track availability, artwork and lists, succeeds in **38.316 s** without a timeout
+extension. This is simulator/public-route evidence, not a fresh cellular-phone
+acceptance. Fi remains on its existing deployment; no production configuration or
+code was changed.
+
+A real TLS adapter regression creates 42 albums, including an actually playable
+album and albums without media, and verifies traversal across multiple pages and
+the final partial page, unique identities, collection mapping and persisted catalog
+completeness. All **14 active amp-collector tests pass**, with two existing ignores
+(the subprocess helper and physical host-audio test). Warning-denied all-target
+Clippy for amp-collector, formatting and diff checks pass. Optimized signed iPhone
+build **3.1** builds and passes deep/strict signature verification. Executable
+SHA-256: `efa4976380948d26d6b62f63a6d61b1cde5a74a028589b8e3db4fe69412ade42`.
+The phone was unplugged before the refresh diagnostic build was installed; it
+still has its original build 2.7. Build 3.1 installation and actual cellular full
+refresh acceptance remain pending. The separate audio startup issue remains open.
+The disposable simulator and loopback relay were removed/stopped after testing.
+Raw public-route traces and package-check logs are retained under
+`target/diagnostics/iphone-cellular-2026-11-02/`.
+
+## Physical iPhone cellular diagnosis — 2026-11-02
+
+The connected iPhone 16 Pro (iOS 27.0.1), with Wi-Fi disabled, reproduces a
+media startup timeout independently of weak signal. Installed build at entry was
+2.7, which already contains the native TLS certificate parsing fix. Its saved
+control URL is the correct public `https://collector.awkwardexplorer.com/`.
+Fi runs Collector beta.17. No server deployment or configuration was changed.
+
+Read-only debugger probes inside the actual app report cellular access allowed
+(`CTCellularDataNotRestricted`) and a satisfied cellular-only IPv6 path, with
+DNS and carrier NAT64 translation. Native URLSession returns HTTP 200 for both
+control and direct-media identities. The Rust resolver obtains real Cloudflare
+IPv6 addresses for control and `64:ff9b::6f6c:d301` for the IPv4-only media host.
+Rust identity requests take roughly 0.2–0.4 s; authenticated collections and route
+discovery succeed. Home split DNS resolves control directly to Fi, so Mac/home
+requests alone cannot validate the phone's public route.
+
+A temporary signed optimized diagnostic build uses the existing app enrollment
+without exporting/logging credentials. Three normal shared-client media HEADs
+pass through Direct HTTPS in 1.0–1.8 s. All three first range reads fail after
+21.95–22.77 s, including the reader's single retry; each range attempt has a
+hard ten-second deadline. A fresh raw GET allowing longer startup receives just
+32 bytes after 12.78 s. Thereafter 256 KiB ranges complete in approximately two
+seconds and the normal reader succeeds. HTTP/1.1 is negotiated with both default
+and explicitly HTTP/1-only clients; changing that setting does not explain the
+cold-versus-warm behavior.
+
+A second, previously unprobed prepared track confirms the startup distinction:
+the scoped grant arrives after 0.364 s, but its first 32-byte response headers
+arrive after 10.218 s total. A subsequent 256 KiB read finishes in 2.404 s;
+the normal reader then passes HEAD plus an actual 128 KiB read in 2.433 s total.
+The first two targets are different prepared FLAC files, about 33 MB and 25 MB.
+This is byte-transfer acceptance, not audible or extended/background playback.
+
+The server's `collector-media/src/lib.rs` checks the complete digest of prepared
+files before returning GET headers, while HEAD does not run that check. Its
+validation loop reads 256 KiB at a time and rechecks authority for every chunk;
+validated state is cached on the file handle. `collector-store/src/files.rs`
+marks canonical prepared derivatives for this transfer verification. Together
+with the measured cold/warm first-byte timings, this identifies server-side
+verification versus the client's ten-second range deadline as the reproduced
+failure mechanism. It can occur with strong reception because it precedes the
+requested audio transfer. The separate five-second route-discovery budget did
+not expire in these runs.
+
+A durable repair remains required: accommodate cold first-byte verification in
+the shared client's timeout policy and reduce/coalesce server validation overhead
+while preserving digest checks, cancellation and current authorization. Do not
+work around this by disabling integrity or trust checks. The temporary harness
+was removed from repository source and the original signed build 2.7 restored in
+place, preserving the application container and enrollment. Local diagnostic
+logs are under `target/diagnostics/iphone-cellular-2026-11-02/`; they contain no
+bearer credentials. Temporary probe/build files remain under
+`/private/tmp/trash-amp-phone-diag/`. No audio-startup fix is claimed in this checkpoint.
+
 ## Empty/failed source selection — 2026-10-31
 
 The prior dropdown correction did not address selection being conditional on a

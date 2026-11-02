@@ -33,6 +33,13 @@ fall back to the public control origin. Private includes any reachable trusted
 private route supported by the client; it does not prove physical LAN membership.
 Empty libraries cannot verify streaming until a playable track exists.
 
+While a library refresh is in progress, a banner above the playback controls shows
+the current album page and the number of albums loaded. Its progress bar advances
+after metadata and artwork responses within that page. Waiting for a page uses
+an activity indicator because the server does not advertise the library's total
+size. Playlist loading has its own stage. The banner clears after completion,
+failure, or a source switch; cached browsing remains available throughout.
+
 Credentials are stored through macOS Keychain. Enrollment supports system HTTPS
 trust and explicit owner PEM/pairing material for control. Private media uses
 authenticated certificate pins; direct internet media uses system HTTPS roots and
