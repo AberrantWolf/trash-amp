@@ -931,3 +931,38 @@ hydration completes.
 
 Validation: all 251 workspace tests pass (three existing opt-in tests ignored),
 along with warning-denied workspace/all-target Clippy, formatting, and diff checks.
+
+## Published beta.5 — 2026-11-05
+
+Release commit `3a3f381` includes the version/lockfile update and beta.5 notes.
+[Main run 41982629836](https://github.com/AberrantWolf/trash-amp/actions/runs/41982629836)
+passed before the annotated `v0.1.0-beta.5` tag was pushed at that exact commit.
+[Tagged run 41984480767](https://github.com/AberrantWolf/trash-amp/actions/runs/41984480767)
+passed formatting, warning-denied all-target workspace Clippy, 254 Rust tests
+(three existing opt-in tests ignored), 28 release-tooling tests, optimized
+packaging, Developer ID signing, notarization, stapling, extracted-package
+verification and automatic prerelease publication. Local formatting, Clippy,
+workspace tests and release-tooling tests also passed before tagging.
+Apple submission: `de415fd4-8baf-4475-a01f-39f12b2276ed`.
+
+The [published prerelease](https://github.com/AberrantWolf/trash-amp/releases/tag/v0.1.0-beta.5)
+contains the arm64 ZIP and SHA-256 file, is not a draft and is marked prerelease.
+The independently downloaded ZIP is 22,634,926 bytes with SHA-256:
+
+```text
+8b93b3fa17fc8dde1154928c0c13629d693aab40551f4a6dbc53331334b3a396
+```
+
+The tagged verification scripts passed against that download on this Apple
+Silicon Mac running macOS 26.6.2 (25G83): checksum, arm64 architecture, plist,
+Developer ID signature, Hardened Runtime, secure timestamp, stapled-ticket
+validation, Gatekeeper (`accepted`, `source=Notarized Developer ID`), version and
+license notices, dynamic dependencies and executable `--help`. Bundle metadata
+is short version `0.1.0`, build `2.5`, full version `0.1.0-beta.5`, minimum macOS
+`15.0`. Verification used scripts extracted from the release tag because local
+release-tooling changes were being made concurrently; those changes are outside
+the published release.
+
+No separate-Mac Finder launch, upgrade/Keychain, physical audio-device, network
+failure, accessibility or large-library acceptance is claimed. Those gates remain
+open in the beta checklist and the release notes retain the known limits.
