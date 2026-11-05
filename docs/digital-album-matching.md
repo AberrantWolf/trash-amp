@@ -36,4 +36,4 @@ so recipients can rebuild with a modified fingerprint library. Source distributi
 are available from the application's tagged repository and exact Git revisions
 in Cargo.lock; build with `cargo build --locked -p trash-amp` using the documented
 Rust toolchain. Verify corresponding-source availability as part of release
-packaging; no application binary is distributed by this development delivery.
+packaging. macOS beta packages are distributed through the tagged GitHub releases.
