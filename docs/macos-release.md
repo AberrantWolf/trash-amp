@@ -145,13 +145,28 @@ does not resolve this account-level rejection.
 ## GitHub build and automatic publication
 
 `.github/workflows/macos-alpha.yml` (display name **macOS prerelease**) validates
-and packages pull requests, main
-pushes and manual runs. These runs upload a `macos-arm64-prerelease` Actions
-artifact. Manual runs offer a `notarize` checkbox for signed candidate validation
-before tagging. Alpha and beta tags require signed, notarized packages and
-automatically publish a **prerelease** only after validation, packaging,
-extracted-ticket/Gatekeeper checks and downloaded-artifact checksum verification
-succeed. Missing secrets fail the run; tags cannot fall back to ad-hoc signing.
+and packages pull requests, main pushes and manual runs. Before validating a
+push or manual run, it checks for a successful run of this workflow in this
+repository for the **exact Git commit**. Previous successful push/manual runs
+satisfy the formatting, release-tooling tests, Clippy and Rust test gates; these
+checks are not repeated, even if the artifact has expired. Pull request runs
+validate independently and are not used as release sources.
+
+The workflow separately looks for a non-expired `macos-arm64-unsigned-v1`
+artifact from a successful run of that commit. It downloads by artifact ID and
+checks its checksum, version and extracted package before reusing it. Missing,
+expired or invalid artifacts cause a fresh package build. A prior successful
+validation still skips the test suites when rebuilding. If lookup cannot establish
+prior validation, the full validation runs. Artifacts are retained for 14 days.
+
+Both reused and newly built unsigned packages pass through the same signing
+step, without recompiling. Manual runs offer a `notarize` checkbox for signed
+candidate validation before tagging. Alpha and beta tags require Developer ID
+signing and notarization, followed by extracted-ticket/Gatekeeper verification.
+Tag/version agreement and bundled release notes are checked before signing.
+The resulting ZIP and checksum are uploaded as `macos-arm64-prerelease` and
+published automatically only after downloaded-artifact checksum verification.
+Missing secrets fail the run; tags cannot fall back to ad-hoc signing.
 `scripts/publish-prerelease.sh` uploads the ZIP and checksum before publication.
 It finishes an interrupted draft automatically; upload failures leave it
 unpublished. Rerunning an already published tag leaves its notes and assets

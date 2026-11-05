@@ -28,12 +28,14 @@ if [ "$signed" = true ]; then
     "$root/scripts/staple-macos.sh" --validate-only "$app"
 fi
 PYTHONPATH="$root/scripts" python3 - "$app" "$filename" <<'PY'
-import plistlib, sys
+import os, plistlib, sys
 from pathlib import Path
 from macos_version import bundle_versions
 app = Path(sys.argv[1])
 info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
 version = info['TrashAmpVersion']
+if os.environ.get('EXPECTED_VERSION'):
+    assert version == os.environ['EXPECTED_VERSION'], 'Package version differs from checkout'
 short_version, build_version = bundle_versions(version)
 assert info['CFBundleShortVersionString'] == short_version
 assert info['CFBundleVersion'] == build_version

@@ -3,10 +3,14 @@
 set -eu
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 signed=${REQUIRE_MACOS_NOTARIZATION:-false}
+source_archive=
 case "${1:-}" in
     --signed) signed=true; shift ;;
 esac
-if [ "$#" -ne 0 ]; then echo "Usage: $0 [--signed]" >&2; exit 2; fi
+case "${1:-}" in
+    --from-archive) source_archive=${2:?Expected an unsigned package ZIP}; shift 2 ;;
+esac
+if [ "$#" -ne 0 ]; then echo "Usage: $0 [--signed] [--from-archive ZIP]" >&2; exit 2; fi
 if [ "$(uname -s)" != Darwin ] || [ "$(uname -m)" != arm64 ]; then
     echo "The prerelease package requires Apple Silicon macOS." >&2
     exit 1
@@ -29,17 +33,26 @@ case "$signed" in
     *) echo 'REQUIRE_MACOS_NOTARIZATION must be true or false.' >&2; exit 2 ;;
 esac
 test -f "$root/docs/releases/$version.md"
-"$root/scripts/bundle-macos.sh" --release --distribution
-if [ "$signed" = true ]; then
-    "$root/scripts/notarize-macos.sh" "$CARGO_TARGET_DIR/release/Trash Amp.app" \
-        "$CARGO_TARGET_DIR/notarization/$version"
-fi
 dist="$CARGO_TARGET_DIR/dist"
 mkdir -p "$dist"
 stage=$(mktemp -d "$dist/stage.XXXXXX")
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
-cp "$root/docs/releases/$version.md" "$stage/READ-ME.md"
-ditto "$CARGO_TARGET_DIR/release/Trash Amp.app" "$stage/Trash Amp.app"
+if [ -n "$source_archive" ]; then
+    REQUIRE_MACOS_NOTARIZATION=false EXPECTED_VERSION="$version" \
+        "$root/scripts/verify-macos-package.sh" "$source_archive"
+    ditto -x -k "$source_archive" "$stage"
+    cmp "$root/docs/releases/$version.md" "$stage/READ-ME.md"
+    # Re-sign the tested binary without invoking the compiler or changing its resources.
+    "$root/scripts/sign-macos.sh" "$stage/Trash Amp.app"
+else
+    "$root/scripts/bundle-macos.sh" --release --distribution
+    cp "$root/docs/releases/$version.md" "$stage/READ-ME.md"
+    ditto "$CARGO_TARGET_DIR/release/Trash Amp.app" "$stage/Trash Amp.app"
+fi
+if [ "$signed" = true ]; then
+    "$root/scripts/notarize-macos.sh" "$stage/Trash Amp.app" \
+        "$CARGO_TARGET_DIR/notarization/$version"
+fi
 archive="trash-amp-$version-macos-arm64.zip"
 ditto -c -k --sequesterRsrc "$stage" "$dist/$archive"
 (cd "$dist" && shasum -a 256 "$archive" > "$archive.sha256")

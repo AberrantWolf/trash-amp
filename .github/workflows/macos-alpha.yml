@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: macos-release-${{ github.ref }}
@@ -29,11 +30,70 @@ env:
 
 jobs:
   build:
-    name: Validate and package Apple Silicon
+    name: Validate, package and sign Apple Silicon
     runs-on: macos-15
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Read package version
+        id: version
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "trash-amp"))')
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Look for prior validation and an unsigned package for this commit
+        id: reuse
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: python3 scripts/reuse-macos-artifact.py "$VERSION"
+      - name: Install the pinned Rust toolchain
+        if: steps.reuse.outputs.archive == ''
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        if: steps.reuse.outputs.archive == ''
+        with:
+          cache-on-failure: true
+      - name: Install FLAC for the real-server tests
+        if: steps.reuse.outputs.validated != 'true'
+        run: command -v flac || brew install flac
+      - name: Check formatting
+        if: steps.reuse.outputs.validated != 'true'
+        run: cargo fmt --all --check
+      - name: Test release tooling
+        if: steps.reuse.outputs.validated != 'true'
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Clippy
+        if: steps.reuse.outputs.validated != 'true'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        if: steps.reuse.outputs.validated != 'true'
+        run: cargo test --workspace --locked
+      - name: Build an unsigned package if no reusable artifact exists
+        if: steps.reuse.outputs.archive == ''
+        env:
+          REQUIRE_MACOS_NOTARIZATION: 'false'
+        run: ./scripts/package-macos.sh
+      - name: Verify the unsigned package
+        id: unsigned
+        env:
+          REUSED_ARCHIVE: ${{ steps.reuse.outputs.archive }}
+          VERSION: ${{ steps.version.outputs.version }}
+          REQUIRE_MACOS_NOTARIZATION: 'false'
+        run: |
+          archive=${REUSED_ARCHIVE:-target/dist/trash-amp-$VERSION-macos-arm64.zip}
+          ./scripts/verify-macos-package.sh "$archive"
+          printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+      - name: Save the tested unsigned package for future releases
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: macos-arm64-unsigned-v1
+          path: |
+            ${{ steps.unsigned.outputs.archive }}
+            ${{ steps.unsigned.outputs.archive }}.sha256
+          if-no-files-found: error
+          retention-days: 14
       - name: Import Developer ID and notarization credentials
         if: env.REQUIRE_MACOS_NOTARIZATION == 'true'
         env:
@@ -44,33 +104,24 @@ jobs:
           MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
           MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
         run: ./scripts/import-macos-signing.sh
-      - name: Install the pinned Rust toolchain
-        run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-        with:
-          cache-on-failure: true
-      - name: Install FLAC for the real-server tests
-        run: command -v flac || brew install flac
-      - name: Check formatting
-        run: cargo fmt --all --check
-      - name: Test release tooling
-        run: python3 -m unittest discover -s scripts -p 'test_*.py'
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: Test
-        run: cargo test --workspace --locked
-      - name: Package prerelease
+      - name: Sign and notarize the old or new package without rebuilding
+        if: env.REQUIRE_MACOS_NOTARIZATION == 'true'
+        env:
+          ARCHIVE: ${{ steps.unsigned.outputs.archive }}
+          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: ./scripts/package-macos.sh --signed --from-archive "$ARCHIVE"
+      - name: Verify the final extracted package
         id: package
         env:
-          RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+          UNSIGNED_ARCHIVE: ${{ steps.unsigned.outputs.archive }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          ./scripts/package-macos.sh
-          version=$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "trash-amp"))')
-          printf 'archive=target/dist/trash-amp-%s-macos-arm64.zip\n' "$version" >> "$GITHUB_OUTPUT"
-      - name: Verify the extracted package
-        env:
-          ARCHIVE: ${{ steps.package.outputs.archive }}
-        run: ./scripts/verify-macos-package.sh "$ARCHIVE"
+          archive=$UNSIGNED_ARCHIVE
+          if [ "$REQUIRE_MACOS_NOTARIZATION" = true ]; then
+            archive=target/dist/trash-amp-$VERSION-macos-arm64.zip
+          fi
+          ./scripts/verify-macos-package.sh "$archive"
+          printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
       - name: Save notarization diagnostics
         if: always() && env.REQUIRE_MACOS_NOTARIZATION == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
@@ -106,7 +157,7 @@ jobs:
           path: dist
       - name: Verify checksums
         working-directory: dist
-        run: sha256sum --check *.sha256
+        run: sha256sum --check ./*.sha256
       - name: Publish the verified prerelease
         env:
           GH_TOKEN: ${{ github.token }}
