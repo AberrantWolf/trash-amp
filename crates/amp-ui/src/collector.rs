@@ -1274,6 +1274,7 @@ mod tests {
         let adapter = Adapter::open(&data.join("collector")).unwrap();
         let mut full = amp_library::demo_library();
         full.albums.truncate(1);
+        full.albums[0].id.provider = "collector".into();
         let mut alternate = full.albums[0].tracks.clone();
         for track in &mut alternate {
             track.id.item.push_str("-alternate");
@@ -1333,6 +1334,7 @@ mod tests {
         ui.invoke_browse_action(false, row as i32, 0);
         assert_eq!(ui.get_selected_track(), -1);
         assert_eq!(ui.get_tracks().row_count(), 0);
+        assert!(!ui.get_album_matching_available());
         view.snapshot.as_mut().unwrap().library = full.clone();
         install(&ui, &state, &view, &adapter);
         assert_eq!(ui.get_album_source_index(), 2);

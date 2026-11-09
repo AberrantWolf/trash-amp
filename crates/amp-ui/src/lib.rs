@@ -567,12 +567,12 @@ fn select(ui: &PlayerWindow, state: &mut State, index: usize) {
         return;
     };
     ui.set_album_matching_available(
-        album.id.provider == "collector"
-            || state.catalog.snapshot().source == CatalogSource::Local
-                && album
-                    .tracks
-                    .iter()
-                    .all(|track| matches!(track.access, amp_core::MediaAccess::File { .. })),
+        album.id.provider != "collector"
+            && state.catalog.snapshot().source == CatalogSource::Local
+            && album
+                .tracks
+                .iter()
+                .all(|track| matches!(track.access, amp_core::MediaAccess::File { .. })),
     );
     let sources = disc_sources(album);
     let key = album_key(album);
@@ -869,7 +869,6 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     browse::rebuild(&ui, &mut state.borrow_mut(), true);
     browse::wire(&ui, &state);
     let generation = catalog.generation();
-    let matching_adapter = collector.clone();
     let mut collector =
         collector::Controller::new(&ui, &state, collector, generation.clone(), open_url)?;
     folder_choices(&ui, &state.borrow());
@@ -926,41 +925,10 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     }
     {
         let find_state = state.clone();
-        let find_ui = ui.as_weak();
         ui.on_find_album_matches(move || {
             let s = find_state.borrow();
             if let Some(album) = s.selected.and_then(|i| s.library.albums.get(i)) {
-                if album.id.provider == "collector" {
-                    if let Some(ui) = find_ui.upgrade() {
-                        ui.set_album_matching_open(false);
-                    }
-                    let adapter = matching_adapter.clone();
-                    let id = album.id.clone();
-                    let weak = find_ui.clone();
-                    std::thread::spawn(move || match adapter.album_matching_url(&id) {
-                        Ok(url) => open_url(
-                            url.as_str(),
-                            Box::new(move |result| {
-                                if let Err(error) = result {
-                                    let _ = slint::invoke_from_event_loop(move || {
-                                        if let Some(ui) = weak.upgrade() {
-                                            ui.set_error_message(error.into());
-                                        }
-                                    });
-                                }
-                            }),
-                        ),
-                        Err(error) => {
-                            let _ = slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = weak.upgrade() {
-                                    ui.set_error_message(error.to_string().into());
-                                }
-                            });
-                        }
-                    });
-                } else {
-                    s.catalog.find_album_matches(album.id.clone());
-                }
+                s.catalog.find_album_matches(album.id.clone());
             }
         });
         let catalog = catalog.clone();

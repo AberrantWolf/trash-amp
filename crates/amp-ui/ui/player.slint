@@ -593,7 +593,7 @@ export component PlayerWindow inherits Window {
                     if !root.wide: IconButton { label: "Home"; icon: @image-url("icons/home.svg"); clicked => { root.home = true; keyboard.focus(); } }
                 }
                 if !root.artist-view && !(root.show-queue && root.adhoc-queue) && root.album-matching-available && root.selected-album >= 0: Button {
-                    text: root.collector-active ? "Review matching in Collector" : "Find matching albums";
+                    text: "Find matching albums";
                     clicked => { root.album-matching-open = true; root.find-album-matches(); }
                 }
                 if !root.artist-view: HorizontalLayout {

@@ -12,10 +12,6 @@ known durations. Existing source/manual names and original files are preserved.
 A changed source or changed catalog generation invalidates application. Accepted
 metadata survives offline rescans when the exact source files still match.
 
-For Collector albums, **Review matching in Collector** opens that server's existing
-metadata workflow. Configure the server's MusicBrainz contact and AcoustID key
-there; its curator permissions and listener exposure still apply.
-
 The shared crate is `junk-libs-music`; fingerprint calculation pins corrected
 chromaprint-next source, and MusicBrainz decoding uses musicbrainz_rs 0.14 models
 with consumer-owned transport and safe URL encoding. Published chromaprint-next
