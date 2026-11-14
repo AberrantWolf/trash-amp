@@ -196,7 +196,9 @@ impl MediaResolver for Adapter {
         {
             match native::open(self, track)? {
                 MediaInput::Encoded(source) => Ok(source),
-                MediaInput::Decoded(_) => bail!("Apple assets require decoded PCM input"),
+                MediaInput::Decoded(_) | MediaInput::Streamed(_) => {
+                    bail!("Apple assets require decoded PCM input")
+                }
             }
         }
     }

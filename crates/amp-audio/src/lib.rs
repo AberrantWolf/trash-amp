@@ -20,6 +20,7 @@ use std::{
         mpsc,
     },
     thread,
+    time::Duration,
 };
 
 mod input;
@@ -27,7 +28,9 @@ mod input;
 mod ios_session;
 mod output;
 mod processing;
+mod stream;
 pub use input::{MediaInput, PcmReader, ResolverRegistry};
+pub use stream::{StreamDecoder, StreamFormat};
 
 #[cfg(test)]
 mod recovery_tests;
@@ -153,6 +156,9 @@ pub trait MediaResolver: Send + Sync {
     fn resolve(&self, track: &Track) -> Result<ByteSource>;
     fn open(&self, track: &Track) -> Result<MediaInput> {
         self.resolve(track).map(MediaInput::Encoded)
+    }
+    fn open_at(&self, track: &Track, _position: Duration) -> Result<MediaInput> {
+        self.open(track)
     }
     fn cancel(&self);
 }
@@ -373,6 +379,7 @@ struct AudioReader {
     source: Box<dyn PcmReader>,
     buffered: VecDeque<[f32; 2]>,
     rate: u32,
+    streamed: bool,
 }
 impl AudioReader {
     fn open(
@@ -383,25 +390,29 @@ impl AudioReader {
     ) -> Result<Self> {
         match &track.access {
             MediaAccess::Managed { provider, .. } => {
+                let position =
+                    Duration::from_secs_f64(output_frame as f64 / f64::from(output_rate));
                 let input = resolver
                     .context(format!("{provider}: playback adapter unavailable"))?
-                    .open(track)?;
+                    .open_at(track, position)?;
+                let streamed = matches!(input, MediaInput::Streamed(_));
                 let mut decoder: Box<dyn PcmReader> = match input {
                     MediaInput::Encoded(source) => Box::new(AudioDecoder::open(source)?),
-                    MediaInput::Decoded(reader) => reader,
+                    MediaInput::Decoded(reader) | MediaInput::Streamed(reader) => reader,
                 };
                 if decoder.format().channels() > 2 {
                     bail!("Multichannel playback requires an explicit channel mapper")
                 }
                 let rate = decoder.format().sample_rate();
                 let frame = scale_frame(output_frame, output_rate, rate);
-                if frame > 0 {
+                if frame > 0 && !streamed {
                     decoder.seek_exact(FramePosition(frame))?;
                 }
                 Ok(Self {
                     source: decoder,
                     buffered: VecDeque::new(),
                     rate,
+                    streamed,
                 })
             }
             MediaAccess::DiscTrack { cue, number } => {
@@ -414,6 +425,7 @@ impl AudioReader {
                     source: Box::new(reader),
                     buffered: VecDeque::new(),
                     rate: 44100,
+                    streamed: false,
                 })
             }
             MediaAccess::RedumperTrack { anchor, number } => {
@@ -428,6 +440,7 @@ impl AudioReader {
                     source: Box::new(reader),
                     buffered: VecDeque::new(),
                     rate: 44100,
+                    streamed: false,
                 })
             }
             MediaAccess::File { locator } => {
@@ -456,6 +469,7 @@ impl AudioReader {
                         rate: decoder.format().sample_rate(),
                         source: Box::new(decoder),
                         buffered: VecDeque::new(),
+                        streamed: false,
                     });
                 }
 
@@ -477,6 +491,7 @@ impl AudioReader {
                     source: Box::new(decoder),
                     buffered: VecDeque::new(),
                     rate,
+                    streamed: false,
                 };
                 Ok(result)
             }

@@ -1,8 +1,7 @@
 # Collector connection
 
 Trash Amp has an `amp-collector` adapter for authenticated Collector browsing,
-revisioned list commands, authenticated seekable FLAC/MP3 original and prepared FLAC streams and explicit
-downloads. Select one remembered server/account for browsing. Switching selection
+revisioned list commands, authenticated playback and explicit downloads. Select one remembered server/account for browsing. Switching selection
 preserves the player and queue; each remote track retains immutable originating
 source coordinates. Filesystem browsing remains available. Collector metadata
 bypasses MusicBrainz enrichment.
@@ -53,6 +52,25 @@ covers remain visible. Useful committed title rows can still load artwork if
 summary polling later fails. Refresh retries missing covers, and cancellation
 retains covers already committed. See Collector's `docs/album-metadata-consumers.md`
 for the consumer request sequence and troubleshooting contract.
+
+## Playback format
+
+Under **Settings → Servers**, choose **Original**, **High Bandwidth**, or
+**Low Bandwidth**. The preference applies to Collector connections on this
+device when Trash Amp opens a track.
+
+- **Original** streams the selected source. Collector presents a supported CD
+  track as seekable WAV.
+- **High Bandwidth** is the default. Collector serves existing FLAC or MP3,
+  reuses matching prepared FLAC, or encodes FLAC on demand.
+- **Low Bandwidth** streams Opus at a configurable target from 6 to 256 kbps.
+  Start with the default of 128 kbps or enter a whole-number bitrate.
+
+The modes use the normal authenticated audio connection on Collector beta.32.
+Separate media connections and older servers use the catalog's saved audio
+when available. Completed downloads take precedence in all three modes.
+Download requests use the catalog's saved audio and keep their existing
+integrity checks.
 
 Online playback opens the queued media target directly. Retained offline playback
 opens its file and validates recorded length, then reads on demand. Neither hashes

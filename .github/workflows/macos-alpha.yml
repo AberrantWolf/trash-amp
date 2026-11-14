@@ -55,9 +55,12 @@ jobs:
         if: steps.reuse.outputs.archive == ''
         with:
           cache-on-failure: true
-      - name: Install FLAC for the real-server tests
+      - name: Install native audio build and test tools
         if: steps.reuse.outputs.validated != 'true'
-        run: command -v flac || brew install flac
+        run: |
+          command -v cmake || brew install cmake
+          command -v flac || brew install flac
+          command -v ffmpeg || brew install ffmpeg
       - name: Check formatting
         if: steps.reuse.outputs.validated != 'true'
         run: cargo fmt --all --check

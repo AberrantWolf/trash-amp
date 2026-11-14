@@ -235,7 +235,10 @@ dependencies = [
  "objc2 0.6.4",
  "objc2-avf-audio",
  "objc2-foundation 0.3.2",
+ "ogg",
  "rtrb",
+ "symphonia",
+ "symphonia-adapter-libopus",
  "tempfile",
 ]
 
@@ -248,10 +251,12 @@ dependencies = [
  "amp-core",
  "anyhow",
  "axum-server",
+ "bytes",
  "chrono",
  "collector-app",
  "collector-client",
  "collector-media",
+ "collector-modules",
  "collector-providers",
  "collector-server",
  "collector-store",
@@ -260,6 +265,7 @@ dependencies = [
  "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98)",
  "keyring",
  "rcgen 0.13.2",
+ "reqwest",
  "rusqlite",
  "rustls",
  "serde",
@@ -1420,8 +1426,8 @@ dependencies = [
 
 [[package]]
 name = "collector-api-types"
-version = "0.1.0-beta.17"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=fb0354665e48f399cdd640ca1d395712ae567ddf#fb0354665e48f399cdd640ca1d395712ae567ddf"
+version = "0.1.0-beta.32"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=73d24f8556a37cb641d8189e950db8d6ec496d19#73d24f8556a37cb641d8189e950db8d6ec496d19"
 dependencies = [
  "chrono",
  "collector-core",
@@ -1431,18 +1437,18 @@ dependencies = [
 
 [[package]]
 name = "collector-app"
-version = "0.1.0-beta.17"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=fb0354665e48f399cdd640ca1d395712ae567ddf#fb0354665e48f399cdd640ca1d395712ae567ddf"
+version = "0.1.0-beta.32"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=73d24f8556a37cb641d8189e950db8d6ec496d19#73d24f8556a37cb641d8189e950db8d6ec496d19"
 dependencies = [
  "chrono",
  "collector-api-types",
  "collector-core",
  "collector-modules",
  "hex",
- "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c)",
+ "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f)",
  "junk-libs-core 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=317517c430744e4f1196e30850b37b3f13c10560)",
  "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=317517c430744e4f1196e30850b37b3f13c10560)",
- "junk-libs-music 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c)",
+ "junk-libs-music 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f)",
  "junk-libs-pcm",
  "serde",
  "serde_json",
@@ -1455,8 +1461,8 @@ dependencies = [
 
 [[package]]
 name = "collector-client"
-version = "0.1.0-beta.17"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=fb0354665e48f399cdd640ca1d395712ae567ddf#fb0354665e48f399cdd640ca1d395712ae567ddf"
+version = "0.1.0-beta.32"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=73d24f8556a37cb641d8189e950db8d6ec496d19#73d24f8556a37cb641d8189e950db8d6ec496d19"
 dependencies = [
  "chrono",
  "collector-api-types",
@@ -1475,8 +1481,8 @@ dependencies = [
 
 [[package]]
 name = "collector-core"
-version = "0.1.0-beta.17"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=fb0354665e48f399cdd640ca1d395712ae567ddf#fb0354665e48f399cdd640ca1d395712ae567ddf"
+version = "0.1.0-beta.32"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=73d24f8556a37cb641d8189e950db8d6ec496d19#73d24f8556a37cb641d8189e950db8d6ec496d19"
 dependencies = [
  "chrono",
  "hex",
@@ -1491,8 +1497,8 @@ dependencies = [
 
 [[package]]
 name = "collector-media"
-version = "0.1.0-beta.17"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=fb0354665e48f399cdd640ca1d395712ae567ddf#fb0354665e48f399cdd640ca1d395712ae567ddf"
+version = "0.1.0-beta.32"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=73d24f8556a37cb641d8189e950db8d6ec496d19#73d24f8556a37cb641d8189e950db8d6ec496d19"
 dependencies = [
  "anyhow",
  "axum",
@@ -1514,17 +1520,17 @@ dependencies = [
 
 [[package]]
 name = "collector-modules"
-version = "0.1.0-beta.17"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=fb0354665e48f399cdd640ca1d395712ae567ddf#fb0354665e48f399cdd640ca1d395712ae567ddf"
+version = "0.1.0-beta.32"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=73d24f8556a37cb641d8189e950db8d6ec496d19#73d24f8556a37cb641d8189e950db8d6ec496d19"
 dependencies = [
  "collector-core",
  "junk-libs-accuraterip",
- "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c)",
+ "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f)",
  "junk-libs-core 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=317517c430744e4f1196e30850b37b3f13c10560)",
  "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=317517c430744e4f1196e30850b37b3f13c10560)",
  "junk-libs-disc-id",
  "junk-libs-game-formats",
- "junk-libs-music 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c)",
+ "junk-libs-music 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f)",
  "junk-libs-pcm",
  "serde",
  "serde_json",
@@ -1534,8 +1540,8 @@ dependencies = [
 
 [[package]]
 name = "collector-providers"
-version = "0.1.0-beta.17"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=fb0354665e48f399cdd640ca1d395712ae567ddf#fb0354665e48f399cdd640ca1d395712ae567ddf"
+version = "0.1.0-beta.32"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=73d24f8556a37cb641d8189e950db8d6ec496d19#73d24f8556a37cb641d8189e950db8d6ec496d19"
 dependencies = [
  "collector-app",
  "collector-core",
@@ -1543,11 +1549,11 @@ dependencies = [
  "hex",
  "httpdate",
  "junk-libs-accuraterip",
- "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c)",
+ "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f)",
  "junk-libs-core 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=317517c430744e4f1196e30850b37b3f13c10560)",
  "junk-libs-dat",
  "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=317517c430744e4f1196e30850b37b3f13c10560)",
- "junk-libs-music 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c)",
+ "junk-libs-music 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f)",
  "junk-libs-pcm",
  "libc",
  "reqwest",
@@ -1561,8 +1567,8 @@ dependencies = [
 
 [[package]]
 name = "collector-server"
-version = "0.1.0-beta.17"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=fb0354665e48f399cdd640ca1d395712ae567ddf#fb0354665e48f399cdd640ca1d395712ae567ddf"
+version = "0.1.0-beta.32"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=73d24f8556a37cb641d8189e950db8d6ec496d19#73d24f8556a37cb641d8189e950db8d6ec496d19"
 dependencies = [
  "anyhow",
  "axum",
@@ -1604,8 +1610,8 @@ dependencies = [
 
 [[package]]
 name = "collector-store"
-version = "0.1.0-beta.17"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=fb0354665e48f399cdd640ca1d395712ae567ddf#fb0354665e48f399cdd640ca1d395712ae567ddf"
+version = "0.1.0-beta.32"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=73d24f8556a37cb641d8189e950db8d6ec496d19#73d24f8556a37cb641d8189e950db8d6ec496d19"
 dependencies = [
  "argon2",
  "chrono",
@@ -2980,11 +2986,11 @@ dependencies = [
 
 [[package]]
 name = "hashlink"
-version = "0.10.0"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
+checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
- "hashbrown 0.15.5",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -3902,13 +3908,14 @@ dependencies = [
 [[package]]
 name = "junk-libs-audio"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c#438f195449622da2a2b9082c36cb06f66098813c"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f#da0145bc430bbb8d4f101e23ee7376f7e76fe64f"
 dependencies = [
  "claxon",
- "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c)",
+ "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f)",
+ "rubato",
  "serde",
  "symphonia",
- "symphonia-bundle-mp3 0.5.5 (git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c)",
+ "symphonia-bundle-mp3 0.5.5 (git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f)",
  "symphonia-metadata",
  "thiserror 2.0.20",
 ]
@@ -3940,7 +3947,7 @@ dependencies = [
 [[package]]
 name = "junk-libs-core"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c#438f195449622da2a2b9082c36cb06f66098813c"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f#da0145bc430bbb8d4f101e23ee7376f7e76fe64f"
 dependencies = [
  "crc32fast",
  "md5",
@@ -3992,11 +3999,11 @@ dependencies = [
 [[package]]
 name = "junk-libs-disc"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c#438f195449622da2a2b9082c36cb06f66098813c"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f#da0145bc430bbb8d4f101e23ee7376f7e76fe64f"
 dependencies = [
  "chd",
  "crc32fast",
- "junk-libs-core 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c)",
+ "junk-libs-core 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f)",
  "log",
  "md5",
  "serde",
@@ -4045,10 +4052,10 @@ dependencies = [
 [[package]]
 name = "junk-libs-music"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c#438f195449622da2a2b9082c36cb06f66098813c"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f#da0145bc430bbb8d4f101e23ee7376f7e76fe64f"
 dependencies = [
  "chromaprint-next",
- "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c)",
+ "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f)",
  "musicbrainz_rs",
  "serde",
  "serde_json",
@@ -4058,16 +4065,16 @@ dependencies = [
 
 [[package]]
 name = "junk-libs-pcm"
-version = "0.1.0-beta.17"
-source = "git+https://github.com/AberrantWolf/junk-collector?rev=fb0354665e48f399cdd640ca1d395712ae567ddf#fb0354665e48f399cdd640ca1d395712ae567ddf"
+version = "0.1.0-beta.32"
+source = "git+https://github.com/AberrantWolf/junk-collector?rev=73d24f8556a37cb641d8189e950db8d6ec496d19#73d24f8556a37cb641d8189e950db8d6ec496d19"
 dependencies = [
  "chromaprint-next",
  "claxon",
  "encoding_rs",
- "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c)",
+ "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f)",
  "junk-libs-core 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=317517c430744e4f1196e30850b37b3f13c10560)",
  "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=317517c430744e4f1196e30850b37b3f13c10560)",
- "junk-libs-music 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c)",
+ "junk-libs-music 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f)",
  "sha2 0.10.9",
  "symphonia-core",
  "symphonia-metadata",
@@ -4199,9 +4206,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.31.0"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad8935b44e7c13394a179a438e0cebba0fe08fe01b54f152e29a93b5cf993fd4"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -5182,6 +5189,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d59d30d3ad7f7e1c9a66e51c9cb71ae1c794b28ffe7053fd785defb0d180069"
 
 [[package]]
+name = "ogg"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdab8dcd8d4052eaacaf8fb07a3ccd9a6e26efadb42878a413c68fc4af1dee2b"
+dependencies = [
+ "byteorder",
+]
+
+[[package]]
 name = "ogg_pager"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5274,6 +5290,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
+name = "opusic-sys"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f43c183739dc81651487e7c9f3e4330fe4a3fd26c0fa961c788ce5fb21fa75b"
+dependencies = [
+ "cmake",
+ "libc",
+]
+
+[[package]]
 name = "orbclient"
 version = "0.3.55"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5309,7 +5335,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6213,6 +6239,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsqlite-vfs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "353b74f9810d5b085b6c42c9d86a5f0fdb795553235cdd48753b32e3809d18a7"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "rtoolbox"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6242,9 +6277,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.33.0"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c6d5e5acb6f6129fe3f7ba0a7fc77bca1942cb568535e18e7bc40262baf3110"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags 2.13.1",
  "fallible-iterator",
@@ -6252,6 +6287,7 @@ dependencies = [
  "hashlink",
  "libsqlite3-sys",
  "smallvec",
+ "sqlite-wasm-rs",
 ]
 
 [[package]]
@@ -6981,6 +7017,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqlite-wasm-rs"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6cd504cecbfe7eef649988840f9a6cb768d11085efec138f8e99f160632d867"
+dependencies = [
+ "cc",
+ "rsqlite-vfs",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7085,6 +7131,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "symphonia-adapter-libopus"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cfcdb75eaa95a602bbad6d09d923296e109606b71d4d3ffbd58ed67dfe283d7"
+dependencies = [
+ "opusic-sys",
+ "symphonia-core",
+]
+
+[[package]]
 name = "symphonia-bundle-flac"
 version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7111,7 +7167,7 @@ dependencies = [
 [[package]]
 name = "symphonia-bundle-mp3"
 version = "0.5.5"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=438f195449622da2a2b9082c36cb06f66098813c#438f195449622da2a2b9082c36cb06f66098813c"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f#da0145bc430bbb8d4f101e23ee7376f7e76fe64f"
 dependencies = [
  "lazy_static",
  "log",
@@ -8738,7 +8794,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

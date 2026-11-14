@@ -41,6 +41,10 @@ export component PlayerWindow inherits Window {
     in-out property <int> settings-tab;
     in-out property <string> server-url;
     in-out property <string> certificate-path;
+    in-out property <int> collector-playback-format;
+    in-out property <string> collector-opus-bitrate: "128";
+    in-out property <string> collector-playback-status;
+    callback save-collector-playback();
     in property <string> connection-status;
     in property <bool> collector-active;
     in property <bool> device-library-active;
@@ -453,6 +457,25 @@ export component PlayerWindow inherits Window {
                         LineEdit { text <=> root.certificate-path; placeholder-text: "Optional owner-provided PEM or pairing JSON path"; accessible-label: "Owner-provided trust file"; }
                         Text { text: root.connection-status; color: Theme.text; wrap: word-wrap; }
                         Button { text: root.removing-connection ? "Removing connection…" : "Remove connection"; enabled: root.collector-active && !root.collector-busy && !root.removing-connection; clicked => { root.remove-server(); } }
+                        Text { text: "Collector playback format"; color: Theme.text; font-weight: 600; }
+                        ComboBox {
+                            model: ["Original", "High Bandwidth", "Low Bandwidth"];
+                            current-index <=> root.collector-playback-format;
+                            accessible-label: "Collector playback format";
+                            selected(_) => { root.collector-playback-status = ""; }
+                        }
+                        if root.collector-playback-format == 2: LineEdit {
+                            text <=> root.collector-opus-bitrate;
+                            placeholder-text: "6–256 kbps";
+                            accessible-label: "Opus bitrate in kbps";
+                            edited(_) => { root.collector-playback-status = ""; }
+                            accepted => { root.save-collector-playback(); }
+                        }
+                        Text { text: "High Bandwidth uses existing FLAC or MP3, or live FLAC. Low Bandwidth uses Opus at the selected bitrate. This setting applies to all Collector servers on this device. Offline downloads and separate media connections play saved audio."; color: Theme.muted; wrap: word-wrap; }
+                        Button { text: "Save playback format"; clicked => { root.save-collector-playback(); } }
+                        if root.collector-playback-status != "": Text {
+                            text: root.collector-playback-status; color: Theme.text; wrap: word-wrap;
+                        }
                     }
                     if root.settings-tab == 2: VerticalLayout {
                         spacing: 10px;

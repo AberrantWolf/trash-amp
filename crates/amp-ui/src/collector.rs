@@ -2,7 +2,8 @@
 use super::*;
 use amp_app::catalog::Generation;
 use amp_collector::{
-    Adapter, ConnectionKey, ConnectionState, ListCommand, SavedConnection, Snapshot, api, ids,
+    Adapter, ConnectionKey, ConnectionState, ListCommand, PlaybackFormat, SavedConnection,
+    Snapshot, api, ids,
 };
 use anyhow::Context;
 use std::collections::BTreeMap;
@@ -31,6 +32,7 @@ enum Event {
     Message(String),
     Mutation(u64, ConnectionKey, anyhow::Result<()>),
     Downloads,
+    PlaybackFormatSaved(anyhow::Result<()>),
     AlbumLoaded(
         u64,
         ConnectionKey,
@@ -256,7 +258,8 @@ fn render_list(ui: &PlayerWindow, view: &View, adapter: &Adapter) {
                 kind: 1,
                 title: e.title.clone().into(),
                 subtitle: e.album.as_deref().unwrap_or("").into(),
-                status: (if downloads.iter().any(|d| d.status == amp_collector::DownloadStatus::Complete && Some(d.remote.key) == view.selected && d.remote.collection == list.list.collection_id && matches!(&e.source, Some(ids::ListTarget::MusicTrack { capture_id, source_representation_id, track_position, .. }) if *capture_id == d.remote.capture && *source_representation_id == d.remote.source && *track_position == d.remote.position)) { "" } else { match e.availability {
+                status: (if (view.online && e.audio.as_ref().is_some_and(|audio| audio.can_stream_original))
+                    || downloads.iter().any(|d| d.status == amp_collector::DownloadStatus::Complete && Some(d.remote.key) == view.selected && d.remote.collection == list.list.collection_id && matches!(&e.source, Some(ids::ListTarget::MusicTrack { capture_id, source_representation_id, track_position, .. }) if *capture_id == d.remote.capture && *source_representation_id == d.remote.source && *track_position == d.remote.position)) { "" } else { match e.availability {
                         api::ListEntryAvailability::Available { .. } => "",
                         api::ListEntryAvailability::Preparing => "Preparing",
                         api::ListEntryAvailability::NeedsPreparation => "Needs preparation",
@@ -332,6 +335,45 @@ impl Controller {
                 .to_string()
                 .into(),
         );
+        ui.set_collector_playback_format(match adapter.playback_format()? {
+            PlaybackFormat::Original => 0,
+            PlaybackFormat::HighBandwidth => 1,
+            PlaybackFormat::LowBandwidth { bitrate_kbps } => {
+                ui.set_collector_opus_bitrate(bitrate_kbps.to_string().into());
+                2
+            }
+        });
+        {
+            let a = adapter.clone();
+            let weak = ui.as_weak();
+            let tx = tx.clone();
+            let catalog = catalog.clone();
+            ui.on_save_collector_playback(move || {
+                let Some(ui) = weak.upgrade() else { return };
+                let format = match ui.get_collector_playback_format() {
+                    0 => PlaybackFormat::Original,
+                    1 => PlaybackFormat::HighBandwidth,
+                    2 => {
+                        let Ok(bitrate_kbps) =
+                            ui.get_collector_opus_bitrate().trim().parse::<u16>()
+                        else {
+                            ui.set_collector_playback_status(
+                                "Enter an Opus bitrate from 6 to 256 kbps".into(),
+                            );
+                            return;
+                        };
+                        PlaybackFormat::LowBandwidth { bitrate_kbps }
+                    }
+                    _ => return,
+                };
+                let a = a.clone();
+                let tx = tx.clone();
+                catalog.persist(Box::new(move || {
+                    let _ = tx.send(Event::PlaybackFormatSaved(a.set_playback_format(format)));
+                    Ok(())
+                }));
+            });
+        }
 
         {
             let a = adapter.clone();
@@ -1160,6 +1202,12 @@ impl Controller {
                             }
                         }
                     }
+                }
+                Event::PlaybackFormatSaved(result) => {
+                    ui.set_collector_playback_status(match result {
+                        Ok(()) => "Saved. Applies when playback opens a track.".into(),
+                        Err(error) => error.to_string().into(),
+                    });
                 }
                 Event::Downloads
                     if self.view.borrow().selected.is_some() && ui.get_collector_active() =>

@@ -62,9 +62,9 @@ def main():
     shutil.copy2(ROOT / "LICENSE", output / "LICENSE")
     shutil.copy2(ROOT / "assets/licenses/SLINT-LICENSE.md", output / "SLINT-LICENSE.md")
     shutil.copytree(ROOT / "assets/native-licenses", output / "native-licenses", dirs_exist_ok=True)
-    # Preserve native cryptography notices, including vendored third-party code.
+    # Preserve notices from bundled native libraries and their vendored sources.
     for package in metadata["packages"]:
-        if package["name"] not in {"aws-lc-sys", "ring"}:
+        if package["name"] not in {"aws-lc-sys", "opusic-sys", "ring"}:
             continue
         source = Path(package["manifest_path"]).parent
         for path in source.rglob("*"):

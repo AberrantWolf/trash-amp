@@ -3,6 +3,7 @@ use crate::{ByteSource, MediaResolver};
 use amp_core::{MediaAccess, Track};
 use anyhow::{Context, Result, bail};
 pub use junk_libs_audio::{FramePosition, PcmChunk, PcmFormat};
+use std::time::Duration;
 use std::{collections::BTreeMap, sync::Arc};
 
 pub trait PcmReader: Send {
@@ -14,6 +15,8 @@ pub trait PcmReader: Send {
 pub enum MediaInput {
     Encoded(ByteSource),
     Decoded(Box<dyn PcmReader>),
+    /// Sequential input already opened at the requested track position.
+    Streamed(Box<dyn PcmReader>),
 }
 /// Built by the host before playback starts; browsing never replaces it.
 #[derive(Default)]
@@ -48,6 +51,9 @@ impl MediaResolver for ResolverRegistry {
     }
     fn open(&self, track: &Track) -> Result<MediaInput> {
         self.provider(track)?.open(track)
+    }
+    fn open_at(&self, track: &Track, position: Duration) -> Result<MediaInput> {
+        self.provider(track)?.open_at(track, position)
     }
     fn cancel(&self) {
         for resolver in self.0.values() {

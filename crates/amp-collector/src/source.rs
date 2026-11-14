@@ -250,6 +250,7 @@ impl Adapter {
                 }
             }
         }
+        self.project_library(&mut result, true)?;
         Ok(result)
     }
 
@@ -325,13 +326,24 @@ impl Adapter {
     }
 
     pub fn project_library(&self, library: &mut Library, online: bool) -> Result<()> {
+        self.project_tracks(
+            library.albums.iter_mut().flat_map(|a| &mut a.tracks),
+            online,
+        )
+    }
+
+    pub(super) fn project_tracks<'a>(
+        &self,
+        tracks: impl IntoIterator<Item = &'a mut Track>,
+        online: bool,
+    ) -> Result<()> {
         let downloaded = self
             .downloads()?
             .into_iter()
             .filter(|d| d.status == crate::DownloadStatus::Complete)
             .map(|d| retained_key(&d.remote))
             .collect::<BTreeSet<_>>();
-        for track in library.albums.iter_mut().flat_map(|a| &mut a.tracks) {
+        for track in tracks {
             let Ok(remote) = parse_remote(track) else {
                 continue;
             };
@@ -340,15 +352,7 @@ impl Adapter {
             } else if !online {
                 amp_core::Availability::Unavailable
             } else {
-                match remote.audio.as_ref().map(|audio| &audio.state) {
-                    Some(api::MusicTrackAvailabilityState::Available { .. }) => {
-                        amp_core::Availability::Available
-                    }
-                    Some(api::MusicTrackAvailabilityState::Preparing) => {
-                        amp_core::Availability::Preparing
-                    }
-                    _ => amp_core::Availability::Unavailable,
-                }
+                crate::playback::online_availability(&remote)
             };
         }
         Ok(())

@@ -1,5 +1,7 @@
 //! Collector transport, local persistence and media access. No UI dependencies.
+mod playback;
 mod source;
+pub use playback::PlaybackFormat;
 pub use source::source_id;
 
 use amp_core::{Album, ItemId, Library, MediaAccess, Track};
@@ -486,22 +488,11 @@ impl Adapter {
                     // Classify only after a successful media HEAD, never from an
                     // advertisement alone. An unreadable descriptor leaves the label
                     // unconfirmed rather than guessing which nonlocal route worked.
-                    let mut response = client
+                    let response = client
                         .get(client.api_url("api/v1/playback/routes")?)?
                         .send()
-                        .await?
-                        .error_for_status()?;
-                    let mut bytes = Vec::new();
-                    while let Some(chunk) = response.chunk().await? {
-                        if bytes.len() + chunk.len() > 128 * 1024 {
-                            bail!("Oversized playback descriptor")
-                        }
-                        bytes.extend_from_slice(&chunk);
-                    }
-                    let descriptor: api::LocalPlaybackDescriptor = serde_json::from_slice(&bytes)?;
-                    if descriptor.server_id != key.server_id {
-                        bail!("Playback server identity mismatch")
-                    }
+                        .await?;
+                    let descriptor = playback::playback_descriptor(response, key).await?;
                     Ok::<_, anyhow::Error>(if descriptor.remote_media.is_some() {
                         ConnectionState::Direct
                     } else if descriptor.remote_media_allowed {
@@ -945,6 +936,7 @@ impl Adapter {
             .cloned()
             .context("Album no longer in library")?;
         if snapshot.track_revisions.get(&id) == Some(&summary.tracks_revision) {
+            self.project_tracks(&mut album.tracks, true)?;
             return Ok(album);
         }
         let mut query = api::TrackPageQuery {
@@ -1032,6 +1024,7 @@ impl Adapter {
             row.tracks = tracks;
             stage.track_revisions.insert(id, revision);
         }
+        self.project_tracks(&mut album.tracks, true)?;
         Ok(album)
     }
     pub async fn load_list(
@@ -1085,6 +1078,8 @@ impl Adapter {
             let mut track = remote_track(key, item, list.list.collection_id, "", audio);
             if self.downloaded(&track) {
                 track.availability = amp_core::Availability::Downloaded;
+            } else if audio.can_stream_original {
+                track.availability = amp_core::Availability::Available;
             }
             Some(track)
         } else if let Some(ids::ListTarget::MusicTrack {
@@ -1177,9 +1172,7 @@ impl Adapter {
             return false;
         };
         self.client(remote.key).is_ok()
-            && remote.audio.as_ref().is_some_and(|a| {
-                matches!(a.state, api::MusicTrackAvailabilityState::Available { .. })
-            })
+            && playback::online_availability(&remote) == amp_core::Availability::Available
     }
     pub fn downloads(&self) -> Result<Vec<Download>> {
         self.all("download")
@@ -1611,18 +1604,19 @@ impl Drop for CachedReader {
         self.cancellation.cancel()
     }
 }
+impl Adapter {
+    fn media_cancellation(&self, key: ConnectionKey) -> MediaCancellation {
+        let cancellation = MediaCancellation::default();
+        let mut media = self.media.lock().unwrap();
+        media.retain(|(_, c)| !c.is_cancelled());
+        media.push((key, cancellation.clone()));
+        cancellation
+    }
+}
 impl amp_audio::MediaResolver for Adapter {
     fn resolve(&self, track: &Track) -> Result<amp_audio::ByteSource> {
         let remote = parse_remote(track)?;
-        let cancellation = MediaCancellation::default();
-        self.media
-            .lock()
-            .unwrap()
-            .retain(|(_, c)| !c.is_cancelled());
-        self.media
-            .lock()
-            .unwrap()
-            .push((remote.key, cancellation.clone()));
+        let cancellation = self.media_cancellation(remote.key);
         if let Some(record) = self.retained_download(&remote)? {
             let file = std::fs::File::open(self.root.join("audio").join(&record.id))?;
             let length = file.metadata()?.len();
@@ -1668,6 +1662,22 @@ impl amp_audio::MediaResolver for Adapter {
             reader,
             media_hint(Some(length.0), &audio.state),
         ))
+    }
+    fn open(&self, track: &Track) -> Result<amp_audio::MediaInput> {
+        self.open_at(track, std::time::Duration::ZERO)
+    }
+    fn open_at(
+        &self,
+        track: &Track,
+        position: std::time::Duration,
+    ) -> Result<amp_audio::MediaInput> {
+        let remote = parse_remote(track)?;
+        if self.retained_download(&remote)?.is_none()
+            && let Some(input) = self.open_stream(&remote, self.playback_format()?, position)?
+        {
+            return Ok(input);
+        }
+        self.resolve(track).map(amp_audio::MediaInput::Encoded)
     }
     fn cancel(&self) {
         for (_, token) in self.media.lock().unwrap().drain(..) {
@@ -1759,8 +1769,39 @@ mod tests {
         adapter.select(Some(key)).unwrap();
         assert_eq!(adapter.selected().unwrap(), Some(key));
     }
+    #[test]
+    fn playback_format_defaults_to_high_bandwidth_and_keeps_the_last_valid_setting() {
+        let root = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MemorySecrets::default());
+        let adapter = Adapter::with_credentials(root.path(), secrets.clone()).unwrap();
+        assert_eq!(
+            adapter.playback_format().unwrap(),
+            PlaybackFormat::HighBandwidth
+        );
+        let format = PlaybackFormat::LowBandwidth { bitrate_kbps: 113 };
+        adapter
+            .put(
+                "settings",
+                "playback-format",
+                &serde_json::json!({"opus": {"bitrate_kbps": 113}}),
+            )
+            .unwrap();
+        assert_eq!(adapter.playback_format().unwrap(), format);
+        adapter.set_playback_format(format).unwrap();
+        for bitrate_kbps in [5, 257] {
+            assert!(
+                adapter
+                    .set_playback_format(PlaybackFormat::LowBandwidth { bitrate_kbps })
+                    .is_err()
+            );
+        }
+        drop(adapter);
+        let adapter = Adapter::with_credentials(root.path(), secrets).unwrap();
+        assert_eq!(adapter.playback_format().unwrap(), format);
+    }
     fn track(key: ConnectionKey, data: &[u8]) -> Track {
         let row = api::MusicTrackAvailability {
+            can_stream_original: false,
             album_selection: api::MusicAlbumSelection::Included,
             display_position: None,
             audio_format: None,

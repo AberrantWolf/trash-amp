@@ -32,8 +32,9 @@ cargo test --workspace --locked
 ./scripts/verify-macos-package.sh target/dist/trash-amp-0.1.0-beta.6-macos-arm64.zip
 ```
 
-Python 3.12 or newer, Xcode command-line tools, and network access are required.
-Real Collector server tests need `flac` on PATH (`brew install flac`). Notice
+Python 3.12 or newer, Xcode command-line tools, CMake, and network access are
+required. Real Collector server tests need `flac` and `ffmpeg` on PATH. Install
+the native build and test tools with `brew install cmake flac ffmpeg`. Notice
 generation downloads cargo-about 0.9.2 and verifies its pinned SHA-256 checksum.
 Changing Slint's license or the Skia version requires updating the bundled
 license texts; packaging stops until they match.

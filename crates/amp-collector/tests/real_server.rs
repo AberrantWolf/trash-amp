@@ -72,7 +72,7 @@ impl Fixture {
         Self::with_media_policy(item_id, label, true, false).await
     }
     async fn with_media_policy(item_id: ItemId, label: &str, local: bool, public: bool) -> Self {
-        Self::with_routes(item_id, label, local, public, false).await
+        Self::with_routes(item_id, label, local, public, false, true).await
     }
     async fn with_routes(
         item_id: ItemId,
@@ -80,6 +80,7 @@ impl Fixture {
         local: bool,
         public: bool,
         remote: bool,
+        prepare_flac: bool,
     ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let store = Arc::new(
@@ -169,9 +170,14 @@ impl Fixture {
         let cue = b"FILE \"disc.bin\" BINARY\n TRACK 01 AUDIO\n INDEX 01 00:00:00\n";
         let pcm = (0..176400)
             .flat_map(|frame| {
-                let _ = frame;
-                let n = 0i16.to_le_bytes();
-                [n[0], n[1], n[0], n[1]]
+                // Silence in the first second distinguishes a seek from a restart.
+                let sample = if frame < 44_100 {
+                    0
+                } else {
+                    (10_000.0 * (f64::from(frame) * std::f64::consts::TAU / 100.0).sin()) as i16
+                };
+                let [lo, hi] = sample.to_le_bytes();
+                [lo, hi, lo, hi]
             })
             .collect::<Vec<_>>();
         let import = state
@@ -249,36 +255,38 @@ impl Fixture {
             .enqueue_import_publication(&owner, reviewed.id, &command())
             .unwrap();
         state.service.run_next_job("fixture-publication").unwrap();
-        let row = state
-            .service
-            .music_track_availability(&owner, item_id)
-            .unwrap()
-            .into_iter()
-            .find(|r| r.primary_playback())
-            .unwrap();
-        let tool = collector_providers::ConfiguredEncoder::probe(
-            collector_providers::EncoderKind::Flac,
-            "flac",
-        )
-        .expect("real-server acceptance requires flac");
-        state.service = state.service.clone().with_audio_converter(Arc::new(
-            collector_providers::ProcessAudioConverter::new(Some(tool), None).unwrap(),
-        ));
-        state
-            .service
-            .prepare_configured_music_track(
-                &owner,
-                item_id,
-                row.capture_id,
-                collector_app::PrepareMusicTrack {
-                    source_representation_id: row.source_representation_id,
-                    profile: ConversionProfile::Flac,
-                },
-                1,
-                &command(),
+        if prepare_flac {
+            let row = state
+                .service
+                .music_track_availability(&owner, item_id)
+                .unwrap()
+                .into_iter()
+                .find(|r| r.primary_playback())
+                .unwrap();
+            let tool = collector_providers::ConfiguredEncoder::probe(
+                collector_providers::EncoderKind::Flac,
+                "flac",
             )
-            .unwrap();
-        state.service.run_next_job("fixture-flac").unwrap();
+            .expect("real-server acceptance requires flac");
+            state.service = state.service.clone().with_audio_converter(Arc::new(
+                collector_providers::ProcessAudioConverter::new(Some(tool), None).unwrap(),
+            ));
+            state
+                .service
+                .prepare_configured_music_track(
+                    &owner,
+                    item_id,
+                    row.capture_id,
+                    collector_app::PrepareMusicTrack {
+                        source_representation_id: row.source_representation_id,
+                        profile: ConversionProfile::Flac,
+                    },
+                    1,
+                    &command(),
+                )
+                .unwrap();
+            state.service.run_next_job("fixture-flac").unwrap();
+        }
         let stop = axum_server::Handle::new();
         let handle = stop.clone();
         let local = if local {
@@ -432,6 +440,18 @@ impl Fixture {
                             package_name: "Digital native".into(),
                         },
                         anchor_file_index: None,
+                        album_tracks: Some(
+                            ["01.flac", "02.mp3"]
+                                .into_iter()
+                                .map(|file_name| {
+                                    collector_modules::music::files::MusicImportTrack {
+                                        file_name: file_name.into(),
+                                        disc_position: None,
+                                        display_position: None,
+                                    }
+                                })
+                                .collect(),
+                        ),
                         files: [("01.flac", flac), ("02.mp3", mp3), ("cover.png", cover)]
                             .into_iter()
                             .map(|(name, bytes)| collector_app::UploadFile {
@@ -455,6 +475,7 @@ impl Fixture {
                     analysis: collector_app::IngestAnalysisPolicy::Automatic,
                     enrichment: collector_app::IngestEnrichmentPolicy::None,
                     prepare_music: false,
+                    audio_preparation: None,
                     destination: None,
                 },
                 &command(),
@@ -590,6 +611,122 @@ async fn refresh_retains_every_album_across_bounded_pages() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn playback_modes_seek_original_live_and_prepared_audio() {
+    use amp_audio::{MediaInput, MediaResolver, PcmReader};
+    use amp_collector::PlaybackFormat;
+    use junk_libs_audio::{AudioDecoder, FramePosition};
+    use std::time::Duration;
+
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let item = ItemId::new();
+    let fixture = Fixture::with_media_policy(item, "Playback format", false, true).await;
+    fixture.add_digital_purchase();
+    let unprepared_item = ItemId::new();
+    let unprepared = Fixture::with_routes(
+        unprepared_item,
+        "Unprepared disc",
+        false,
+        true,
+        false,
+        false,
+    )
+    .await;
+    let secrets = Arc::new(Secrets::default());
+    let key = fixture.enroll(&secrets).await;
+    let unprepared_key = unprepared.enroll(&secrets).await;
+    let cache = tempfile::tempdir().unwrap();
+    let adapter = Adapter::with_credentials(cache.path(), secrets).unwrap();
+    let snapshot = refresh_open(&adapter, key).await;
+    refresh_open(&adapter, unprepared_key).await;
+    let unprepared_track = adapter
+        .load_album(unprepared_key, unprepared_item, &|| false)
+        .await
+        .unwrap()
+        .tracks
+        .remove(0);
+    let album = snapshot
+        .library
+        .albums
+        .iter()
+        .find(|album| album.title == "Purchased album")
+        .unwrap();
+    let digital_tracks = album.tracks.clone();
+    let track = adapter
+        .load_album(key, item, &|| false)
+        .await
+        .unwrap()
+        .tracks
+        .remove(0);
+
+    tokio::task::spawn_blocking(move || {
+        let position = Duration::from_secs(2);
+        for (format, media_type) in [
+            (PlaybackFormat::Original, "audio/wav"),
+            (PlaybackFormat::HighBandwidth, "audio/flac"),
+        ] {
+            adapter.set_playback_format(format).unwrap();
+            let MediaInput::Encoded(source) = adapter.open_at(&track, position).unwrap() else {
+                panic!("Expected seekable {format:?} audio");
+            };
+            assert_eq!(source.hint().media_type.as_deref(), Some(media_type));
+            let mut reader = AudioDecoder::open(source).unwrap();
+            assert_eq!(reader.format().sample_rate(), 44_100);
+            reader.seek_exact(FramePosition(88_200)).unwrap();
+            assert_eq!(assert_audible_tail(&mut reader), 88_200);
+        }
+
+        assert_eq!(
+            unprepared_track.availability,
+            amp_core::Availability::Available
+        );
+        let MediaInput::Streamed(mut reader) =
+            adapter.open_at(&unprepared_track, position).unwrap()
+        else {
+            panic!("Expected live FLAC for the unprepared disc");
+        };
+        assert_eq!(reader.format().sample_rate(), 44_100);
+        assert_eq!(assert_audible_tail(reader.as_mut()), 88_200);
+
+        // High Bandwidth must accept the original MP3 advertised by Collector.
+        let MediaInput::Encoded(source) = adapter.open(&digital_tracks[1]).unwrap() else {
+            panic!("Expected the original MP3");
+        };
+        assert_eq!(source.hint().media_type.as_deref(), Some("audio/mpeg"));
+        assert_eq!(
+            AudioDecoder::open(source).unwrap().format().sample_rate(),
+            44_100
+        );
+
+        let format = PlaybackFormat::LowBandwidth { bitrate_kbps: 113 };
+        adapter.set_playback_format(format).unwrap();
+        let MediaInput::Streamed(mut reader) = adapter.open_at(&track, position).unwrap() else {
+            panic!("Expected live Opus");
+        };
+        assert_eq!(reader.format().sample_rate(), 48_000);
+        assert_eq!(assert_audible_tail(reader.as_mut()), 96_000);
+
+        adapter.schedule(std::slice::from_ref(&track)).unwrap();
+        adapter.download(track.clone()).unwrap();
+        let MediaInput::Encoded(source) = adapter.open(&track).unwrap() else {
+            panic!("Expected the retained FLAC");
+        };
+        assert_eq!(source.hint().media_type.as_deref(), Some("audio/flac"));
+    })
+    .await
+    .unwrap();
+
+    fn assert_audible_tail(reader: &mut dyn PcmReader) -> u64 {
+        let first = reader.read_frames(1024).unwrap().unwrap();
+        assert!(first.samples.iter().any(|sample| sample.abs() > 0.1));
+        let mut decoded = first.frame_count();
+        while let Some(chunk) = reader.read_frames(1024).unwrap() {
+            decoded += chunk.frame_count();
+        }
+        decoded
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let item = ItemId::new();
@@ -682,8 +819,12 @@ async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
     let a = adapter.clone();
     let t = track.clone();
     tokio::task::spawn_blocking(move || {
-        use amp_audio::MediaResolver;
-        let source = a.resolve(&t).unwrap();
+        use amp_audio::{MediaInput, MediaResolver};
+        a.set_playback_format(amp_collector::PlaybackFormat::HighBandwidth)
+            .unwrap();
+        let MediaInput::Encoded(source) = a.open(&t).unwrap() else {
+            panic!("A separate media connection should use saved audio");
+        };
         let mut decoder = junk_libs_audio::AudioDecoder::open(source).unwrap();
         let mut frames = 0;
         while let Some(chunk) = decoder.read_frames(1024).unwrap() {
@@ -1056,8 +1197,7 @@ fn direct_https_adapter_fixture() {
     );
     let track = snapshot.library.albums[0].tracks[0].clone();
     if expected == ConnectionState::StreamingUnavailable {
-        // Even when public fallback is enabled, a bad advertised HTTPS route
-        // must fail closed rather than sending music through the control origin.
+        // Separate audio is required, and the advertised HTTPS route is untrusted.
         assert!(adapter.resolve(&track).is_err());
         adapter.schedule(std::slice::from_ref(&track)).unwrap();
         assert!(adapter.download(track).is_err());
@@ -1094,7 +1234,9 @@ fn direct_https_adapter_fixture() {
 async fn direct_https_stream_seek_download_and_offline_with_route_indicator() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     for local in [false, true] {
-        let fixture = Fixture::with_routes(ItemId::new(), "HTTPS album", local, true, true).await;
+        // Collector advertises separate media when normal audio is disabled.
+        let fixture =
+            Fixture::with_routes(ItemId::new(), "HTTPS album", local, false, true, true).await;
         let secrets = Secrets::default();
         let key = fixture.enroll(&secrets).await;
         let root = tempfile::tempdir().unwrap();

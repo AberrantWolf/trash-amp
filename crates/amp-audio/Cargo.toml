@@ -10,6 +10,9 @@ anyhow.workspace = true
 junk-libs-disc.workspace = true
 junk-libs-audio = { workspace = true, features = ["decode-compressed"] }
 junk-libs-playback.workspace = true
+symphonia = { version = "0.5.5", default-features = false, features = ["flac"] }
+symphonia-adapter-libopus = "0.2"
+ogg = "0.9"
 cpal = "0.18.2"
 rtrb = "0.3"
 [target.'cfg(target_os = "ios")'.dependencies]

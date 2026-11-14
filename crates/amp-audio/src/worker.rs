@@ -307,6 +307,14 @@ pub(super) fn run<B: Backend>(
                     }
                 }
             }
+            if !shared.playing.load(Ordering::Relaxed)
+                && !reset
+                && reader.as_ref().is_some_and(|r| r.reader.streamed)
+            {
+                reset = true;
+                index = shared.track.load(Ordering::Relaxed);
+                requested_frame = shared.position.load(Ordering::Relaxed);
+            }
             if reset {
                 completed = false;
                 resume_buffer.clear();

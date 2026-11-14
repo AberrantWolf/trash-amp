@@ -10,8 +10,10 @@ amp-audio.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-collector-client = { git = "https://github.com/AberrantWolf/junk-collector", rev = "fb0354665e48f399cdd640ca1d395712ae567ddf" }
-rusqlite = { version = "0.33", features = ["bundled"] }
+collector-client = { git = "https://github.com/AberrantWolf/junk-collector", rev = "73d24f8556a37cb641d8189e950db8d6ec496d19" }
+reqwest = { version = "0.12", default-features = false }
+bytes = "1"
+rusqlite = { version = "0.41", features = ["bundled"] }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
 keyring = { version = "3", features = ["apple-native"] }
 uuid = { version = "1", features = ["v4"] }
@@ -20,11 +22,12 @@ hex = "0.4"
 fs2 = "0.4"
 [dev-dependencies]
 tempfile = "3"
-collector-server = { git = "https://github.com/AberrantWolf/junk-collector", rev = "fb0354665e48f399cdd640ca1d395712ae567ddf" }
-collector-store = { git = "https://github.com/AberrantWolf/junk-collector", rev = "fb0354665e48f399cdd640ca1d395712ae567ddf" }
-collector-app = { git = "https://github.com/AberrantWolf/junk-collector", rev = "fb0354665e48f399cdd640ca1d395712ae567ddf" }
-collector-media = { git = "https://github.com/AberrantWolf/junk-collector", rev = "fb0354665e48f399cdd640ca1d395712ae567ddf" }
-collector-providers = { git = "https://github.com/AberrantWolf/junk-collector", rev = "fb0354665e48f399cdd640ca1d395712ae567ddf" }
+collector-server = { git = "https://github.com/AberrantWolf/junk-collector", rev = "73d24f8556a37cb641d8189e950db8d6ec496d19" }
+collector-store = { git = "https://github.com/AberrantWolf/junk-collector", rev = "73d24f8556a37cb641d8189e950db8d6ec496d19" }
+collector-app = { git = "https://github.com/AberrantWolf/junk-collector", rev = "73d24f8556a37cb641d8189e950db8d6ec496d19" }
+collector-media = { git = "https://github.com/AberrantWolf/junk-collector", rev = "73d24f8556a37cb641d8189e950db8d6ec496d19" }
+collector-modules = { git = "https://github.com/AberrantWolf/junk-collector", rev = "73d24f8556a37cb641d8189e950db8d6ec496d19" }
+collector-providers = { git = "https://github.com/AberrantWolf/junk-collector", rev = "73d24f8556a37cb641d8189e950db8d6ec496d19" }
 rcgen = "0.13"
 axum-server = { version = "0.8", features = ["tls-rustls"] }
 chrono = "0.4"
