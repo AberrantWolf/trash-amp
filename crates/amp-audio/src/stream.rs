@@ -72,6 +72,16 @@ enum Packets {
 }
 
 impl StreamDecoder {
+    /// Inspect the first Ogg identification packet and leave the source positioned
+    /// where it started so its decoder can still read the complete header.
+    pub fn ogg_has_opus_header(reader: &mut (impl Read + Seek)) -> Result<bool> {
+        let start = reader.stream_position()?;
+        let packet = ogg::PacketReader::new(reader.by_ref().take(64 * 1024)).read_packet_expected();
+        reader.seek(SeekFrom::Start(start))?;
+        let packet = packet?;
+        Ok(packet.first_in_stream() && packet.data.starts_with(b"OpusHead"))
+    }
+
     pub fn open(reader: impl Read + Send + 'static, format: StreamFormat) -> Result<Self> {
         match format {
             StreamFormat::Flac => Self::open_flac(reader),

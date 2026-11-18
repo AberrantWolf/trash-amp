@@ -132,22 +132,10 @@ impl Adapter {
         let media_type = header_text(headers, header::CONTENT_TYPE)
             .and_then(|value| value.split(';').next())
             .context("Collector did not report the audio format")?;
-        let (extension, codec) = match (format, media_type) {
-            (PlaybackFormat::Original, "audio/wav") => ("wav", None),
-            (PlaybackFormat::Original | PlaybackFormat::HighBandwidth, "audio/mpeg") => {
-                ("mp3", None)
-            }
-            (PlaybackFormat::Original | PlaybackFormat::HighBandwidth, "audio/flac") => {
-                ("flac", Some(StreamFormat::Flac))
-            }
-            (PlaybackFormat::Original | PlaybackFormat::LowBandwidth { .. }, "audio/ogg") => {
-                ("opus", Some(StreamFormat::Opus))
-            }
-            _ => bail!("Collector returned an unexpected playback format"),
-        };
+        let (extension, sequential_codec) = playback_audio_type(format, media_type)?;
 
         if header_text(headers, header::ACCEPT_RANGES) != Some("bytes") {
-            let codec = codec.context("Collector returned audio without byte ranges")?;
+            let codec = sequential_codec.context("Collector returned audio without byte ranges")?;
             return Ok(Some(MediaInput::Streamed(Box::new(StreamDecoder::open(
                 HttpStream::new(connection, response),
                 codec,
@@ -173,23 +161,52 @@ impl Adapter {
             position: 0,
             range: None,
         };
-        if matches!(codec, Some(StreamFormat::Opus)) {
-            // A prepared Opus file starts at zero. Decode from its headers to
-            // preserve pre-skip and decoder state before discarding the prefix.
-            let mut reader = StreamDecoder::open(file, StreamFormat::Opus)?;
-            let mut remaining =
-                (position.as_secs_f64() * f64::from(reader.format().sample_rate())).round() as u64;
-            while remaining > 0 {
-                let chunk = reader
-                    .read_frames(remaining.min(4096) as usize)?
-                    .context("Playback position is beyond the track")?;
-                remaining -= chunk.frame_count();
-            }
-            return Ok(Some(MediaInput::Streamed(Box::new(reader))));
-        }
-
-        Ok(Some(MediaInput::Encoded(ByteSource::new(file, hint))))
+        open_seekable_audio(file, hint, position).map(Some)
     }
+}
+
+fn playback_audio_type(
+    format: PlaybackFormat,
+    media_type: &str,
+) -> Result<(&'static str, Option<StreamFormat>)> {
+    Ok(match (format, media_type) {
+        (PlaybackFormat::Original, "audio/wav") => ("wav", None),
+        (PlaybackFormat::Original | PlaybackFormat::HighBandwidth, "audio/mpeg") => ("mp3", None),
+        (PlaybackFormat::Original | PlaybackFormat::HighBandwidth, "audio/flac") => {
+            ("flac", Some(StreamFormat::Flac))
+        }
+        (PlaybackFormat::Original, "audio/ogg") => ("ogg", Some(StreamFormat::Opus)),
+        (PlaybackFormat::LowBandwidth { .. }, "audio/ogg") => ("opus", Some(StreamFormat::Opus)),
+        _ => bail!("Collector returned an unexpected playback format"),
+    })
+}
+
+fn open_seekable_audio(
+    mut file: impl Read + Seek + Send + 'static,
+    hint: MediaHint,
+    position: Duration,
+) -> Result<MediaInput> {
+    let opus = match hint.extension.as_deref() {
+        Some("opus") => true,
+        // Collector labels Original Ogg files by container, including Vorbis.
+        Some("ogg") => StreamDecoder::ogg_has_opus_header(&mut file)?,
+        _ => false,
+    };
+    if !opus {
+        return Ok(MediaInput::Encoded(ByteSource::new(file, hint)));
+    }
+    // A saved Opus file starts at zero. Decode from its headers to preserve
+    // pre-skip and decoder state before discarding the prefix.
+    let mut reader = StreamDecoder::open(file, StreamFormat::Opus)?;
+    let mut remaining =
+        (position.as_secs_f64() * f64::from(reader.format().sample_rate())).round() as u64;
+    while remaining > 0 {
+        let chunk = reader
+            .read_frames(remaining.min(4096) as usize)?
+            .context("Playback position is beyond the track")?;
+        remaining -= chunk.frame_count();
+    }
+    Ok(MediaInput::Streamed(Box::new(reader)))
 }
 
 pub(super) async fn playback_descriptor(
@@ -380,5 +397,46 @@ async fn cancellable<T>(
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         } => bail!("Playback cancelled"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use junk_libs_audio::AudioDecoder;
+
+    #[test]
+    fn original_ogg_routes_vorbis_and_opus_using_the_identification_packet() {
+        let (extension, _) = playback_audio_type(PlaybackFormat::Original, "audio/ogg").unwrap();
+        let open = |bytes: &'static [u8]| {
+            open_seekable_audio(
+                io::Cursor::new(bytes),
+                MediaHint::new(Some(bytes.len() as u64), Some(extension), Some("audio/ogg")),
+                Duration::from_millis(125),
+            )
+            .unwrap()
+        };
+
+        let MediaInput::Encoded(vorbis) = open(include_bytes!(
+            "../tests/fixtures/digital-audio/original-vorbis.ogg"
+        )) else {
+            panic!("Vorbis originals must retain their seekable audio source");
+        };
+        let mut vorbis = AudioDecoder::open(vorbis).unwrap();
+        assert_eq!(vorbis.format().sample_rate(), 44_100);
+        let chunk = vorbis.read_frames(512).unwrap().unwrap();
+        assert!(chunk.samples.iter().any(|sample| sample.abs() > 0.01));
+
+        let MediaInput::Streamed(mut opus) = open(include_bytes!(
+            "../tests/fixtures/digital-audio/original-opus.ogg"
+        )) else {
+            panic!("Opus originals must use the Opus decoder");
+        };
+        assert_eq!(opus.format().sample_rate(), 48_000);
+        let mut frames = 0;
+        while let Some(chunk) = opus.read_frames(512).unwrap() {
+            frames += chunk.frame_count();
+        }
+        assert_eq!(frames, 6_000, "Half of the quarter-second fixture remains");
     }
 }
