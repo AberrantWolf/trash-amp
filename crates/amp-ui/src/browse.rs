@@ -1194,6 +1194,7 @@ mod tests {
     fn mobile_tap_plays_the_remaining_visible_tracks_in_order() {
         let (ui, state, path, _service) = setup("mobile-play");
         ui.set_wide(false);
+        ui.set_touch_input(true);
         let (targets, expected) = {
             let s = state.borrow();
             let album = &s.library.albums[0];
@@ -1241,7 +1242,6 @@ mod tests {
         assert_eq!(ui.get_status(), "Playing from track");
         // A mobile host retains tap behavior in landscape, independently of width.
         ui.set_wide(true);
-        ui.set_touch_input(true);
         ui.invoke_browse_action(true, 0, 3);
         assert!(state.borrow().browser.pending_open.is_none());
         drop(state);

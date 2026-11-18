@@ -1687,6 +1687,65 @@ mod tests {
     }
 
     #[test]
+    fn short_windows_keep_library_search_tracks_and_queue_reachable() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::platform::{PointerEventButton, WindowEvent};
+        use std::cell::Cell;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.set_short(true);
+        ui.set_album_title("Evening Sessions".into());
+        ui.set_tracks(ModelRc::new(VecModel::from(vec![super::TrackRow {
+            title: "First track".into(),
+            ..Default::default()
+        }])));
+        let plays = Rc::new(Cell::new(0));
+        let count = plays.clone();
+        ui.on_play_track(move |_| count.set(count.get() + 1));
+        ui.show().unwrap();
+
+        let find = |label| {
+            ElementHandle::find_by_accessible_label(&ui, label)
+                .next()
+                .unwrap()
+        };
+        for (width, height, wide, scale) in [(740., 350., true, 1.), (500., 420., false, 1.6)] {
+            ui.set_wide(wide);
+            ui.set_text_scale(scale);
+            ui.window().set_size(slint::LogicalSize::new(width, height));
+            ui.set_show_library(true);
+            assert!(find("Album browser").size().height > 0.);
+            let dock = find("Playback dock").absolute_position().y;
+            let search = find("Search library");
+            assert!(search.absolute_position().y + search.size().height <= dock);
+
+            ui.set_show_library(false);
+            let tracks = find("Album tracks");
+            let top = tracks.absolute_position().y;
+            assert!(tracks.size().height > 0. && top < dock);
+
+            let position =
+                slint::LogicalPosition::new(tracks.absolute_position().x + 80., top + 20.);
+            ui.window().dispatch_event(WindowEvent::PointerPressed {
+                position,
+                button: PointerEventButton::Left,
+            });
+            ui.window().dispatch_event(WindowEvent::PointerReleased {
+                position,
+                button: PointerEventButton::Left,
+            });
+            assert_eq!(ui.get_selected_track(), 0);
+            assert_eq!(plays.get(), 0, "A desktop click selects at any width");
+
+            find("Up next (0)").invoke_accessible_default_action();
+            assert!(ui.get_show_queue());
+            assert!(find("Clear up next").absolute_position().y < dock);
+            ui.set_show_queue(false);
+        }
+    }
+
+    #[test]
     fn phone_actions_fit_and_leave_space_for_tracks_at_large_text_sizes() {
         use i_slint_backend_testing::ElementHandle;
         i_slint_backend_testing::init_no_event_loop();
@@ -2494,6 +2553,7 @@ mod tests {
         let ui = PlayerWindow::new().unwrap();
         ui.window().set_size(slint::LogicalSize::new(390.0, 740.0));
         ui.set_wide(false);
+        ui.set_touch_input(true);
         ui.set_lists_open(true);
         ui.set_list_rows(ModelRc::new(VecModel::from(vec![
             BrowserRow {
