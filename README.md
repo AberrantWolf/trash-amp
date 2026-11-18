@@ -123,10 +123,11 @@ The initial raw reader supports single-session, two-channel, all-audio discs. Mi
 
 ## Home and libraries
 
-The app opens on **Home**. Choose **Local folder** or a saved server, then choose a
-saved folder library or server collection and press **Browse library**. **Open
-folder** adds a local library on desktop; **Add / manage servers** opens server
-settings. Lists and general settings are also available from Home.
+The app opens on **Home**. Choose a source and, for saved folders and servers,
+choose the library or collection you want. Home offers the next step for that
+source, such as **Open folder** for a new local library or **Browse library**
+when albums are available. **Manage servers** opens server settings. Lists and
+general settings are also available from Home.
 
 The house icon returns to Home from the browser or album controls. Returning to
 the same library keeps your album, selection, search, and scroll position. Playback

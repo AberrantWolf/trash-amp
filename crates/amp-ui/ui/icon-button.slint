@@ -8,17 +8,22 @@ export global ButtonHints {
 export component IconButton inherits Rectangle {
     in property <image> icon;
     in property <string> label;
+    in property <string> text;
     in property <bool> enabled: true;
     in property <bool> primary;
+    in property <bool> quiet;
     in property <length> button-size: 44px;
     callback clicked();
     width: root.button-size; height: root.button-size;
     horizontal-stretch: 0; vertical-stretch: 0;
     border-radius: 6px;
-    background: !root.enabled ? Theme.surface : root.primary ? Theme.accent
+    private property <bool> rest: !pointer.has-hover && !pointer.pressed && !focus.has-focus;
+    private property <color> foreground: root.primary ? (Theme.dark ? #242321 : #ffffff) : Theme.text;
+    background: root.quiet && root.rest ? transparent : !root.enabled ? Theme.surface : root.primary ? Theme.accent
         : (pointer.has-hover || pointer.pressed ? Theme.hover : Theme.raised);
-    border-width: focus.has-focus ? 2px : 1px;
-    border-color: focus.has-focus ? Theme.accent : (root.primary && root.enabled ? Theme.accent : Theme.border);
+    border-width: focus.has-focus ? 2px : root.quiet && root.rest ? 0px : 1px;
+    border-color: focus.has-focus ? (root.primary ? root.foreground : Theme.accent)
+        : (root.primary && root.enabled ? Theme.accent : Theme.border);
     forward-focus: focus;
     accessible-role: button;
     accessible-label: root.label;
@@ -32,11 +37,23 @@ export component IconButton inherits Rectangle {
         }
     }
     Image {
+        visible: root.text == "";
         source: root.icon;
-        colorize: root.primary ? (Theme.dark ? #242321 : #ffffff) : Theme.text;
+        colorize: root.foreground;
         width: root.primary ? 24px : 20px; height: self.width;
         x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
         opacity: !root.enabled ? 0.35 : pointer.pressed ? 0.65 : 1;
+        accessible-role: none;
+    }
+    if root.text != "": Text {
+        width: 100%; height: 100%;
+        text: root.text;
+        color: root.enabled ? root.foreground : Theme.muted;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        wrap: word-wrap;
+        opacity: pointer.pressed ? 0.65 : 1;
         accessible-role: none;
     }
     pointer := TouchArea {
@@ -45,7 +62,7 @@ export component IconButton inherits Rectangle {
         clicked => { focus.focus(); root.clicked(); }
     }
     // Remove the hover observer entirely on touch hosts (empty text still opens a popup).
-    if ButtonHints.hover-tooltips && root.enabled: Rectangle {
+    if ButtonHints.hover-tooltips && root.enabled && root.text == "": Rectangle {
         width: 100%; height: 100%;
         Tooltip {
             Rectangle {

@@ -15,6 +15,7 @@ import { ConnectionIndicator, ConnectionKind } from "connection-indicator.slint"
 export { ConnectionKind }
 export struct AlbumMatchRow { artwork: image, title:string, artist:string, detail:string, tracks:string, release:string, applicable:bool }
 export struct DownloadRow { id: string, title: string, detail: string, pending: bool, complete: bool }
+enum HomeAction { browse, open-folder, refresh-folder, refresh-device, refresh-server, add-server }
 export component PlayerWindow inherits Window {
     in-out property <string> error-title: "Connection failed";
     in-out property <string> error-message;
@@ -172,6 +173,12 @@ export component PlayerWindow inherits Window {
     in-out property <bool> settings;
     // Launch routing is supplied by the host; returning Home preserves browse state.
     in-out property <bool> home;
+    in property <bool> library-browsable;
+    private property <HomeAction> home-action: root.library-browsable ? HomeAction.browse
+        : root.collector-active ? HomeAction.refresh-server
+        : root.device-library-active ? HomeAction.refresh-device
+        : root.can-open-folder ? (root.folder-index >= 0 ? HomeAction.refresh-folder : HomeAction.open-folder)
+        : HomeAction.add-server;
     changed home => {
         if root.home { root.settings = false; root.lists-open = false; root.search-editing = false; }
     }
@@ -286,7 +293,6 @@ export component PlayerWindow inherits Window {
                         Text { text: "Home"; color: Theme.text; font-size: 27px * root.text-scale; font-weight: 600; vertical-alignment: center; horizontal-stretch: 1; }
                         IconButton { label: "Settings"; icon: @image-url("icons/settings.svg"); clicked => { root.settings = true; keyboard.focus(); } }
                     }
-                    Text { text: "Choose your music"; color: Theme.muted; wrap: word-wrap; }
                     VerticalLayout {
                         spacing: 6px;
                         Text { text: "Source"; color: Theme.text; font-weight: 600; }
@@ -294,14 +300,11 @@ export component PlayerWindow inherits Window {
                             selected(i) => { root.source-changed(self.current-index); } }
                     }
                     if root.source-status != "": Text { text: root.source-status; color: Theme.muted; wrap: word-wrap; accessible-label: "Music source status"; }
-                    if root.device-library-available && !root.device-library-active: Button {
-                        text: "Music access settings"; clicked => { root.music-access-settings(); }
-                    }
                     if root.device-library-active: VerticalLayout {
                         spacing: 8px;
                         Text { text: "Music stored on this device"; color: Theme.text; font-weight: 600; }
                         Text { text: "Cloud-only and protected songs are shown but cannot play. Sync or download unprotected music in Music, then refresh."; color: Theme.muted; wrap: word-wrap; }
-                        Button { text: root.scanning ? "Refreshing…" : "Refresh music library"; min-height: 44px; enabled: !root.scanning; clicked => { root.refresh-folder(); } }
+                        if root.library-browsable: Button { text: root.scanning ? "Refreshing…" : "Refresh music library"; min-height: 44px; enabled: !root.scanning; clicked => { root.refresh-folder(); } }
                         Button { text: "Music access settings"; min-height: 44px; clicked => { root.music-access-settings(); } }
                     }
                     if root.collector-active: VerticalLayout {
@@ -311,7 +314,7 @@ export component PlayerWindow inherits Window {
                             spacing: 6px;
                             ComboBox { model: root.collections; current-index <=> root.collection-index; accessible-label: "Music collection"; horizontal-stretch: 1;
                                 selected(i) => { root.collection-changed(self.current-index); } }
-                            IconButton { label: "Refresh"; icon: @image-url("icons/refresh.svg"); enabled: !root.collector-busy; clicked => { root.refresh-server(); } }
+                            if root.library-browsable: IconButton { label: "Refresh"; icon: @image-url("icons/refresh.svg"); enabled: !root.collector-busy; clicked => { root.refresh-server(); } }
                         }
                         Text { text: root.connection-status; color: Theme.muted; wrap: word-wrap; }
                     }
@@ -322,21 +325,42 @@ export component PlayerWindow inherits Window {
                             spacing: 6px;
                             ComboBox { model: root.folder-libraries; current-index <=> root.folder-index; accessible-label: "Saved folder library"; horizontal-stretch: 1;
                                 selected(i) => { root.folder-selected(self.current-index); } }
-                            IconButton { label: "Refresh folder"; icon: @image-url("icons/refresh.svg"); enabled: root.folder-index >= 0 && !root.scanning; clicked => { root.refresh-folder(); } }
+                            if root.library-browsable: IconButton { label: "Refresh folder"; icon: @image-url("icons/refresh.svg"); enabled: root.folder-index >= 0 && !root.scanning; clicked => { root.refresh-folder(); } }
                         }
                     }
-                    if !root.collector-active && !root.device-library-active && root.folder-libraries.length == 0: Text {
+                    if !root.library-browsable && !root.collector-active && !root.device-library-active && root.folder-libraries.length == 0: Text {
                         text: root.can-open-folder ? "Open a music folder to start a local library." : "Add a server to start listening.";
                         color: Theme.muted; wrap: word-wrap;
                     }
-                    Button { text: "Browse library"; accessible-label: "Browse library"; min-height: 44px;
-                        clicked => { root.home = false; keyboard.focus(); } }
+                    Rectangle {
+                        height: max(44px, 34px * root.text-scale);
+                        IconButton {
+                            width: 100%; height: 100%; primary: true;
+                            text: root.home-action == HomeAction.browse ? "Browse library"
+                                : root.home-action == HomeAction.open-folder ? "Open folder"
+                                : root.home-action == HomeAction.refresh-server ? "Refresh library"
+                                : root.home-action == HomeAction.refresh-device ? "Refresh music library"
+                                : root.home-action == HomeAction.refresh-folder ? "Refresh folder"
+                                : "Add a server";
+                            label: self.text;
+                            enabled: root.home-action == HomeAction.refresh-server ? !root.collector-busy
+                                : (root.home-action == HomeAction.refresh-folder || root.home-action == HomeAction.refresh-device) ? !root.scanning
+                                : true;
+                            clicked => {
+                                if root.home-action == HomeAction.browse { root.home = false; keyboard.focus(); }
+                                else if root.home-action == HomeAction.open-folder { root.open-folder(); }
+                                else if root.home-action == HomeAction.refresh-server { root.refresh-server(); }
+                                else if root.home-action == HomeAction.add-server { root.settings-tab = 1; root.settings = true; keyboard.focus(); }
+                                else { root.refresh-folder(); }
+                            }
+                        }
+                    }
                     if root.collector-active: Button { text: "Lists"; accessible-label: "Lists"; min-height: 44px;
                         clicked => { root.lists-open = true; keyboard.focus(); } }
-                    Rectangle { height: 1px; background: Theme.divider; }
-                    if root.can-open-folder: Button { text: "Open folder"; accessible-label: "Open folder"; min-height: 44px;
+                    if root.home-action != HomeAction.add-server: Rectangle { height: 1px; background: Theme.divider; }
+                    if root.can-open-folder && root.home-action != HomeAction.open-folder: Button { text: "Open folder"; accessible-label: "Open folder"; min-height: 44px;
                         clicked => { root.open-folder(); } }
-                    Button { text: "Add / manage servers"; accessible-label: "Manage servers"; min-height: 44px;
+                    if root.home-action != HomeAction.add-server: Button { text: "Manage servers"; accessible-label: "Manage servers"; min-height: 44px;
                         clicked => { root.settings-tab = 1; root.settings = true; keyboard.focus(); } }
                     Rectangle { min-height: 0px; vertical-stretch: 1; }
                 }
@@ -352,7 +376,6 @@ export component PlayerWindow inherits Window {
                 collector-content := VerticalLayout {
                 width: collector-scroll.content-width; height: collector-scroll.content-height;
                 padding: root.wide ? 12px : 16px; spacing: 8px;
-                Text { text: "Lists"; color: Theme.text; font-size: 20px * root.text-scale; font-weight: 600; }
                 Text { text: root.connection-status; color: Theme.muted; wrap: word-wrap; }
                 HorizontalLayout {
                     ComboBox { model: root.saved-lists; current-index <=> root.list-index; selected(i) => { root.list-selected(self.current-index); } }
@@ -403,7 +426,6 @@ export component PlayerWindow inherits Window {
                     height: settings-scroll.content-height;
                     padding: root.wide ? 12px : 16px; spacing: 12px;
                     private property <bool> tabs-fit: self.width >= 32px + 218px * root.text-scale;
-                    Text { text: "Settings"; color: Theme.text; font-size: 20px * root.text-scale; font-weight: 600; }
                     if settings-content.tabs-fit: HorizontalLayout {
                         spacing: 6px;
                         Button { text: "General"; enabled: root.settings-tab != 0; clicked => { root.settings-tab = 0; } }
@@ -665,19 +687,29 @@ export component PlayerWindow inherits Window {
                     HorizontalLayout {
                         spacing: 8px;
                         if !root.wide || root.can-back: IconButton { label: "Back"; icon: @image-url("icons/back.svg"); clicked => { root.back(); keyboard.focus(); } }
-                        if !(root.show-queue && root.adhoc-queue && !root.artist-view): Image { source: root.album-art; width: root.short ? 36px : (root.wide ? 64px : 48px); height: self.width; image-fit: contain; }
-                        Text { horizontal-stretch: 1; text: root.show-queue && root.adhoc-queue && !root.artist-view ? "Ad hoc playlist" : root.album-title; color: Theme.text; font-size: (root.short ? 20px : (root.wide ? 27px : 22px)) * root.text-scale; font-weight: 600; wrap: root.show-queue && root.adhoc-queue && !root.artist-view ? TextWrap.no-wrap : TextWrap.word-wrap; }
+                        if root.album-art.width > 0 && !root.artist-view && !(root.show-queue && root.adhoc-queue): Image {
+                            source: root.album-art; width: root.short ? 36px : (root.wide ? 64px : 48px); height: self.width; image-fit: contain;
+                        }
+                        VerticalLayout {
+                            horizontal-stretch: 1; alignment: center; spacing: 2px;
+                            Text {
+                                text: root.show-queue && root.adhoc-queue && !root.artist-view ? "Ad hoc playlist" : root.album-title;
+                                color: Theme.text; font-size: (root.short ? 20px : (root.wide ? 27px : 22px)) * root.text-scale;
+                                font-weight: 600; wrap: word-wrap;
+                            }
+                            if root.artist-view: Text { text: root.album-artist; color: Theme.muted; wrap: word-wrap; }
+                            if !root.artist-view && !(root.show-queue && root.adhoc-queue) && root.album-artist != "": artist-link := FocusScope {
+                                enabled: !root.collector-album-loading && root.tracks.length > 0;
+                                height: 24px * root.text-scale;
+                                accessible-role: button; accessible-label: "Artist: " + root.album-artist;
+                                accessible-enabled: self.enabled;
+                                accessible-action-default => { if self.enabled { root.open-artist(root.album-artist); } }
+                                key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.open-artist(root.album-artist); return accept; } return reject; }
+                                Text { width: 100%; height: 100%; text: root.album-artist; color: artist-link.enabled ? Theme.link : Theme.muted; overflow: elide; font-weight: artist-link.has-focus || artist-click.has-hover ? 600 : 400; }
+                                artist-click := TouchArea { enabled: artist-link.enabled; clicked => { root.open-artist(root.album-artist); keyboard.focus(); } }
+                            }
+                        }
                         if root.artist-view && !root.wide: IconButton { label: "Home"; icon: @image-url("icons/home.svg"); clicked => { root.home = true; keyboard.focus(); } }
-                    }
-                    if root.artist-view: Text { text: root.album-artist; color: Theme.muted; wrap: word-wrap; }
-                    if !root.artist-view && !(root.show-queue && root.adhoc-queue && !root.artist-view): artist-link := FocusScope {
-                        enabled: !root.collector-album-loading && root.tracks.length > 0;
-                        height: 24px * root.text-scale;
-                        accessible-role: button; accessible-label: "Artist: " + root.album-artist;
-                        accessible-action-default => { root.open-artist(root.album-artist); }
-                        key-pressed(event) => { if event.text == Key.Return || event.text == " " { root.open-artist(root.album-artist); return accept; } return reject; }
-                        Text { x: 0px; y: 0px; width: 100%; height: 100%; horizontal-alignment: left; text: root.album-artist; color: Theme.link; overflow: elide; font-weight: artist-link.has-focus || artist-click.has-hover ? 600 : 400; }
-                        artist-click := TouchArea { clicked => { root.open-artist(root.album-artist); keyboard.focus(); } }
                     }
                     if root.artist-view: ListView {
                         accessible-label: "Artist releases";

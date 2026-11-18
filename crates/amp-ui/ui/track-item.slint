@@ -44,6 +44,6 @@ export component TrackItem inherits Rectangle {
             if root.track.scan-status != "": Text { text: root.track.scan-status; color: Theme.muted; font-size: 11px * root.text-scale; overflow: elide; }
         }
         Text { text: root.track.duration; color: Theme.muted; width: 44px; vertical-alignment: center; }
-        IconButton { label: "Add " + root.track.title + " to up next"; icon: @image-url("icons/queue.svg"); clicked => { root.enqueue(); } }
+        IconButton { label: "Add " + root.track.title + " to up next"; icon: @image-url("icons/queue.svg"); quiet: true; clicked => { root.enqueue(); } }
     }
 }

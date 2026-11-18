@@ -86,6 +86,7 @@ fn time(seconds: f64) -> SharedString {
     format!("{}:{:02}", s / 60, s % 60).into()
 }
 fn sort_albums(ui: &PlayerWindow, state: &mut State) {
+    ui.set_library_browsable(!state.library.albums.is_empty());
     let selected = state
         .selected
         .and_then(|i| state.library.albums.get(i))
@@ -147,6 +148,14 @@ fn activate_music_source(
     catalog: &Catalog,
     source: &amp_app::sources::SourceDescriptor,
 ) {
+    let current = catalog.snapshot();
+    let accepted = match &current.source {
+        CatalogSource::External(id) => id.as_str(),
+        _ => "folders",
+    };
+    if accepted != source.id {
+        ui.set_library_browsable(false);
+    }
     ui.set_collector_active(source.provider == "collector");
     ui.set_collector_online(false);
     ui.set_connection_kind(ConnectionKind::Disconnected);
@@ -1654,6 +1663,7 @@ mod tests {
         let ui = PlayerWindow::new().unwrap();
         ui.set_wide(false);
         ui.set_home(true);
+        ui.set_library_browsable(true);
 
         ui.set_collector_active(true);
         ui.window().set_size(slint::LogicalSize::new(390., 740.));
@@ -2386,6 +2396,33 @@ mod tests {
         assert_eq!(ui.get_search_text(), "Miles");
     }
     #[test]
+    fn empty_home_offers_setup_actions_that_open_the_right_flow() {
+        use i_slint_backend_testing::ElementHandle;
+        use std::cell::Cell;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.set_home(true);
+        let picked = Rc::new(Cell::new(false));
+        let opened = picked.clone();
+        ui.on_open_folder(move || opened.set(true));
+        ui.show().unwrap();
+
+        let find = |label| ElementHandle::find_by_accessible_label(&ui, label).next();
+        assert!(find("Browse library").is_none());
+        find("Open folder")
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert!(picked.get());
+        ui.set_can_open_folder(false);
+        find("Add a server")
+            .unwrap()
+            .invoke_accessible_default_action();
+        assert!(ui.get_settings());
+        assert_eq!(ui.get_settings_tab(), 1);
+    }
+
+    #[test]
     fn home_owns_source_controls_and_restores_the_current_library() {
         use i_slint_backend_testing::ElementHandle;
         use slint::platform::{Key, WindowEvent};
@@ -2394,6 +2431,7 @@ mod tests {
         ui.set_wide(false);
         ui.set_can_open_folder(false);
         ui.set_collector_active(true);
+        ui.set_library_browsable(true);
         ui.set_sources(ModelRc::new(VecModel::from(vec![
             "Local folder".into(),
             "Collector".into(),
