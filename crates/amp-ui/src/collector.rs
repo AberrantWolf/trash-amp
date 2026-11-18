@@ -1,18 +1,19 @@
 //! Slint presentation adapter. Every operation runs on a worker; browsing and playback have separate lifetimes.
 use super::*;
 use amp_app::catalog::Generation;
+#[cfg(test)]
+use amp_collector::Snapshot;
 use amp_collector::{
-    Adapter, ConnectionKey, ConnectionState, Download, DownloadStatus, ListCommand, PlaybackFormat,
-    SavedConnection, Snapshot, api, ids,
+    Adapter, CatalogView, ConnectionKey, ConnectionState, Download, DownloadStatus, ListCommand,
+    PlaybackFormat, SavedConnection, SourceView, api, ids,
 };
 use anyhow::Context;
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 struct View {
     connections: Vec<SavedConnection>,
     selected: Option<ConnectionKey>,
-    snapshot: Option<Snapshot>,
+    snapshot: Option<CatalogView>,
     list: Option<ids::CollectionListId>,
     collection: Option<ids::CollectionId>,
     online: bool,
@@ -56,7 +57,7 @@ enum Event {
         ConnectionKey,
         ids::CollectionListId,
         u64,
-        anyhow::Result<()>,
+        anyhow::Result<Box<api::CollectionListView>>,
     ),
     Removed(ConnectionKey, anyhow::Result<()>),
     ConnectionChecked(u64, ConnectionKey, ConnectionState),
@@ -71,13 +72,20 @@ pub struct Controller {
     generation: Generation,
     connection_probe: Option<(u64, ConnectionKey, std::time::Instant, bool)>,
     open_url: crate::UrlOpener,
-    source_revision: u64,
+    source_revision: (u64, u64),
+    source_projection: Option<mpsc::Receiver<SourceProjection>>,
     album_request: Option<(u64, amp_core::ItemId, u64)>,
     read_serial: u64,
     album_cancel: Arc<std::sync::atomic::AtomicBool>,
     list_cancel: Arc<std::sync::atomic::AtomicBool>,
     list_request: Option<(u64, ids::CollectionListId, u64)>,
     download_records: Rc<RefCell<Vec<Download>>>,
+}
+struct SourceProjection {
+    generation: u64,
+    revision: u64,
+    source: CatalogSource,
+    view: anyhow::Result<SourceView>,
 }
 fn connection_kind(state: ConnectionState) -> ConnectionKind {
     match state {
@@ -106,7 +114,7 @@ fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
         .enable_all()
         .build()?)
 }
-fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, adapter: &Adapter) {
+fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, downloads: &[Download]) {
     let mut s = state.borrow_mut();
     let same = view
         .snapshot
@@ -132,13 +140,7 @@ fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, adapter: 
     });
     let track_y = ui.get_track_y();
     if let Some(snapshot) = &view.snapshot {
-        let mut library = snapshot.library.clone();
-        if let Some(collection) = view.collection {
-            library
-                .albums
-                .retain(|a| snapshot.album_collections.get(&a.id.item) == Some(&collection));
-        }
-        s.library = Arc::new(library);
+        s.library = snapshot.library_for(view.collection);
         s.artwork = snapshot.artwork.clone();
         ui.set_connection_status(
             format!(
@@ -158,14 +160,8 @@ fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, adapter: 
         );
     } else {
         s.library = Arc::default();
-        s.artwork = BTreeMap::new();
+        s.artwork = Arc::default();
     }
-    Arc::make_mut(&mut s.library).root = view
-        .connections
-        .iter()
-        .find(|c| Some(c.key) == view.selected)
-        .map(|c| c.name.clone())
-        .unwrap_or_else(|| s.library.root.clone());
     let album_keys = s
         .library
         .albums
@@ -236,9 +232,9 @@ fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, adapter: 
             .and_then(|s| s.lists.iter().position(|l| Some(l.list.id) == view.list))
             .map_or(0, |i| i as i32 + 1),
     );
-    render_list(ui, view, adapter);
+    render_list(ui, view, downloads);
 }
-fn render_list(ui: &PlayerWindow, view: &View, adapter: &Adapter) {
+fn render_list(ui: &PlayerWindow, view: &View, downloads: &[Download]) {
     ui.set_list_entry(-1);
     let Some(list) = view.selected_list() else {
         ui.set_list_editable(
@@ -250,7 +246,6 @@ fn render_list(ui: &PlayerWindow, view: &View, adapter: &Adapter) {
         ui.set_list_rows(ModelRc::default());
         return;
     };
-    let downloads = adapter.downloads().unwrap_or_default();
     ui.set_list_name(list.list.name.clone().into());
     ui.set_list_editable(list.list.can_edit);
     let paths = list
@@ -321,32 +316,12 @@ impl Controller {
         open_url: crate::UrlOpener,
     ) -> anyhow::Result<Self> {
         let catalog = state.borrow().catalog.clone();
-        let selected = if state.borrow().library.id == "demo" {
-            None
-        } else {
-            match catalog.snapshot().source {
-                CatalogSource::External(id) => adapter
-                    .connections()?
-                    .into_iter()
-                    .find(|c| amp_collector::source_id(c.key) == id)
-                    .map(|c| c.key),
-                _ => None,
-            }
-        };
-        let connections = adapter.connections()?;
         let accepted = catalog.snapshot();
-        let mut snapshot = selected
-            .map(|key| adapter.snapshot(key))
-            .transpose()?
-            .flatten();
-        if let Some(snapshot) = &mut snapshot {
-            snapshot.library = (*accepted.library).clone();
-            snapshot.artwork = (*accepted.artwork).clone();
-        }
+        let source_view = adapter.source_view(&accepted, None)?;
         let view = Rc::new(RefCell::new(View {
-            connections,
-            selected,
-            snapshot,
+            connections: source_view.connections,
+            selected: source_view.selected,
+            snapshot: source_view.catalog,
             list: None,
             collection: None,
             online: accepted.source_online.unwrap_or(false),
@@ -376,8 +351,8 @@ impl Controller {
             }),
         )?;
         super::wire_source_selection(ui, state);
-        if selected.is_some() {
-            install(ui, state, &view.borrow(), &adapter);
+        if view.borrow().selected.is_some() {
+            install(ui, state, &view.borrow(), &download_records.borrow());
         }
         ui.set_download_budget(
             (adapter.budget()? as f64 / (1024. * 1024. * 1024.))
@@ -572,7 +547,7 @@ impl Controller {
             let view = view.clone();
             let state = state.clone();
             let weak = ui.as_weak();
-            let adapter_for_collection = adapter.clone();
+            let inventory = download_records.clone();
             ui.on_collection_changed(move |i| {
                 let Some(ui) = weak.upgrade() else { return };
                 let mut view = view.borrow_mut();
@@ -585,13 +560,13 @@ impl Controller {
                     None
                 };
                 view.list = None;
-                install(&ui, &state, &view, &adapter_for_collection);
+                install(&ui, &state, &view, &inventory.borrow());
             });
         }
         {
             let view = view.clone();
             let weak = ui.as_weak();
-            let a = adapter.clone();
+            let inventory = download_records.clone();
             ui.on_list_selected(move |i| {
                 let Some(ui) = weak.upgrade() else { return };
                 let mut view = view.borrow_mut();
@@ -609,7 +584,7 @@ impl Controller {
                             list.entries.items.len() < list.list.entry_count as usize
                         }),
                 );
-                render_list(&ui, &view, &a);
+                render_list(&ui, &view, &inventory.borrow());
             });
         }
         {
@@ -970,7 +945,8 @@ impl Controller {
             generation,
             connection_probe: None,
             open_url,
-            source_revision: state.borrow().catalog.snapshot().library_revision,
+            source_revision: (accepted.generation, accepted.library_revision),
+            source_projection: None,
             album_request: None,
             read_serial: 0,
             album_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -979,9 +955,134 @@ impl Controller {
             download_records,
         })
     }
+    fn update_source_view(&mut self, ui: &PlayerWindow, catalog: &amp_app::catalog::Snapshot) {
+        let current = self.generation.current();
+        if let Some(pending) = &self.source_projection {
+            match pending.try_recv() {
+                Ok(result) => {
+                    self.source_projection = None;
+                    if result.generation == current
+                        && result.generation == catalog.generation
+                        && result.source == catalog.source
+                        && result.revision <= catalog.library_revision
+                    {
+                        match result.view {
+                            Ok(source) => self.install_source_view(
+                                ui,
+                                source,
+                                catalog.source_online.unwrap_or(false),
+                            ),
+                            Err(error) => ui.set_connection_status(
+                                format!("Could not read Collector library: {error}").into(),
+                            ),
+                        }
+                    }
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => self.source_projection = None,
+            }
+        }
+
+        let revision = (catalog.generation, catalog.library_revision);
+        if catalog.generation != current || self.source_revision == revision {
+            return;
+        }
+        let collector = matches!(&catalog.source, CatalogSource::External(id)
+            if catalog.sources.iter().any(|s| &s.id == id && s.provider == "collector"));
+        {
+            let mut view = self.view.borrow_mut();
+            if let Some(key) = view.selected
+                && catalog.source != CatalogSource::External(amp_collector::source_id(key))
+            {
+                view.selected = None;
+                view.collection = None;
+                view.list = None;
+                view.snapshot = None;
+                view.online = false;
+                view.connection = ConnectionState::Disconnected;
+                ui.set_collector_active(collector);
+                ui.set_collector_online(false);
+                ui.set_connection_kind(ConnectionKind::Disconnected);
+                ui.set_list_index(0);
+                ui.set_saved_lists(ModelRc::default());
+                render_list(ui, &view, &self.download_records.borrow());
+            }
+        }
+        if !collector {
+            self.source_revision = revision;
+            return;
+        }
+        if self.source_projection.is_some() {
+            return;
+        }
+        self.source_revision = revision;
+        let adapter = self.adapter.clone();
+        let snapshot = catalog.clone();
+        let collection = self.view.borrow().collection;
+        let (tx, rx) = mpsc::channel();
+        self.source_projection = Some(rx);
+        std::thread::spawn(move || {
+            let view = adapter.source_view(&snapshot, collection);
+            let _ = tx.send(SourceProjection {
+                generation: snapshot.generation,
+                revision: snapshot.library_revision,
+                source: snapshot.source,
+                view,
+            });
+        });
+    }
+
+    fn install_source_view(&self, ui: &PlayerWindow, source: SourceView, online: bool) {
+        let mut view = self.view.borrow_mut();
+        if view.selected != source.selected {
+            view.collection = None;
+            view.list = None;
+            view.snapshot = None;
+            view.connection = ConnectionState::Disconnected;
+        }
+        let entry_id = view
+            .selected_list()
+            .and_then(|list| list.entries.items.get(ui.get_list_entry() as usize))
+            .map(|entry| entry.id);
+        let mut next = source.catalog;
+        if let Some(snapshot) = &mut next
+            && let Some(current) = view.selected_list()
+            && let Some(incoming) = snapshot
+                .lists
+                .iter_mut()
+                .find(|row| row.list.id == current.list.id)
+            && (incoming.list.revision.0 < current.list.revision.0
+                || (incoming.list.revision == current.list.revision
+                    && incoming.entries.items.len() < current.entries.items.len()))
+        {
+            *incoming = current.clone();
+        }
+        view.connections = source.connections;
+        view.selected = source.selected;
+        view.snapshot = next;
+        if view.selected_list().is_none() {
+            view.list = None;
+        }
+        view.online = online;
+        ui.set_collector_active(view.selected.is_some());
+        if view.selected.is_some() {
+            install(ui, &self.state, &view, &self.download_records.borrow());
+            if let Some(entry) = entry_id {
+                ui.set_list_entry(
+                    view.selected_list()
+                        .and_then(|list| {
+                            list.entries.items.iter().position(|item| item.id == entry)
+                        })
+                        .map_or(-1, |i| i as i32),
+                );
+            }
+        }
+    }
+
     pub fn poll(&mut self) {
         let Some(ui) = self.ui.upgrade() else { return };
         let catalog = self.state.borrow().catalog.snapshot();
+        self.update_source_view(&ui, &catalog);
         let selected = {
             let state = self.state.borrow();
             if ui.get_show_library()
@@ -1085,62 +1186,17 @@ impl Controller {
                             generation.current() != v || cancelled.load(Ordering::Acquire)
                         }))
                     })();
-                    let _ = tx.send(Event::ListLoaded(v, key, list, serial, result));
+                    let _ = tx.send(Event::ListLoaded(
+                        v,
+                        key,
+                        list,
+                        serial,
+                        result.map(Box::new),
+                    ));
                 });
             }
         }
 
-        if catalog.generation == self.generation.current()
-            && self.source_revision != catalog.library_revision
-        {
-            self.source_revision = catalog.library_revision;
-            let mut view = self.view.borrow_mut();
-            view.connections = self
-                .adapter
-                .connections()
-                .unwrap_or_else(|_| view.connections.clone());
-            let selected = match &catalog.source {
-                CatalogSource::External(id) => view
-                    .connections
-                    .iter()
-                    .find(|c| amp_collector::source_id(c.key) == *id)
-                    .map(|c| c.key),
-                _ => None,
-            };
-            if view.selected != selected {
-                view.collection = None;
-                view.list = None;
-                view.snapshot = None;
-                view.connection = ConnectionState::Disconnected;
-            }
-            view.selected = selected;
-            ui.set_collector_active(selected.is_some());
-            if let Some(key) = selected {
-                let entry_id = view
-                    .selected_list()
-                    .and_then(|list| list.entries.items.get(ui.get_list_entry() as usize))
-                    .map(|entry| entry.id);
-                view.snapshot = self.adapter.display_snapshot(key).ok().flatten();
-                if let Some(snapshot) = &mut view.snapshot {
-                    snapshot.library = (*catalog.library).clone();
-                    snapshot.artwork = (*catalog.artwork).clone();
-                }
-                if view.selected_list().is_none() {
-                    view.list = None;
-                }
-                view.online = catalog.source_online.unwrap_or(false);
-                install(&ui, &self.state, &view, &self.adapter);
-                if let Some(entry) = entry_id {
-                    ui.set_list_entry(
-                        view.selected_list()
-                            .and_then(|list| {
-                                list.entries.items.iter().position(|item| item.id == entry)
-                            })
-                            .map_or(-1, |i| i as i32),
-                    );
-                }
-            }
-        }
         while let Ok(event) = self.rx.try_recv() {
             let current = self.generation.current();
             match event {
@@ -1181,12 +1237,10 @@ impl Controller {
                     match result {
                         Ok(()) => {
                             let mut view = self.view.borrow_mut();
-                            match self.adapter.connections() {
-                                Ok(connections) => view.connections = connections,
-                                Err(error) => {
-                                    ui.set_connection_status(error.to_string().into());
-                                    continue;
-                                }
+                            if let Some(connection) =
+                                view.connections.iter_mut().find(|c| c.key == key)
+                            {
+                                connection.removed = true;
                             }
                             if view.selected == Some(key) {
                                 view.online = false;
@@ -1271,19 +1325,14 @@ impl Controller {
                         Err(error) => {
                             ui.set_status(format!("Could not load playlist: {error}").into())
                         }
-                        Ok(()) => {
+                        Ok(loaded) => {
                             let mut view = self.view.borrow_mut();
-                            if let Ok(Some(saved)) = self.adapter.snapshot(key)
-                                && let Some(loaded) =
-                                    saved.lists.into_iter().find(|l| l.list.id == id)
-                                && let Some(row) = view
-                                    .snapshot
-                                    .as_mut()
-                                    .and_then(|s| s.lists.iter_mut().find(|l| l.list.id == id))
-                            {
+                            if let Some(row) = view.snapshot.as_mut().and_then(|snapshot| {
+                                snapshot.lists.iter_mut().find(|row| row.list.id == id)
+                            }) {
                                 if loaded.list.revision.0 >= row.list.revision.0 {
-                                    *row = loaded;
-                                    render_list(&ui, &view, &self.adapter);
+                                    *row = *loaded;
+                                    render_list(&ui, &view, &self.download_records.borrow());
                                 } else {
                                     self.list_request = None;
                                 }
@@ -1309,7 +1358,7 @@ impl Controller {
                     if self.view.borrow().selected.is_some() && ui.get_collector_active() {
                         // Adapter completion already notified the source owner.
                         let entry = ui.get_list_entry();
-                        render_list(&ui, &self.view.borrow(), &self.adapter);
+                        render_list(&ui, &self.view.borrow(), &self.download_records.borrow());
                         ui.set_list_entry(entry);
                     }
                 }
@@ -1417,7 +1466,6 @@ mod tests {
         i_slint_backend_testing::init_no_event_loop();
         let data = std::env::temp_dir().join(format!("trash-lazy-search-{}", uuid::Uuid::new_v4()));
         let services = TestServices::new(&data.join("library.sqlite3"));
-        let adapter = Adapter::open(&data.join("collector")).unwrap();
         let mut full = amp_library::demo_library();
         full.albums.truncate(1);
         full.albums[0].id.provider = "collector".into();
@@ -1448,14 +1496,14 @@ mod tests {
         let mut view = View {
             connections: vec![],
             selected: None,
-            snapshot: Some(snapshot),
+            snapshot: Some(snapshot.into()),
             list: None,
             collection: None,
             online: true,
             connection: ConnectionState::Connected,
             operation: None,
         };
-        install(&ui, &state, &view, &adapter);
+        install(&ui, &state, &view, &[]);
         ui.set_home(false);
         ui.set_search_text("Alternate Movement 8".into());
         ui.invoke_search_changed();
@@ -1473,16 +1521,16 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         };
         // Retained/online search results can precede the album's actual tracks.
-        view.snapshot.as_mut().unwrap().library.albums[0]
+        Arc::make_mut(&mut view.snapshot.as_mut().unwrap().library).albums[0]
             .tracks
             .clear();
-        install(&ui, &state, &view, &adapter);
+        install(&ui, &state, &view, &[]);
         ui.invoke_browse_action(false, row as i32, 0);
         assert_eq!(ui.get_selected_track(), -1);
         assert_eq!(ui.get_tracks().row_count(), 0);
         assert!(!ui.get_album_matching_available());
-        view.snapshot.as_mut().unwrap().library = full.clone();
-        install(&ui, &state, &view, &adapter);
+        view.snapshot.as_mut().unwrap().library = Arc::new(full.clone());
+        install(&ui, &state, &view, &[]);
         assert_eq!(ui.get_album_source_index(), 2);
         assert_eq!(ui.get_tracks().row_count(), 10);
         assert_eq!(ui.get_selected_track(), 7);
@@ -1494,7 +1542,7 @@ mod tests {
             displayed_tracks(&state.borrow(), 0)[7].title,
             "Alternate Movement 8"
         );
-        install(&ui, &state, &view, &adapter);
+        install(&ui, &state, &view, &[]);
         assert_eq!(
             ui.get_selected_track(),
             7,
@@ -1503,7 +1551,7 @@ mod tests {
         assert!(ui.get_track_y() < 0.);
         ui.set_selected_track(0);
         ui.invoke_album_track_selected();
-        install(&ui, &state, &view, &adapter);
+        install(&ui, &state, &view, &[]);
         assert_eq!(
             ui.get_selected_track(),
             0,
@@ -1512,15 +1560,15 @@ mod tests {
 
         // A second cold open is abandoned before its completion arrives.
         ui.invoke_back();
-        view.snapshot.as_mut().unwrap().library.albums[0]
+        Arc::make_mut(&mut view.snapshot.as_mut().unwrap().library).albums[0]
             .tracks
             .clear();
-        install(&ui, &state, &view, &adapter);
+        install(&ui, &state, &view, &[]);
         ui.invoke_browse_action(false, row as i32, 0);
         assert_eq!(ui.get_tracks().row_count(), 0);
         ui.invoke_back();
-        view.snapshot.as_mut().unwrap().library = full;
-        install(&ui, &state, &view, &adapter);
+        view.snapshot.as_mut().unwrap().library = Arc::new(full);
+        install(&ui, &state, &view, &[]);
         assert!(ui.get_show_library(), "Late hydration must not undo Back");
         assert_eq!(ui.get_selected_track(), -1);
         drop(state);
@@ -1624,31 +1672,34 @@ mod tests {
         let mut view = View {
             connections: vec![],
             selected: None,
-            snapshot: Some(Snapshot {
-                library: Library::default(),
-                collections: vec![],
-                lists: vec![list],
-                artwork: Default::default(),
-                album_collections: Default::default(),
-                album_revisions: Default::default(),
-                track_revisions: Default::default(),
-                artwork_descriptors: Default::default(),
-                summaries_pending: false,
-                updated: 0,
-            }),
+            snapshot: Some(
+                Snapshot {
+                    library: Library::default(),
+                    collections: vec![],
+                    lists: vec![list],
+                    artwork: Default::default(),
+                    album_collections: Default::default(),
+                    album_revisions: Default::default(),
+                    track_revisions: Default::default(),
+                    artwork_descriptors: Default::default(),
+                    summaries_pending: false,
+                    updated: 0,
+                }
+                .into(),
+            ),
             list: Some(list_id),
             collection: None,
             online: false,
             connection: ConnectionState::Disconnected,
             operation: None,
         };
-        install(&ui, &state, &view, &adapter);
+        install(&ui, &state, &view, &[]);
         assert_eq!(ui.get_list_rows().row_count(), 1);
         let list = &mut view.snapshot.as_mut().unwrap().lists[0];
         list.list.name = "After".into();
         list.list.can_edit = true;
         list.entries.items[0].title = "Updated song".into();
-        install(&ui, &state, &view, &adapter);
+        install(&ui, &state, &view, &[]);
         assert_eq!(ui.get_list_index(), 1);
         assert_eq!(ui.get_list_name(), "After");
         assert!(ui.get_list_editable());
@@ -1979,7 +2030,7 @@ mod tests {
         let snapshot:Snapshot=serde_json::from_value(serde_json::json!({"library":library,"collections":[],"lists":[list,cached],"artwork":{},"album_collections":{},"updated":0})).unwrap();
         {
             let mut view = controller.view.borrow_mut();
-            view.snapshot = Some(snapshot);
+            view.snapshot = Some(snapshot.into());
             view.list = Some(list_id);
         }
         ui.set_lists_open(true);
@@ -2046,7 +2097,7 @@ mod tests {
     }
 
     #[test]
-    fn collector_download_completions_do_not_rewrite_device_music_tracks() {
+    fn background_collector_updates_do_not_rewrite_another_source() {
         i_slint_backend_testing::init_no_event_loop();
         let directory =
             std::env::temp_dir().join(format!("trash-source-isolation-{}", uuid::Uuid::new_v4()));
@@ -2083,7 +2134,26 @@ mod tests {
             .tx
             .send(Event::Downloads(Ok(Vec::new())))
             .unwrap();
+        let catalog = services.catalog().snapshot();
+        let obsolete = ConnectionKey {
+            server_id: ids::ServerId::new(),
+            user_id: ids::UserId::new(),
+        };
+        let (tx, rx) = mpsc::channel();
+        controller.source_projection = Some(rx);
+        tx.send(SourceProjection {
+            generation: catalog.generation,
+            revision: catalog.library_revision,
+            source: CatalogSource::External(amp_collector::source_id(obsolete)),
+            view: Ok(SourceView {
+                selected: Some(obsolete),
+                connections: Vec::new(),
+                catalog: None,
+            }),
+        })
+        .unwrap();
         controller.poll();
+        assert!(!ui.get_collector_active());
         assert_eq!(
             state.borrow().library.albums[0].tracks[0].availability,
             amp_core::Availability::Downloaded

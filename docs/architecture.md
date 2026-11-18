@@ -72,7 +72,11 @@ The source adapter owns remote count/page/cache protocols. `amp-app` accepts fen
 incremental publications and owns source selection, while UI workers request album
 or list contents on demand and discard superseded replies. Completed manifests and
 per-album caches are distinct from transient partial pages; manifest commit merges
-concurrent album loads. Artwork and online song search have independent worker
+concurrent album loads. Presentation workers read Collector collections and list
+metadata, and share the accepted immutable catalog and artwork with the view.
+Replies are matched to the active source, and playlist loads return their own
+updated list so the presentation thread needs no follow-up cache read. Artwork
+and online song search have independent worker
 paths. Media resolution consumes queued targets without re-enumerating catalogs.
 See [Collector connection](collector-connection.md) for the current contract.
 

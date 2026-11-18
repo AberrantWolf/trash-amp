@@ -1,7 +1,9 @@
 //! Collector transport, local persistence and media access. No UI dependencies.
 mod playback;
+mod presentation;
 mod source;
 pub use playback::PlaybackFormat;
+pub use presentation::{CatalogView, SourceView};
 pub use source::source_id;
 
 use amp_core::{Album, ItemId, Library, MediaAccess, Track};
@@ -1044,7 +1046,7 @@ impl Adapter {
         key: ConnectionKey,
         list: ids::CollectionListId,
         cancelled: &dyn Fn() -> bool,
-    ) -> Result<()> {
+    ) -> Result<api::CollectionListView> {
         let snapshot = self.snapshot(key)?.context("Library unavailable")?;
         let index = snapshot
             .lists
@@ -1052,10 +1054,12 @@ impl Adapter {
             .position(|l| l.list.id == list)
             .context("List unavailable")?;
         let original_revision = snapshot.lists[index].list.revision;
-        let value = self
-            .client(key)?
-            .list_snapshot(snapshot.lists[index].list.collection_id, list)
-            .await?;
+        let client = self.client(key)?;
+        let value = remote_read(
+            cancelled,
+            client.list_snapshot(snapshot.lists[index].list.collection_id, list),
+        )
+        .await?;
         check(cancelled)?;
         self.update_snapshot(key, |snapshot| {
             check(cancelled)?;
@@ -1065,12 +1069,12 @@ impl Adapter {
                         || row.list.revision == value.list.revision,
                     "Playlist changed; reopen to retry"
                 );
-                *row = value;
+                *row = value.clone();
             }
             Ok(())
         })?;
         self.notify_availability(key);
-        Ok(())
+        Ok(value)
     }
     pub fn list_tracks(&self, key: ConnectionKey, list: &api::CollectionListView) -> Vec<Track> {
         (0..list.entries.items.len())

@@ -70,7 +70,7 @@ mod collector;
 mod files;
 struct State {
     playback: Playback,
-    artwork: std::collections::BTreeMap<String, String>,
+    artwork: Arc<std::collections::BTreeMap<String, String>>,
     browser: browse::Browser,
     library: Arc<Library>,
     selected: Option<usize>,
@@ -463,7 +463,7 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
                 })
         });
         let had_selection = selected_id.is_some();
-        let artwork_changed = state.artwork != *snapshot.artwork;
+        let artwork_changed = state.artwork != snapshot.artwork;
         state.library = snapshot.library.clone();
         let album_keys = state
             .library
@@ -474,7 +474,7 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
         state
             .selected_sources
             .retain(|key, _| album_keys.contains(key));
-        state.artwork = (*snapshot.artwork).clone();
+        state.artwork = snapshot.artwork.clone();
         state.selected = if replacement {
             None
         } else {
