@@ -1,6 +1,85 @@
 //! Build searchable catalog views without blocking the presentation thread.
 use amp_core::{Library, browse::CatalogIndex};
-use std::sync::{Arc, mpsc};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
+
+#[derive(Clone)]
+pub struct ReadTicket {
+    pub serial: u64,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ReadTicket {
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+/// Owns a read for the currently viewed identity. Reopening the same item after
+/// leaving it receives a new serial, so late replies cannot settle the new read.
+pub struct SelectionRead<K> {
+    current: Option<(K, ReadTicket)>,
+    serial: u64,
+}
+
+impl<K> Default for SelectionRead<K> {
+    fn default() -> Self {
+        Self {
+            current: None,
+            serial: 0,
+        }
+    }
+}
+
+impl<K> SelectionRead<K> {
+    pub fn cancel(&mut self) {
+        if let Some((_, ticket)) = self.current.take() {
+            ticket.cancelled.store(true, Ordering::Release);
+        }
+    }
+}
+
+impl<K: PartialEq> SelectionRead<K> {
+    pub fn keep_target(&mut self, target: Option<&K>) -> bool {
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|(key, _)| Some(key) == target)
+        {
+            return true;
+        }
+        self.cancel();
+        false
+    }
+
+    pub fn begin(&mut self, target: K) -> Option<ReadTicket> {
+        if self.keep_target(Some(&target)) {
+            return None;
+        }
+        self.serial = self.serial.wrapping_add(1);
+        let ticket = ReadTicket {
+            serial: self.serial,
+            cancelled: Arc::default(),
+        };
+        self.current = Some((target, ticket.clone()));
+        Some(ticket)
+    }
+
+    pub fn accepts(&self, target: &K, serial: u64) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|(key, ticket)| key == target && ticket.serial == serial)
+    }
+}
+
+impl<K> Drop for SelectionRead<K> {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
 
 /// At most one build runs at a time. Bursts of catalog changes keep only the
 /// newest pending input. The caller can accept intermediate revisions of its

@@ -1,6 +1,6 @@
 //! Slint presentation adapter. Every operation runs on a worker; browsing and playback have separate lifetimes.
 use super::*;
-use amp_app::catalog::Generation;
+use amp_app::{browse::SelectionRead, catalog::Generation};
 #[cfg(test)]
 use amp_collector::Snapshot;
 use amp_collector::{
@@ -9,7 +9,6 @@ use amp_collector::{
 };
 use anyhow::Context;
 use std::path::Path;
-use std::sync::atomic::Ordering;
 struct View {
     connections: Vec<SavedConnection>,
     selected: Option<ConnectionKey>,
@@ -73,11 +72,8 @@ pub struct Controller {
     open_url: crate::UrlOpener,
     source_revision: (u64, u64),
     source_projection: Option<mpsc::Receiver<SourceProjection>>,
-    album_request: Option<(u64, amp_core::ItemId, u64)>,
-    read_serial: u64,
-    album_cancel: Arc<std::sync::atomic::AtomicBool>,
-    list_cancel: Arc<std::sync::atomic::AtomicBool>,
-    list_request: Option<(u64, ids::CollectionListId, u64)>,
+    album_request: SelectionRead<(u64, ConnectionKey, amp_core::ItemId)>,
+    list_request: SelectionRead<(u64, ConnectionKey, ids::CollectionListId)>,
     download_records: Rc<RefCell<Vec<Download>>>,
 }
 struct SourceProjection {
@@ -904,11 +900,8 @@ impl Controller {
             open_url,
             source_revision: (accepted.generation, accepted.library_revision),
             source_projection: None,
-            album_request: None,
-            read_serial: 0,
-            album_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            list_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            list_request: None,
+            album_request: SelectionRead::default(),
+            list_request: SelectionRead::default(),
             download_records,
         })
     }
@@ -1061,39 +1054,35 @@ impl Controller {
             catalog.generation == self.generation.current()
                 && catalog.source == CatalogSource::External(amp_collector::source_id(*key))
         });
-        if let (Some(id), Some(key)) = (selected, key) {
-            let request = (catalog.generation, id.clone());
-            if catalog.source_online == Some(true)
-                && !self
-                    .album_request
-                    .as_ref()
-                    .is_some_and(|(version, id, _)| (*version, id) == (request.0, &request.1))
-            {
-                self.read_serial = self.read_serial.wrapping_add(1);
-                let serial = self.read_serial;
-                self.album_request = Some((request.0, request.1, serial));
-                self.album_cancel.store(true, Ordering::Release);
-                self.album_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let cancelled = self.album_cancel.clone();
-                ui.set_collector_album_loading(true);
-                ui.set_status("Loading album tracks…".into());
-                let adapter = self.adapter.clone();
-                let generation = self.generation.clone();
-                let tx = self.tx.clone();
-                let v = catalog.generation;
-                std::thread::spawn(move || {
-                    let result = (|| {
-                        runtime()?.block_on(adapter.load_album(key, id.item.parse()?, &|| {
-                            generation.current() != v || cancelled.load(Ordering::Acquire)
-                        }))
-                    })();
-                    let _ = tx.send(Event::AlbumLoaded(v, key, id, serial, result.map(Box::new)));
-                });
-            }
-        } else {
-            self.album_request = None;
-            self.album_cancel.store(true, Ordering::Release);
+        let album = key
+            .zip(selected)
+            .map(|(key, id)| (catalog.generation, key, id));
+        if !self.album_request.keep_target(album.as_ref()) {
             ui.set_collector_album_loading(false);
+        }
+        if catalog.source_online == Some(true)
+            && let Some((v, key, id)) = album
+            && let Some(ticket) = self.album_request.begin((v, key, id.clone()))
+        {
+            ui.set_collector_album_loading(true);
+            ui.set_status("Loading album tracks…".into());
+            let adapter = self.adapter.clone();
+            let generation = self.generation.clone();
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                let result = (|| {
+                    runtime()?.block_on(adapter.load_album(key, id.item.parse()?, &|| {
+                        generation.current() != v || ticket.is_cancelled()
+                    }))
+                })();
+                let _ = tx.send(Event::AlbumLoaded(
+                    v,
+                    key,
+                    id,
+                    ticket.serial,
+                    result.map(Box::new),
+                ));
+            });
         }
         let list = self
             .view
@@ -1107,51 +1096,37 @@ impl Controller {
                     l.list.entry_count as usize,
                 )
             });
-        let target = key.and_then(|_| list.map(|(id, _, _)| (catalog.generation, id)));
-        if target.is_none()
-            || self
-                .list_request
-                .is_some_and(|(generation, id, _)| Some((generation, id)) != target)
-        {
-            self.list_request = None;
-            self.list_cancel.store(true, Ordering::Release);
+        let target = key
+            .zip(list)
+            .map(|(key, (id, _, _))| (catalog.generation, key, id));
+        if !self.list_request.keep_target(target.as_ref()) {
             ui.set_collector_list_loading(false);
         }
-        if let (Some(key), Some((list, loaded, total))) = (key, list) {
-            let request = (catalog.generation, list);
-            if !catalog.scanning
-                && catalog.source_online == Some(true)
-                && loaded < total
-                && self
-                    .list_request
-                    .is_none_or(|(version, id, _)| (version, id) != request)
-            {
-                self.read_serial = self.read_serial.wrapping_add(1);
-                let serial = self.read_serial;
-                self.list_request = Some((request.0, request.1, serial));
-                ui.set_collector_list_loading(true);
-                self.list_cancel.store(true, Ordering::Release);
-                self.list_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let cancelled = self.list_cancel.clone();
-                let adapter = self.adapter.clone();
-                let generation = self.generation.clone();
-                let tx = self.tx.clone();
-                let v = catalog.generation;
-                std::thread::spawn(move || {
-                    let result = (|| {
-                        runtime()?.block_on(adapter.load_list(key, list, &|| {
-                            generation.current() != v || cancelled.load(Ordering::Acquire)
-                        }))
-                    })();
-                    let _ = tx.send(Event::ListLoaded(
-                        v,
-                        key,
-                        list,
-                        serial,
-                        result.map(Box::new),
-                    ));
-                });
-            }
+        if !catalog.scanning
+            && catalog.source_online == Some(true)
+            && let Some((_, loaded, total)) = list
+            && loaded < total
+            && let Some((v, key, id)) = target
+            && let Some(ticket) = self.list_request.begin((v, key, id))
+        {
+            ui.set_collector_list_loading(true);
+            let adapter = self.adapter.clone();
+            let generation = self.generation.clone();
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                let result = (|| {
+                    runtime()?.block_on(adapter.load_list(key, id, &|| {
+                        generation.current() != v || ticket.is_cancelled()
+                    }))
+                })();
+                let _ = tx.send(Event::ListLoaded(
+                    v,
+                    key,
+                    id,
+                    ticket.serial,
+                    result.map(Box::new),
+                ));
+            });
         }
 
         while let Ok(event) = self.rx.try_recv() {
@@ -1264,7 +1239,7 @@ impl Controller {
                     ui.set_collector_online(online);
                 }
                 Event::AlbumLoaded(v, key, id, serial, result)
-                    if self.album_request.as_ref() == Some(&(v, id.clone(), serial))
+                    if self.album_request.accepts(&(v, key, id.clone()), serial)
                         && v == current
                         && self.view.borrow().selected == Some(key) =>
                 {
@@ -1281,7 +1256,7 @@ impl Controller {
                     }
                 }
                 Event::ListLoaded(v, key, id, serial, result)
-                    if self.list_request == Some((v, id, serial))
+                    if self.list_request.accepts(&(v, key, id), serial)
                         && v == current
                         && ui.get_lists_open()
                         && {
@@ -1303,7 +1278,7 @@ impl Controller {
                                     *row = *loaded;
                                     render_list(&ui, &view, &self.download_records.borrow());
                                 } else {
-                                    self.list_request = None;
+                                    self.list_request.cancel();
                                 }
                             }
                         }
@@ -1401,13 +1376,6 @@ fn read_trust(path: &Path) -> anyhow::Result<String> {
         anyhow::bail!("Trust file exceeds 64 KiB")
     };
     Ok(String::from_utf8(bytes)?)
-}
-
-impl Drop for Controller {
-    fn drop(&mut self) {
-        self.album_cancel.store(true, Ordering::Release);
-        self.list_cancel.store(true, Ordering::Release);
-    }
 }
 
 #[cfg(test)]
@@ -1947,7 +1915,15 @@ mod tests {
         controller.view.borrow_mut().selected = Some(key);
         let v = catalog.generation().current();
         // Reopening A after A/B leaves the same target but a distinct attempt.
-        controller.album_request = Some((v, album.clone(), 3));
+        let obsolete_album = controller
+            .album_request
+            .begin((v, key, album.clone()))
+            .unwrap();
+        controller.album_request.cancel();
+        let current_album = controller
+            .album_request
+            .begin((v, key, album.clone()))
+            .unwrap();
         ui.set_collector_album_loading(true);
         ui.set_status("Current album load".into());
         controller
@@ -1956,7 +1932,7 @@ mod tests {
                 v,
                 key,
                 album.clone(),
-                1,
+                obsolete_album.serial,
                 Err(anyhow::anyhow!("obsolete album failure")),
             ))
             .unwrap();
@@ -1969,7 +1945,7 @@ mod tests {
                 v,
                 key,
                 album,
-                3,
+                current_album.serial,
                 Err(anyhow::anyhow!("current album failure")),
             ))
             .unwrap();
@@ -2004,7 +1980,9 @@ mod tests {
         }
         ui.set_lists_open(true);
         ui.set_collector_list_loading(true);
-        controller.list_request = Some((v, list_id, 9));
+        let obsolete_list = controller.list_request.begin((v, key, list_id)).unwrap();
+        controller.list_request.cancel();
+        let current_list = controller.list_request.begin((v, key, list_id)).unwrap();
         ui.set_status("Current list load".into());
         controller
             .tx
@@ -2012,7 +1990,7 @@ mod tests {
                 v,
                 key,
                 list_id,
-                7,
+                obsolete_list.serial,
                 Err(anyhow::anyhow!("obsolete list failure")),
             ))
             .unwrap();
@@ -2025,7 +2003,7 @@ mod tests {
                 v,
                 key,
                 list_id,
-                9,
+                current_list.serial,
                 Err(anyhow::anyhow!("current list failure")),
             ))
             .unwrap();
@@ -2035,7 +2013,8 @@ mod tests {
 
         // A different, already cached list does not start a replacement request.
         // The earlier request must still be invalidated, including its errors.
-        controller.list_request = Some((v, list_id, 10));
+        controller.list_request.cancel();
+        let pending = controller.list_request.begin((v, key, list_id)).unwrap();
         ui.set_collector_list_loading(true);
         ui.set_list_index(2);
         ui.invoke_list_selected(2);
@@ -2046,7 +2025,7 @@ mod tests {
                 v,
                 key,
                 list_id,
-                10,
+                pending.serial,
                 Err(anyhow::anyhow!("no longer selected")),
             ))
             .unwrap();
@@ -2056,7 +2035,7 @@ mod tests {
         assert!(!ui.get_collector_list_loading());
         assert_eq!(ui.get_status(), "Cached list ready");
         assert!(
-            controller.list_cancel.load(Ordering::Acquire),
+            pending.is_cancelled(),
             "A cached selection must cancel the previous in-flight load"
         );
         drop(controller);
