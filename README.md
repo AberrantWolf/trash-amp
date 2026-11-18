@@ -138,6 +138,7 @@ directly from Home.
 Choose **Albums** or **Artists** above the library list. Artists includes complete album-artist credits; track-only artists can be found through search. Opening an artist also associates collaborations containing their complete name, using name boundaries rather than guessing how to split credits. These are textual associations, not authoritative artist identities.
 
 Search matches all query words across the applicable metadata fields, ignoring case and accents. For example, an artist name plus part of an album title can find a track. Artists, Albums, and Tracks each show five results and a total count; **Show all** opens the full list. Search covers the loaded catalog, never additional folders or unconfigured services.
+Collector shows cached matches while looking up more tracks in the selected collection. Choose **All music collections** to search across the server.
 
 On desktop the field stays above the sidebar; on phone layouts it sits above playback controls in the library view. Cmd/Ctrl+F focuses search. Escape leaves text editing without clearing the query. Back restores the query, selection, and scroll position. Clearing search returns to the selected browser mode while keeping open details. Search is not saved across restarts.
 

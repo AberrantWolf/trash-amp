@@ -1321,6 +1321,7 @@ async fn selected_album_loads_before_the_title_refresh_commits_its_manifest() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let item = ItemId::new();
     let fixture = Fixture::new(item, "Selected album").await;
+    fixture.add_digital_purchase();
     let secrets = Arc::new(Secrets::default());
     let key = fixture.enroll(&secrets).await;
     let root = tempfile::tempdir().unwrap();
@@ -1358,12 +1359,30 @@ async fn selected_album_loads_before_the_title_refresh_commits_its_manifest() {
         .await
         .unwrap();
     assert!(*loaded.lock().unwrap());
-    assert!(!snapshot.library.albums[0].tracks.is_empty());
+    let item = item.to_string();
+    assert!(
+        snapshot
+            .library
+            .albums
+            .iter()
+            .any(|album| { album.id.item == item && !album.tracks.is_empty() })
+    );
     let search = adapter.search_tracks(key, "Song", &|| false).await.unwrap();
     assert!(
-        !search.albums.is_empty(),
+        search.albums.iter().any(|album| album.id.item == item),
         "online song search must work independently of album opening"
     );
+    let other = snapshot
+        .collections
+        .iter()
+        .find(|c| c.name == "Digital purchases")
+        .unwrap()
+        .id;
+    let search = adapter
+        .search_tracks_in_collection(key, "Song", Some(other), &|| false)
+        .await
+        .unwrap();
+    assert!(search.albums.iter().all(|album| album.id.item != item));
 }
 
 #[tokio::test(flavor = "multi_thread")]

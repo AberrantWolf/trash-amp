@@ -24,9 +24,14 @@ enum Action {
 struct SearchReply {
     query_version: u64,
     catalog_version: u64,
-    results: Results,
-    remote: Library,
-    error: Option<String>,
+    update: SearchUpdate,
+}
+enum SearchUpdate {
+    Cached {
+        results: Results,
+        awaiting_server: bool,
+    },
+    Online(anyhow::Result<Option<(Vec<Entry>, Library)>>),
 }
 pub(super) struct Browser {
     index: Arc<CatalogIndex>,
@@ -39,6 +44,8 @@ pub(super) struct Browser {
     detail_rows: Vec<Action>,
     results: Results,
     searching: bool,
+    search_scope: Option<String>,
+    search_error: Option<String>,
     search_library: Library,
     search_cancel: Arc<std::sync::atomic::AtomicBool>,
     query_version: u64,
@@ -63,6 +70,8 @@ impl Default for Browser {
             detail_rows: vec![],
             results: Results::default(),
             searching: false,
+            search_scope: None,
+            search_error: None,
             search_library: Library::default(),
             search_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             query_version: 0,
@@ -198,6 +207,10 @@ fn render_browser(ui: &PlayerWindow, s: &mut State) {
     }
     if !b.query.trim().is_empty() && ui.get_collector_active() && !ui.get_collector_online() {
         rows.push(label("Offline track results cover cached albums".into(), 6));
+        actions.push(Action::None);
+    }
+    if let Some(error) = &b.search_error {
+        rows.push(label(error.clone(), 6));
         actions.push(Action::None);
     }
     b.rows = actions;
@@ -399,7 +412,28 @@ fn schedule(s: &mut State) {
         .store(true, std::sync::atomic::Ordering::Release);
     s.browser.search_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     s.browser.query_version += 1;
-    s.browser.due = Some(Instant::now() + Duration::from_millis(100));
+    s.browser.searching = false;
+    s.browser.search_error = None;
+    s.browser.due =
+        (!s.browser.query.trim().is_empty()).then(|| Instant::now() + Duration::from_millis(100));
+}
+pub(super) fn set_search_scope(ui: &PlayerWindow, s: &mut State, scope: Option<String>) {
+    if s.browser.search_scope != scope {
+        s.browser.search_scope = scope;
+        s.browser.results = Results::default();
+        s.browser.search_library = Library::default();
+        s.browser.pending_open = None;
+        s.browser.pending_track = None;
+        s.browser.section = None;
+        s.browser.detail = None;
+        s.browser.detail_rows.clear();
+        s.browser.selected_result = None;
+        s.browser.history.clear();
+        ui.set_artist_view(false);
+        ui.set_show_library(true);
+        ui.set_browser_y(0.);
+        ui.set_detail_y(0.);
+    }
 }
 pub(super) fn rebuild(ui: &PlayerWindow, s: &mut State, reset: bool) {
     s.browser.index = Arc::new(CatalogIndex::new(&s.library));
@@ -408,6 +442,8 @@ pub(super) fn rebuild(ui: &PlayerWindow, s: &mut State, reset: bool) {
         s.browser.pending_open = None;
         s.browser.pending_track = None;
         s.browser.query.clear();
+        s.browser.results = Results::default();
+        s.browser.search_library = Library::default();
         s.browser.section = None;
         s.browser.detail = None;
         s.browser.history.clear();
@@ -419,9 +455,7 @@ pub(super) fn rebuild(ui: &PlayerWindow, s: &mut State, reset: bool) {
         ui.set_detail_y(0.0);
         ui.set_track_y(0.0);
     }
-    if !s.browser.query.trim().is_empty() {
-        schedule(s);
-    }
+    schedule(s);
     if let Some(Target::Artist(name)) = s.browser.detail.clone() {
         render_artist(ui, s, &name);
     }
@@ -449,52 +483,82 @@ pub(super) fn poll(ui: &PlayerWindow, s: &mut State) {
         let catalog_version = s.browser.catalog_version;
         let tx = s.browser.tx.clone();
         let catalog = s.catalog.clone();
+        let scope = s.browser.search_scope.clone();
+        let generation = catalog.generation();
+        let source_generation = generation.current();
         let cancelled = s.browser.search_cancel.clone();
         std::thread::spawn(move || {
-            let mut results = index.search(&query);
-            let mut remote = Library::default();
-            let mut error = None;
-            match if query.trim().is_empty() {
-                Ok(None)
-            } else {
-                catalog.search_source(&query, &|| {
-                    cancelled.load(std::sync::atomic::Ordering::Acquire)
+            let results = index.search(&query);
+            let cancelled = || cancelled.load(std::sync::atomic::Ordering::Acquire);
+            let obsolete = || cancelled() || generation.current() != source_generation;
+            let cached_tracks =
+                (catalog.snapshot().source_online == Some(true)).then(|| results.tracks.clone());
+            let send = |update| {
+                tx.send(SearchReply {
+                    query_version,
+                    catalog_version,
+                    update,
                 })
-            } {
-                Ok(Some(library)) => {
-                    // Collector's phrase search is narrower than our token search.
-                    // Supplement local matches instead of discarding them.
-                    results.tracks = merge_track_results(
-                        results.tracks,
-                        CatalogIndex::new(&library).search(&query).tracks,
-                    );
-                    remote = library;
-                }
-                Err(failure) => {
-                    error = Some(format!(
-                        "Online track search failed: {failure}; showing cached results"
-                    ))
-                }
-                Ok(None) => {}
+            };
+            if cancelled()
+                || send(SearchUpdate::Cached {
+                    results,
+                    awaiting_server: cached_tracks.is_some(),
+                })
+                .is_err()
+            {
+                return;
             }
-            let _ = tx.send(SearchReply {
-                query_version,
-                catalog_version,
-                results,
-                remote,
-                error,
-            });
+            if let Some(cached_tracks) = cached_tracks {
+                let reply = catalog
+                    .search_source(&query, scope.as_deref(), &obsolete)
+                    .map(|online| {
+                        online.map(|library| {
+                            let tracks = merge_track_results(
+                                cached_tracks,
+                                CatalogIndex::new(&library).search(&query).tracks,
+                            );
+                            (tracks, library)
+                        })
+                    });
+                if !cancelled() {
+                    let _ = send(SearchUpdate::Online(if obsolete() {
+                        Ok(None)
+                    } else {
+                        reply
+                    }));
+                }
+            }
         });
     }
     while let Ok(reply) = s.browser.rx.try_recv() {
         if reply.query_version == s.browser.query_version
             && reply.catalog_version == s.browser.catalog_version
         {
-            s.browser.searching = false;
-            s.browser.results = reply.results;
-            s.browser.search_library = reply.remote;
-            if let Some(error) = reply.error {
-                ui.set_status(error.into());
+            match reply.update {
+                SearchUpdate::Cached {
+                    results,
+                    awaiting_server,
+                } => {
+                    s.browser.searching = awaiting_server;
+                    s.browser.results = results;
+                    s.browser.search_library = Library::default();
+                }
+                SearchUpdate::Online(result) => {
+                    s.browser.searching = false;
+                    match result {
+                        Ok(Some((tracks, library))) => {
+                            s.browser.results.tracks = tracks;
+                            s.browser.search_library = library;
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            s.browser.search_error =
+                                Some("Server search unavailable. Showing cached results.".into());
+                            ui.set_status(format!("Online track search failed: {error}").into());
+                        }
+                    }
+                }
             }
             render_browser(ui, s);
         }
@@ -650,6 +714,7 @@ pub(super) fn wire(ui: &PlayerWindow, state: &Rc<RefCell<State>>) {
             s.browser.query = ui.get_search_text().to_string();
             s.browser.section = None;
             s.browser.results = Results::default();
+            s.browser.search_library = Library::default();
             s.browser.selected_result = None;
             // A cleared/edited query must not be resurrected by an older navigation entry.
             let query = s.browser.query.clone();
@@ -788,12 +853,14 @@ mod tests {
         use amp_core::MediaAccess;
         use std::sync::{
             Mutex,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         };
         struct SearchSource {
             local: Library,
             remote: Arc<Mutex<Library>>,
             calls: Arc<AtomicUsize>,
+            online_ready: Arc<AtomicBool>,
+            observed_scope: Arc<Mutex<Option<String>>>,
         }
         impl SourceProvider for SearchSource {
             fn descriptors(&self) -> anyhow::Result<Vec<SourceDescriptor>> {
@@ -820,9 +887,17 @@ mod tests {
                 &self,
                 _: &str,
                 _: &str,
-                _: &dyn Fn() -> bool,
+                scope: Option<&str>,
+                cancelled: &dyn Fn() -> bool,
             ) -> anyhow::Result<Option<Library>> {
+                *self.observed_scope.lock().unwrap() = scope.map(str::to_owned);
                 self.calls.fetch_add(1, Ordering::Relaxed);
+                while !self.online_ready.load(Ordering::Acquire) {
+                    if cancelled() {
+                        return Ok(None);
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
                 Ok(Some(self.remote.lock().unwrap().clone()))
             }
         }
@@ -831,15 +906,24 @@ mod tests {
         local.albums.truncate(1);
         local.albums[0].tracks.truncate(2);
         state.borrow_mut().library = local.clone();
+        set_search_scope(
+            &ui,
+            &mut state.borrow_mut(),
+            Some("selected-collection".into()),
+        );
         rebuild(&ui, &mut state.borrow_mut(), true);
         let remote = Arc::new(Mutex::new(Library::default()));
         let calls = Arc::new(AtomicUsize::new(0));
+        let online_ready = Arc::new(AtomicBool::new(false));
+        let observed_scope = Arc::new(Mutex::new(None));
         let catalog = service.catalog();
         catalog.register_sources(
             vec![Arc::new(SearchSource {
                 local: local.clone(),
                 remote: remote.clone(),
                 calls: calls.clone(),
+                online_ready: online_ready.clone(),
+                observed_scope: observed_scope.clone(),
             })],
             false,
         );
@@ -850,22 +934,40 @@ mod tests {
             assert!(Instant::now() < deadline);
             std::thread::sleep(Duration::from_millis(5));
         }
-        let search = |query: &str| {
-            ui.set_search_text(query.into());
-            ui.invoke_search_changed();
+        let wait_for_results = |ready: &dyn Fn(&Browser) -> bool| {
             let deadline = Instant::now() + Duration::from_secs(3);
             loop {
                 poll(&ui, &mut state.borrow_mut());
-                if state.borrow().browser.due.is_none() && !state.borrow().browser.searching {
+                if ready(&state.borrow().browser) {
                     break;
                 }
                 assert!(Instant::now() < deadline);
                 std::thread::sleep(Duration::from_millis(5));
             }
         };
+        let settled = |browser: &Browser| browser.due.is_none() && !browser.searching;
+        let search = |query: &str| {
+            ui.set_search_text(query.into());
+            ui.invoke_search_changed();
+            wait_for_results(&settled);
+        };
         // Words match different fields locally; the server's phrase search can
         // successfully return no hits for exactly this query.
-        search("Movement fixture");
+        ui.set_search_text("Movement fixture".into());
+        ui.invoke_search_changed();
+        wait_for_results(&|browser| {
+            browser.results.tracks.len() == 2 && calls.load(Ordering::Relaxed) > 0
+        });
+        assert!(
+            state.borrow().browser.searching,
+            "Cached matches appear while the server is blocked"
+        );
+        assert_eq!(
+            observed_scope.lock().unwrap().as_deref(),
+            Some("selected-collection")
+        );
+        online_ready.store(true, Ordering::Release);
+        wait_for_results(&settled);
         assert_eq!(state.borrow().browser.results.tracks.len(), 2);
         let mut online = local;
         online.albums[0].tracks.remove(0);
@@ -1068,21 +1170,23 @@ mod tests {
         s.browser
             .tx
             .send(SearchReply {
-                remote: Library::default(),
-                error: None,
                 query_version: 1,
                 catalog_version: s.browser.catalog_version,
-                results: stale.clone(),
+                update: SearchUpdate::Cached {
+                    results: stale.clone(),
+                    awaiting_server: false,
+                },
             })
             .unwrap();
         s.browser
             .tx
             .send(SearchReply {
-                remote: Library::default(),
-                error: None,
                 query_version: 2,
                 catalog_version: s.browser.catalog_version - 1,
-                results: stale,
+                update: SearchUpdate::Cached {
+                    results: stale,
+                    awaiting_server: false,
+                },
             })
             .unwrap();
         poll(&ui, &mut s);

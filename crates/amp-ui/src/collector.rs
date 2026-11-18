@@ -188,6 +188,7 @@ fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, adapter: 
             ui.set_track_y(track_y);
         }
     }
+    browse::set_search_scope(ui, &mut s, view.collection.map(|id| id.to_string()));
     browse::rebuild(ui, &mut s, !same);
     if s.selected.is_none() {
         ui.set_album_art(slint::Image::default());

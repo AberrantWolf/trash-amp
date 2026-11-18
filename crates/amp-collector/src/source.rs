@@ -101,14 +101,16 @@ impl SourceProvider for Adapter {
         &self,
         id: &str,
         query: &str,
+        scope: Option<&str>,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Option<Library>> {
         let key = key(self, id)?;
+        let collection = scope.map(str::parse).transpose()?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
         runtime
-            .block_on(self.search_tracks(key, query, cancelled))
+            .block_on(self.search_tracks_in_collection(key, query, collection, cancelled))
             .map(Some)
     }
     fn has_artwork(&self) -> bool {
@@ -182,6 +184,17 @@ impl Adapter {
         query: &str,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Library> {
+        self.search_tracks_in_collection(key, query, None, cancelled)
+            .await
+    }
+
+    pub async fn search_tracks_in_collection(
+        &self,
+        key: ConnectionKey,
+        query: &str,
+        scope: Option<ids::CollectionId>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Library> {
         let client = self.client(key)?;
         let snapshot = self.display_snapshot(key)?.context("Library unavailable")?;
         let mut result = Library {
@@ -190,7 +203,11 @@ impl Adapter {
             ..Default::default()
         };
         let mut count = 0;
-        for collection in snapshot.collections.iter().filter(|c| c.can_browse) {
+        for collection in snapshot
+            .collections
+            .iter()
+            .filter(|c| c.can_browse && scope.is_none_or(|id| id == c.id))
+        {
             let mut cursor = None;
             let mut seen = BTreeSet::new();
             loop {

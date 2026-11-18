@@ -170,6 +170,7 @@ impl Catalog {
     pub fn search_source(
         &self,
         query: &str,
+        scope: Option<&str>,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Option<Library>> {
         let before = self.snapshot();
@@ -181,8 +182,9 @@ impl Catalog {
         }
         let (tx, rx) = mpsc::channel();
         self.send(Command::SearchProvider(tx));
+        let obsolete = || cancelled() || self.generation.current() != before.generation;
         let provider = loop {
-            if cancelled() || self.generation.current() != before.generation {
+            if obsolete() {
                 return Ok(None);
             }
             match rx.recv_timeout(std::time::Duration::from_millis(20)) {
@@ -194,7 +196,8 @@ impl Catalog {
         if let Some((id, provider)) = provider
             && id == expected
         {
-            provider.search(&id, query, cancelled)
+            let result = provider.search(&id, query, scope, &obsolete);
+            if obsolete() { Ok(None) } else { result }
         } else {
             Ok(None)
         }

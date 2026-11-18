@@ -489,6 +489,7 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
                 .map_or(-1, |i| i as i32);
             ui.set_selected_track(track);
         }
+        browse::set_search_scope(ui, state, None);
         browse::rebuild(ui, state, replacement);
     }
     state.catalog_revision = snapshot.library_revision;

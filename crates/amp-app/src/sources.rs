@@ -86,11 +86,13 @@ pub trait SourceProvider: Send + Sync {
     ) -> Result<ExternalCatalog> {
         self.load_with_progress(id, interactive, cancelled, progress)
     }
-    /// Optional online search. Results are transient and must not replace the catalog.
+    /// Optional online search. A scope identifies a provider collection when one is selected.
+    /// Results are transient and must not replace the catalog.
     fn search(
         &self,
         _id: &str,
         _query: &str,
+        _scope: Option<&str>,
         _cancelled: &dyn Fn() -> bool,
     ) -> Result<Option<amp_core::Library>> {
         Ok(None)
