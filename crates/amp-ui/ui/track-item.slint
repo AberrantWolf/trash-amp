@@ -1,18 +1,25 @@
 import { Theme } from "theme.slint";
 import { IconButton } from "icon-button.slint";
 export struct TrackRow { title: string, status: string, scan-status: string, duration: string, number: string }
+export global TrackMetrics {
+    public pure function height(track: TrackRow, scale: float) -> length {
+        return (track.status != "" && track.scan-status != "" ? 60px : 48px) * scale;
+    }
+}
 export component TrackItem inherits Rectangle {
     in property <TrackRow> track;
     in property <float> text-scale: 1;
     in property <bool> selected;
     in property <bool> current;
     in property <bool> tap-to-play;
+    in property <bool> keyboard-selected;
     callback select(); callback play(); callback enqueue();
-    height: (root.track.status != "" && root.track.scan-status != "" ? 60px : 48px) * root.text-scale;
+    height: TrackMetrics.height(root.track, root.text-scale);
     accessible-role: list-item;
     accessible-label: root.track.title + (root.track.status != "" ? ", " + root.track.status : "") + (root.track.scan-status != "" ? ", " + root.track.scan-status : "") + (root.current ? ", current track" : "");
     accessible-action-default => { root.play(); }
     background: root.selected ? Theme.selection : (row.has-hover || play-touch.has-hover ? Theme.hover : transparent);
+    if root.keyboard-selected: Rectangle { width: 2px; height: 100%; background: Theme.accent; }
     row := TouchArea {
         x: 42px; width: parent.width - 90px;
         clicked => { root.select(); if root.tap-to-play { root.play(); } }

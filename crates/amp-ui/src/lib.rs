@@ -679,6 +679,40 @@ fn select(ui: &PlayerWindow, state: &mut State, index: usize) {
     )));
     ui.set_status(album.source_label.clone().into());
 }
+fn wire_album_track_keyboard(ui: &PlayerWindow) {
+    let weak = ui.as_weak();
+    ui.on_move_album_track_selection(move |direction, viewport| {
+        let Some(ui) = weak.upgrade() else { return };
+        use slint::Model;
+        let tracks = ui.get_tracks();
+        if tracks.row_count() == 0 {
+            return;
+        }
+        let previous = ui.get_selected_track();
+        let last = tracks.row_count().saturating_sub(1) as i32;
+        let selected = if previous < 0 {
+            0
+        } else {
+            (previous + direction).clamp(0, last)
+        };
+        if selected != previous {
+            ui.set_selected_track(selected);
+            ui.invoke_album_track_selected();
+        }
+        let top = tracks
+            .iter()
+            .take(selected as usize)
+            .map(|track| ui.invoke_album_track_height(track))
+            .sum::<f32>();
+        let Some(track) = tracks.row_data(selected as usize) else {
+            return;
+        };
+        let height = ui.invoke_album_track_height(track);
+        let y = ui.get_track_y();
+        ui.set_track_y(y.clamp(-top, (viewport - height).max(0.) - top).min(0.));
+    });
+}
+
 fn start(ui: &PlayerWindow, state: &mut State, index: usize) {
     let Some(selected) = state.selected else {
         return;
@@ -869,6 +903,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     }
     browse::rebuild(&ui, &mut state.borrow_mut(), true);
     browse::wire(&ui, &state);
+    wire_album_track_keyboard(&ui);
     let generation = catalog.generation();
     let mut collector =
         collector::Controller::new(&ui, &state, collector, generation.clone(), open_url)?;
@@ -2591,6 +2626,75 @@ mod tests {
         assert_eq!(start.get(), 1);
         assert_eq!(ui.get_list_entry(), 1);
     }
+    #[test]
+    fn keyboard_can_select_reveal_and_play_an_album_track() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::platform::{Key, WindowEvent};
+        use std::cell::Cell;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.set_wide(false);
+        ui.set_show_library(false);
+        ui.set_short(true);
+        ui.window().set_size(slint::LogicalSize::new(500., 390.));
+        ui.set_tracks(ModelRc::new(VecModel::from(
+            (1..=20)
+                .map(|index| super::TrackRow {
+                    title: format!("Track {index}").into(),
+                    status: if index == 3 {
+                        "Unavailable".into()
+                    } else {
+                        "".into()
+                    },
+                    scan_status: if index == 3 {
+                        "Not verified".into()
+                    } else {
+                        "".into()
+                    },
+                    ..Default::default()
+                })
+                .collect::<Vec<_>>(),
+        )));
+        wire_album_track_keyboard(&ui);
+        let played = Rc::new(Cell::new(None));
+        let input = played.clone();
+        ui.on_play_track(move |index| input.set(Some(index)));
+        ui.show().unwrap();
+
+        let press = |text: SharedString| {
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text });
+        };
+        for _ in 0..14 {
+            if ui.get_selected_track() >= 0 {
+                break;
+            }
+            press(Key::Tab.into());
+        }
+        assert_eq!(ui.get_selected_track(), 0, "Tab reaches the track list");
+        for _ in 0..12 {
+            press(Key::DownArrow.into());
+        }
+        press(Key::UpArrow.into());
+        assert_eq!(ui.get_selected_track(), 11);
+        assert_eq!(played.get(), None);
+        let view = ElementHandle::find_by_accessible_label(&ui, "Album tracks")
+            .next()
+            .unwrap();
+        let row = ElementHandle::find_by_accessible_label(&ui, "Track 12")
+            .next()
+            .unwrap();
+        let row_top = row.absolute_position().y;
+        let view_top = view.absolute_position().y;
+        assert!(row_top >= view_top);
+        assert!(row_top + row.size().height <= view_top + view.size().height + 1.);
+        press(Key::Return.into());
+        assert_eq!(played.get(), Some(11));
+    }
+
     #[test]
     fn space_controls_active_playback_after_clicking_play_album() {
         use i_slint_backend_testing::ElementHandle;

@@ -6,7 +6,7 @@ import { Theme } from "theme.slint";
 import { Palette, Button, ScrollView, ListView, AboutSlint, ComboBox, LineEdit, ProgressIndicator } from "std-widgets.slint";
 import { BrowserItem, BrowserRow } from "browser-item.slint";
 export { BrowserRow }
-import { TrackItem, TrackRow } from "track-item.slint";
+import { TrackItem, TrackMetrics, TrackRow } from "track-item.slint";
 export { TrackRow }
 import { TransportSeek } from "transport-seek.slint";
 import { FileLoadingStatus } from "file-loading-status.slint";
@@ -143,6 +143,10 @@ export component PlayerWindow inherits Window {
     in-out property <bool> collector-album-loading: false;
     in-out property <bool> collector-list-loading: false;
     callback album-track-selected();
+    callback move-album-track-selection(int, length);
+    public pure function album-track-height(track: TrackRow) -> length {
+        return TrackMetrics.height(track, root.text-scale);
+    }
     in-out property <int> sort-order;
     callback sort-changed();
     in-out property <int> selected-track: -1;
@@ -713,16 +717,42 @@ export component PlayerWindow inherits Window {
                             TouchArea { clicked => { root.show-queue = i == 1; tab.focus(); } }
                         }
                     }
-                    if !root.show-queue && !root.artist-view: ListView {
-                        accessible-label: "Album tracks";
-                        content-y <=> root.track-y;
+                    if !root.show-queue && !root.artist-view: track-focus := FocusScope {
                         min-height: root.short ? 48px * root.text-scale : 0px; preferred-height: 0px; vertical-stretch: 1;
-                        for track[i] in root.tracks: TrackItem {
-                            track: track; text-scale: root.text-scale; tap-to-play: root.tap-to-play;
-                            selected: i == root.selected-track; current: i == root.active-track;
-                            select => { root.selected-track = i; root.album-track-selected(); keyboard.focus(); }
-                            play => { root.play-track(i); keyboard.focus(); }
-                            enqueue => { root.enqueue(i); }
+                        enabled: root.tracks.length > 0;
+                        focus-on-click: false;
+                        focus-gained(_) => {
+                            root.move-album-track-selection(0, track-list.visible-height);
+                            if root.short {
+                                details.content-y = max(-self.y, min(details.content-y,
+                                    details.visible-height - self.y - self.height));
+                            }
+                        }
+                        key-pressed(event) => {
+                            if event.modifiers.control || event.modifiers.meta || event.modifiers.alt { return reject; }
+                            if event.text == Key.UpArrow || event.text == Key.DownArrow {
+                                if !self.has-focus { self.focus(); }
+                                root.move-album-track-selection(event.text == Key.UpArrow ? -1 : 1, track-list.visible-height);
+                                return accept;
+                            }
+                            if event.text == Key.Return && root.selected-track >= 0 {
+                                if !event.repeat { root.play-track(root.selected-track); }
+                                return accept;
+                            }
+                            return reject;
+                        }
+                        track-list := ListView {
+                            width: 100%; height: 100%;
+                            accessible-label: "Album tracks";
+                            content-y <=> root.track-y;
+                            for track[i] in root.tracks: TrackItem {
+                                track: track; text-scale: root.text-scale; tap-to-play: root.tap-to-play;
+                                selected: i == root.selected-track; current: i == root.active-track;
+                                keyboard-selected: track-focus.has-focus && self.selected;
+                                select => { root.selected-track = i; root.album-track-selected(); track-focus.focus(); }
+                                play => { root.selected-track = i; root.play-track(i); track-focus.focus(); }
+                                enqueue => { root.enqueue(i); }
+                            }
                         }
                     }
                     if root.show-queue && !root.artist-view: VerticalLayout {
