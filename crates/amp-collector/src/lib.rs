@@ -134,6 +134,14 @@ pub struct Download {
     pub error: Option<String>,
     pub digest: String,
 }
+impl Download {
+    fn reserved_bytes(&self) -> u64 {
+        match self.status {
+            DownloadStatus::Pending | DownloadStatus::Complete => self.bytes,
+            DownloadStatus::Failed | DownloadStatus::Cancelled => 0,
+        }
+    }
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ListCommand {
     pub key: ConnectionKey,
@@ -1271,7 +1279,8 @@ impl Adapter {
             }
         }
         let total = existing.values().try_fold(0u64, |n, d| {
-            n.checked_add(d.bytes).context("Download size overflow")
+            n.checked_add(d.reserved_bytes())
+                .context("Download size overflow")
         })?;
         let budget: Option<String> = transaction
             .query_row(
@@ -1293,7 +1302,7 @@ impl Adapter {
         if fs2::available_space(&self.root)?
             < existing
                 .values()
-                .filter(|d| d.status != DownloadStatus::Complete)
+                .filter(|d| d.status == DownloadStatus::Pending)
                 .map(|d| d.bytes)
                 .sum::<u64>()
                 .saturating_add(256 * 1024 * 1024)
@@ -1352,7 +1361,7 @@ impl Adapter {
             for value in stmt.query_map([&id], |r| r.get::<_, String>(0))? {
                 let d: Download = serde_json::from_str(&value?)?;
                 total = total
-                    .checked_add(d.bytes)
+                    .checked_add(d.reserved_bytes())
                     .context("Download size overflow")?;
             }
             let budget: Option<String> = db
@@ -1953,6 +1962,45 @@ mod tests {
         a.remove_download(&t).unwrap();
         assert!(a.downloads().unwrap().is_empty());
     }
+    #[test]
+    fn cancelled_and_failed_downloads_release_capacity_and_retry_reserves_it_again() {
+        let root = tempfile::tempdir().unwrap();
+        let a = Adapter::with_credentials(root.path(), Arc::new(MemorySecrets::default())).unwrap();
+        a.set_budget(8).unwrap();
+        let cancelled = track(key(), b"12345678");
+        let failed = track(key(), b"abcdefgh");
+        let replacement = track(key(), b"87654321");
+        a.schedule(std::slice::from_ref(&cancelled)).unwrap();
+        a.cancel_downloads().unwrap();
+        a.reset_download_cancel();
+
+        // There are no enrolled credentials, so this admitted transfer fails.
+        assert!(a.download(failed.clone()).is_err());
+        a.schedule(std::slice::from_ref(&replacement)).unwrap();
+        assert!(a.schedule(std::slice::from_ref(&cancelled)).is_err());
+        let records = a.downloads().unwrap();
+        for (track, expected) in [
+            (&cancelled, DownloadStatus::Cancelled),
+            (&failed, DownloadStatus::Failed),
+            (&replacement, DownloadStatus::Pending),
+        ] {
+            assert_eq!(
+                records
+                    .iter()
+                    .find(|d| d.track.id == track.id)
+                    .unwrap()
+                    .status,
+                expected
+            );
+        }
+        a.remove_download(&replacement).unwrap();
+        a.schedule(std::slice::from_ref(&cancelled)).unwrap();
+        assert_eq!(
+            amp_app::downloads::Backend::pending(a.as_ref()).unwrap()[0].id,
+            cancelled.id
+        );
+    }
+
     #[test]
     fn cancellation_is_durable_for_the_whole_batch_and_late_completion_cannot_revive_it() {
         let root = tempfile::tempdir().unwrap();
