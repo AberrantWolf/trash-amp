@@ -1,5 +1,6 @@
 //! Application playback service. Commands, queue policy and engine monitoring do
 //! not depend on a window, event loop, provider UI or native media framework.
+pub mod browse;
 pub mod catalog;
 pub mod downloads;
 pub mod files;

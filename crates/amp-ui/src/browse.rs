@@ -35,6 +35,9 @@ enum SearchUpdate {
 }
 pub(super) struct Browser {
     index: Arc<CatalogIndex>,
+    index_builder: amp_app::browse::IndexBuilder,
+    index_version: u64,
+    first_valid_index_version: u64,
     query: String,
     section: Option<usize>,
     detail: Option<Target>,
@@ -61,6 +64,9 @@ impl Default for Browser {
         let (tx, rx) = mpsc::channel();
         Self {
             index: Arc::default(),
+            index_builder: Default::default(),
+            index_version: 0,
+            first_valid_index_version: 0,
             query: String::new(),
             section: None,
             detail: None,
@@ -157,14 +163,23 @@ fn render_browser(ui: &PlayerWindow, s: &mut State) {
     let mut rows = vec![];
     let mut actions = vec![];
     if b.query.trim().is_empty() {
-        let entries = if s.preferences.browse_artists {
-            b.index.album_artists()
+        if s.preferences.browse_artists {
+            append_entries(
+                &mut rows,
+                &mut actions,
+                &b.index.album_artists(),
+                usize::MAX,
+            );
         } else {
-            b.index.albums.clone()
-        };
-        append_entries(&mut rows, &mut actions, &entries, usize::MAX);
+            append_entries(&mut rows, &mut actions, &b.index.albums, usize::MAX);
+        }
         if rows.is_empty() {
-            rows.push(label("Open a library to begin".into(), 6));
+            let text = if b.catalog_version == b.index_version {
+                "Open a library to begin"
+            } else {
+                "Updating library…"
+            };
+            rows.push(label(text.into(), 6));
             actions.push(Action::None);
         }
     } else {
@@ -420,6 +435,9 @@ fn schedule(s: &mut State) {
 pub(super) fn set_search_scope(ui: &PlayerWindow, s: &mut State, scope: Option<String>) {
     if s.browser.search_scope != scope {
         s.browser.search_scope = scope;
+        s.browser.index = Arc::default();
+        s.browser.first_valid_index_version = s.browser.catalog_version + 1;
+        schedule(s);
         s.browser.results = Results::default();
         s.browser.search_library = Library::default();
         s.browser.pending_open = None;
@@ -435,10 +453,11 @@ pub(super) fn set_search_scope(ui: &PlayerWindow, s: &mut State, scope: Option<S
         ui.set_detail_y(0.);
     }
 }
-pub(super) fn rebuild(ui: &PlayerWindow, s: &mut State, reset: bool) {
-    s.browser.index = Arc::new(CatalogIndex::new(&s.library));
+fn prepare_rebuild(ui: &PlayerWindow, s: &mut State, reset: bool) {
     s.browser.catalog_version += 1;
     if reset {
+        s.browser.index = Arc::default();
+        s.browser.first_valid_index_version = s.browser.catalog_version;
         s.browser.pending_open = None;
         s.browser.pending_track = None;
         s.browser.query.clear();
@@ -454,15 +473,53 @@ pub(super) fn rebuild(ui: &PlayerWindow, s: &mut State, reset: bool) {
         ui.set_browser_y(0.0);
         ui.set_detail_y(0.0);
         ui.set_track_y(0.0);
+        schedule(s);
     }
+    restore_pending_track(ui, s);
+}
+
+pub(super) fn request_rebuild(ui: &PlayerWindow, s: &mut State, reset: bool) {
+    prepare_rebuild(ui, s, reset);
+    s.browser
+        .index_builder
+        .request(s.browser.catalog_version, s.library.clone());
+    if s.browser.index.albums.is_empty() {
+        render_browser(ui, s);
+    }
+}
+
+fn apply_index(ui: &PlayerWindow, s: &mut State, revision: u64, index: CatalogIndex) {
+    s.browser.index = Arc::new(index);
+    s.browser.index_version = revision;
+    let due = s.browser.due;
     schedule(s);
+    if due.is_some() {
+        s.browser.due = due;
+    }
     if let Some(Target::Artist(name)) = s.browser.detail.clone() {
         render_artist(ui, s, &name);
     }
-    restore_pending_track(ui, s);
     render_browser(ui, s);
 }
+
+#[cfg(test)]
+pub(super) fn rebuild(ui: &PlayerWindow, s: &mut State, reset: bool) {
+    prepare_rebuild(ui, s, reset);
+    apply_index(
+        ui,
+        s,
+        s.browser.catalog_version,
+        CatalogIndex::new(&s.library),
+    );
+}
+
 pub(super) fn poll(ui: &PlayerWindow, s: &mut State) {
+    if let Some((revision, index)) = s.browser.index_builder.poll()
+        && revision >= s.browser.first_valid_index_version
+        && revision > s.browser.index_version
+    {
+        apply_index(ui, s, revision, index);
+    }
     if ui.get_home() || ui.get_settings() || ui.get_lists_open() {
         s.browser.pending_open = None;
     }
@@ -474,13 +531,15 @@ pub(super) fn poll(ui: &PlayerWindow, s: &mut State) {
         let (_, target) = s.browser.pending_open.take().unwrap();
         open(ui, s, target);
     }
-    if s.browser.due.is_some_and(|due| Instant::now() >= due) {
+    if s.browser.index_version >= s.browser.first_valid_index_version
+        && s.browser.due.is_some_and(|due| Instant::now() >= due)
+    {
         s.browser.due = None;
         s.browser.searching = true;
         let index = s.browser.index.clone();
         let query = s.browser.query.clone();
         let query_version = s.browser.query_version;
-        let catalog_version = s.browser.catalog_version;
+        let catalog_version = s.browser.index_version;
         let tx = s.browser.tx.clone();
         let catalog = s.catalog.clone();
         let scope = s.browser.search_scope.clone();
@@ -533,7 +592,7 @@ pub(super) fn poll(ui: &PlayerWindow, s: &mut State) {
     }
     while let Ok(reply) = s.browser.rx.try_recv() {
         if reply.query_version == s.browser.query_version
-            && reply.catalog_version == s.browser.catalog_version
+            && reply.catalog_version == s.browser.index_version
         {
             match reply.update {
                 SearchUpdate::Cached {
@@ -828,7 +887,7 @@ mod tests {
             playback: service.playback(),
             artwork: Default::default(),
             browser: Browser::default(),
-            library: amp_library::demo_library(),
+            library: Arc::new(amp_library::demo_library()),
             selected: None,
             selected_sources: Default::default(),
             catalog: service.catalog(),
@@ -847,6 +906,38 @@ mod tests {
         s.browser.results = s.browser.index.search(query);
         render_browser(ui, s);
     }
+    #[test]
+    fn background_index_from_a_replaced_source_cannot_reappear() {
+        use slint::Model;
+        let (ui, state, path, _service) = setup("index-source-fence");
+        let mut s = state.borrow_mut();
+        let make_library = |title: &str| {
+            let mut library = amp_library::demo_library();
+            library.albums.truncate(1);
+            library.albums[0].title = title.into();
+            Arc::new(library)
+        };
+        s.library = make_library("Previous source");
+        request_rebuild(&ui, &mut s, true);
+        s.library = make_library("Current source");
+        request_rebuild(&ui, &mut s, true);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            poll(&ui, &mut s);
+            let rows = ui.get_browser_rows();
+            assert!(rows.iter().all(|row| row.title != "Previous source"));
+            if rows.iter().any(|row| row.title == "Current source") {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        drop(s);
+        drop(state);
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn online_search_preserves_local_token_matches_and_merges_fresh_tracks_once() {
         use amp_app::sources::{SourceDescriptor, SourceProvider};
@@ -902,16 +993,16 @@ mod tests {
             }
         }
         let (ui, state, path, service) = setup("online-merge");
-        let mut local = state.borrow().library.clone();
+        let mut local = (*state.borrow().library).clone();
         local.albums.truncate(1);
         local.albums[0].tracks.truncate(2);
-        state.borrow_mut().library = local.clone();
+        state.borrow_mut().library = Arc::new(local.clone());
         set_search_scope(
             &ui,
             &mut state.borrow_mut(),
             Some("selected-collection".into()),
         );
-        rebuild(&ui, &mut state.borrow_mut(), true);
+        request_rebuild(&ui, &mut state.borrow_mut(), true);
         let remote = Arc::new(Mutex::new(Library::default()));
         let calls = Arc::new(AtomicUsize::new(0));
         let online_ready = Arc::new(AtomicBool::new(false));
@@ -1076,7 +1167,9 @@ mod tests {
                 }
             })
             .unwrap();
-        state.borrow_mut().library.albums.reverse();
+        Arc::make_mut(&mut state.borrow_mut().library)
+            .albums
+            .reverse();
         ui.invoke_browse_action(false, i as i32, 0);
         assert!(!ui.get_show_library());
         assert_eq!(ui.get_selected_track(), 0);
@@ -1324,7 +1417,7 @@ mod tests {
                 Action::Open(targets[2].clone()),
                 Action::Open(targets[0].clone()),
             ];
-            s.library.albums.reverse();
+            Arc::make_mut(&mut s.library).albums.reverse();
             let tracks = context_tracks(&s, false, 2);
             assert_eq!(
                 tracks.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
@@ -1364,7 +1457,11 @@ mod tests {
             (Availability::Unsupported, "Unsupported"),
         ];
         let mut s = state.borrow_mut();
-        for (track, (availability, _)) in s.library.albums[0].tracks.iter_mut().zip(&cases) {
+        for (track, (availability, _)) in Arc::make_mut(&mut s.library).albums[0]
+            .tracks
+            .iter_mut()
+            .zip(&cases)
+        {
             track.availability = availability.clone();
             track.id.provider = "collector".into();
         }
@@ -1384,8 +1481,9 @@ mod tests {
         use slint::Model;
         let (ui, state, path, _service) = setup("scan-status");
         let mut s = state.borrow_mut();
-        s.library.albums.truncate(1);
-        let track = &mut s.library.albums[0].tracks[0];
+        let library = Arc::make_mut(&mut s.library);
+        library.albums.truncate(1);
+        let track = &mut library.albums[0].tracks[0];
         track.availability = Availability::Available;
         track.scan_status = Some(ScanStatus::Unverified {
             path: "/Volumes/Music/Album".into(),
@@ -1418,7 +1516,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(s.playback.snapshot().up_next[0].id, track.id);
-        s.library.albums[0].tracks[0].availability = Availability::Unavailable;
+        Arc::make_mut(&mut s.library).albums[0].tracks[0].availability = Availability::Unavailable;
         select(&ui, &mut s, 0);
         let displayed = ui.get_tracks().row_data(0).unwrap();
         assert_eq!(displayed.status, "Unavailable");
@@ -1440,7 +1538,7 @@ mod tests {
                     for track in &mut album.tracks {
                         track.id.item = format!("{batch}/{}", track.id.item);
                     }
-                    s.library.albums.push(album);
+                    Arc::make_mut(&mut s.library).albums.push(album);
                 }
             }
             rebuild(&ui, &mut s, true);

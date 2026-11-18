@@ -129,7 +129,7 @@ No playlists, equalizer, metadata writing, ripping, transcoding/export, music up
 
 `amp-core::browse` owns a provider-independent in-memory catalog index, normalized query matching, complete artist-credit identities, and artist-page associations. Accent-insensitive lookup does not collapse separately spelled artist identities. Artist browsing includes album credits only; search includes track credits too. Source paths and media access never participate in matching.
 
-The desktop browsing adapter keeps navigation history, query/section state, row-to-ID actions, and the initiating track playback context separate from album storage order. Search workers run after a 100 ms debounce, and query/catalog generations reject outdated replies. Metadata events are batched before rebuilding the index and refreshing the active view. Library replacement resets navigation; failed scans do not.
+The browsing adapter keeps navigation history, query/section state, row-to-ID actions, and the initiating track playback context separate from album storage order. An application worker builds the index from shared catalog snapshots. It keeps one active build and the newest pending revision, so completed pages can appear without accumulating background jobs. Source and collection changes reject indexes from the previous browse scope. Search workers run after a 100 ms debounce, and query/index generations reject outdated replies. Library replacement resets navigation; failed scans preserve it.
 
 The persisted `browse_artists` preference accepts the former `sort_by_artist` field when reading old settings. Search state is transient. Explicit queue tails remain separate from automatic album continuation when a search or appearance track starts playback.
 

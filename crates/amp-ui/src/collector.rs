@@ -132,12 +132,13 @@ fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, adapter: 
     });
     let track_y = ui.get_track_y();
     if let Some(snapshot) = &view.snapshot {
-        s.library = snapshot.library.clone();
+        let mut library = snapshot.library.clone();
         if let Some(collection) = view.collection {
-            s.library
+            library
                 .albums
                 .retain(|a| snapshot.album_collections.get(&a.id.item) == Some(&collection));
         }
+        s.library = Arc::new(library);
         s.artwork = snapshot.artwork.clone();
         ui.set_connection_status(
             format!(
@@ -156,10 +157,10 @@ fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, adapter: 
             .into(),
         );
     } else {
-        s.library = Library::default();
+        s.library = Arc::default();
         s.artwork = BTreeMap::new();
     }
-    s.library.root = view
+    Arc::make_mut(&mut s.library).root = view
         .connections
         .iter()
         .find(|c| Some(c.key) == view.selected)
@@ -173,7 +174,6 @@ fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, adapter: 
         .collect::<std::collections::BTreeSet<_>>();
     s.selected_sources.retain(|key, _| album_keys.contains(key));
     s.selected = None;
-    sort_albums(ui, &mut s);
     albums(ui, &s);
     if let Some(index) = selected.and_then(|id| s.library.albums.iter().position(|a| a.id == id)) {
         select(ui, &mut s, index);
@@ -189,7 +189,7 @@ fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, adapter: 
         }
     }
     browse::set_search_scope(ui, &mut s, view.collection.map(|id| id.to_string()));
-    browse::rebuild(ui, &mut s, !same);
+    browse::request_rebuild(ui, &mut s, !same);
     if s.selected.is_none() {
         ui.set_album_art(slint::Image::default());
     }
@@ -495,7 +495,7 @@ impl Controller {
                 if let Some(key) = view.borrow().selected {
                     open_source(&catalog, v, key);
                 } else if state.borrow().library.id == "demo" {
-                    catalog.show_transient(state.borrow().library.clone());
+                    catalog.show_transient((*state.borrow().library).clone());
                 } else {
                     catalog.restore_local();
                 }
@@ -1402,7 +1402,7 @@ mod tests {
             folders: services.catalog().snapshot().folders,
             catalog_revision: 0,
             catalog_replacement: 0,
-            library,
+            library: Arc::new(library),
             playback: services.playback(),
             artwork: Default::default(),
             browser: browse::Browser::default(),
@@ -1595,7 +1595,9 @@ mod tests {
             }
         };
         assert!(browse::resolve_track(&state.borrow(), &target).is_some());
-        state.borrow_mut().library.albums[0].tracks.truncate(1);
+        Arc::make_mut(&mut state.borrow_mut().library).albums[0]
+            .tracks
+            .truncate(1);
         select(&ui, &mut state.borrow_mut(), 0);
         assert!(!ui.get_show_disc_selector());
         assert_eq!(ui.get_tracks().row_count(), 1);
@@ -1671,7 +1673,7 @@ mod tests {
             folders: services.catalog().snapshot().folders,
             catalog_revision: 0,
             catalog_replacement: 0,
-            library: Library::default(),
+            library: Arc::default(),
             playback: services.playback(),
             artwork: Default::default(),
             browser: browse::Browser::default(),
@@ -1754,7 +1756,7 @@ mod tests {
             folders: service.catalog().snapshot().folders,
             catalog_revision: 0,
             catalog_replacement: 0,
-            library: Library::default(),
+            library: Arc::default(),
             playback: service.playback(),
             artwork: Default::default(),
             browser: browse::Browser::default(),
@@ -2061,7 +2063,7 @@ mod tests {
             folders: initial.folders,
             catalog_revision: initial.library_revision,
             catalog_replacement: initial.replacement_revision,
-            library,
+            library: Arc::new(library),
             artwork: Default::default(),
             browser: Default::default(),
             selected: None,

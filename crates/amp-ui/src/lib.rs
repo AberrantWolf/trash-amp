@@ -72,7 +72,7 @@ struct State {
     playback: Playback,
     artwork: std::collections::BTreeMap<String, String>,
     browser: browse::Browser,
-    library: Library,
+    library: Arc<Library>,
     selected: Option<usize>,
     selected_sources: std::collections::BTreeMap<String, String>,
     catalog: Catalog,
@@ -91,15 +91,18 @@ fn sort_albums(ui: &PlayerWindow, state: &mut State) {
         .selected
         .and_then(|i| state.library.albums.get(i))
         .map(|a| a.id.clone());
-    state.library.albums.sort_by_cached_key(|a| {
-        let title = a.title.to_lowercase();
-        let artist = a.artist.to_lowercase();
-        (title, artist, a.id.item.clone())
-    });
+    Arc::make_mut(&mut state.library)
+        .albums
+        .sort_by_cached_key(|a| {
+            let title = a.title.to_lowercase();
+            let artist = a.artist.to_lowercase();
+            (title, artist, a.id.item.clone())
+        });
     state.selected = selected.and_then(|id| state.library.albums.iter().position(|a| a.id == id));
     ui.set_selected_album(state.selected.map(|i| i as i32).unwrap_or(-1));
 }
 fn albums(ui: &PlayerWindow, state: &State) {
+    ui.set_library_browsable(!state.library.albums.is_empty());
     state.playback.set_default_album(None);
     ui.set_selected_album(-1);
     ui.set_tracks(ModelRc::default());
@@ -461,7 +464,7 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
         });
         let had_selection = selected_id.is_some();
         let artwork_changed = state.artwork != *snapshot.artwork;
-        state.library = (*snapshot.library).clone();
+        state.library = snapshot.library.clone();
         let album_keys = state
             .library
             .albums
@@ -477,7 +480,8 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
         } else {
             selected_id.and_then(|id| state.library.albums.iter().position(|a| a.id == id))
         };
-        sort_albums(ui, state);
+        ui.set_library_browsable(!state.library.albums.is_empty());
+        ui.set_selected_album(state.selected.map_or(-1, |i| i as i32));
         folder_choices(ui, state);
         if replacement || (had_selection && state.selected.is_none()) {
             albums(ui, state);
@@ -499,7 +503,7 @@ fn render_catalog(ui: &PlayerWindow, state: &mut State, last_notice: &mut u64) {
             ui.set_selected_track(track);
         }
         browse::set_search_scope(ui, state, None);
-        browse::rebuild(ui, state, replacement);
+        browse::request_rebuild(ui, state, replacement);
     }
     state.catalog_revision = snapshot.library_revision;
     state.catalog_replacement = snapshot.replacement_revision;
@@ -848,7 +852,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
         catalog.show_transient(library);
     }
     let initial = catalog.bootstrap_snapshot()?;
-    let library = (*initial.library).clone();
+    let library = initial.library.clone();
     let preferences = initial.preferences.clone();
     let ui = PlayerWindow::new()?;
     ui.set_home(true);
@@ -911,7 +915,7 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     if folder_picker.is_none() && state.borrow().library.albums.is_empty() {
         ui.set_album_artist("Choose a music source on Home.".into());
     }
-    browse::rebuild(&ui, &mut state.borrow_mut(), true);
+    browse::request_rebuild(&ui, &mut state.borrow_mut(), true);
     browse::wire(&ui, &state);
     wire_album_track_keyboard(&ui);
     let generation = catalog.generation();
@@ -1620,7 +1624,7 @@ mod tests {
         let mut state = State {
             playback: playback.playback(),
             catalog: catalog.clone(),
-            library: (*snapshot.library).clone(),
+            library: snapshot.library.clone(),
             artwork: Default::default(),
             browser: browse::Browser::default(),
             selected: None,
@@ -2283,7 +2287,7 @@ mod tests {
         }
         let service = TestServices::new(&data.join("library.sqlite3"));
         let state = Rc::new(RefCell::new(State {
-            library: store.library().unwrap().unwrap(),
+            library: Arc::new(store.library().unwrap().unwrap()),
             catalog: service.catalog(),
             folders: service.catalog().snapshot().folders,
             catalog_revision: 0,
@@ -2876,7 +2880,7 @@ mod tests {
             playback: service.playback(),
             artwork: Default::default(),
             browser: browse::Browser::default(),
-            library: amp_library::demo_library(),
+            library: Arc::new(amp_library::demo_library()),
             selected: Some(0),
             selected_sources: Default::default(),
             catalog: service.catalog(),
@@ -2997,7 +3001,7 @@ mod tests {
             folders: initial.folders,
             catalog_revision: 0,
             catalog_replacement: 0,
-            library: Library::default(),
+            library: Arc::default(),
             artwork: Default::default(),
             browser: Default::default(),
             selected: None,
@@ -3142,7 +3146,7 @@ mod tests {
             folders: initial.folders,
             catalog_revision: 0,
             catalog_replacement: 0,
-            library: Library::default(),
+            library: Arc::default(),
             artwork: Default::default(),
             browser: Default::default(),
             selected: None,
@@ -3213,7 +3217,7 @@ mod tests {
             folders: initial.folders,
             catalog_revision: initial.library_revision,
             catalog_replacement: initial.replacement_revision,
-            library: Library::default(),
+            library: Arc::default(),
             artwork: Default::default(),
             browser: Default::default(),
             selected: None,
