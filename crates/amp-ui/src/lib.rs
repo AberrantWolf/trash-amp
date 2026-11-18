@@ -1723,6 +1723,48 @@ mod tests {
     }
 
     #[test]
+    fn narrow_settings_wrap_checkbox_labels_and_touch_transport_has_full_hit_targets() {
+        use i_slint_backend_testing::ElementHandle;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.set_touch_input(true);
+        ui.set_text_scale(1.6);
+        ui.set_settings(true);
+        ui.window().set_size(slint::LogicalSize::new(980., 840.));
+        ui.show().unwrap();
+        let checkbox = || {
+            ElementHandle::find_by_accessible_label(&ui, "Automatic metadata from MusicBrainz")
+                .next()
+                .unwrap()
+        };
+        let single_line = checkbox().size().height;
+        ui.set_wide(false);
+        ui.window().set_size(slint::LogicalSize::new(390., 840.));
+        let wrapped = checkbox();
+        assert!(wrapped.size().height > single_line);
+        assert!(wrapped.absolute_position().x + wrapped.size().width <= 390.);
+        for label in ["Previous track", "Play", "Next track", "Playback position"] {
+            let item = ElementHandle::find_by_accessible_label(&ui, label)
+                .next()
+                .unwrap();
+            assert!(
+                item.size().width >= 44. && item.size().height >= 44.,
+                "{label}"
+            );
+        }
+        let indicator = ElementHandle::find_by_element_type_name(&ui, "ConnectionIndicator")
+            .next()
+            .unwrap();
+        assert!(indicator.size().width >= 44. && indicator.size().height >= 44.);
+        ui.window().set_size(slint::LogicalSize::new(330., 840.));
+        let sections = ElementHandle::find_by_accessible_label(&ui, "Settings section")
+            .next()
+            .unwrap();
+        assert!(sections.absolute_position().x + sections.size().width <= 330.);
+    }
+
+    #[test]
     fn short_windows_keep_library_search_tracks_and_queue_reachable() {
         use i_slint_backend_testing::ElementHandle;
         use slint::platform::{PointerEventButton, WindowEvent};

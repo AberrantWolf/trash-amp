@@ -36,6 +36,7 @@ export component Slider inherits Rectangle {
 
 export component CheckBox inherits Rectangle {
     in property <string> text;
+    in property <bool> touch-input;
     in-out property <bool> checked;
     callback toggled();
     accessible-role: checkbox;
@@ -43,8 +44,8 @@ export component CheckBox inherits Rectangle {
     accessible-checkable: true;
     accessible-checked: root.checked;
     accessible-action-default => { root.checked = !root.checked; root.toggled(); }
-    min-height: max(24px, label.preferred-height);
-    min-width: label.preferred-width + 30px;
+    min-height: max(root.touch-input ? 44px : 24px, label.preferred-height);
+    min-width: 0px;
     horizontal-stretch: 1; vertical-stretch: 0;
     forward-focus: focus;
     Rectangle {
@@ -56,7 +57,7 @@ export component CheckBox inherits Rectangle {
         Text { text: root.checked ? "✓" : ""; color: Theme.dark ? #242321 : #ffffff;
             width: 100%; height: 100%; horizontal-alignment: center; vertical-alignment: center; font-weight: 700; }
     }
-    label := Text { x: 28px; width: parent.width - self.x; height: 100%; text: root.text; color: Theme.text; vertical-alignment: center; }
+    label := Text { x: 28px; width: max(0px, parent.width - self.x); height: 100%; text: root.text; color: Theme.text; wrap: word-wrap; vertical-alignment: center; }
     focus := FocusScope {
         x: 0px; y: 0px; width: 100%; height: 100%;
         key-pressed(event) => {
