@@ -17,11 +17,13 @@ pub trait Backend: Send + Sync + 'static {
     fn schedule(&self, tracks: &[Track]) -> Result<()>;
     fn download(&self, track: Track) -> Result<()>;
     fn remove(&self, track: &Track) -> Result<()>;
+    fn remove_record(&self, track: &Track) -> Result<()>;
 }
 #[derive(Clone, Copy)]
 pub enum Action {
     Download,
     Remove,
+    RemoveRecord,
 }
 pub enum Event {
     Message(String),
@@ -111,6 +113,7 @@ impl Downloads {
                 let result = (|| -> Result<usize> {
                     if schedule && matches!(action, Action::Download) {
                         service.backend.schedule(&tracks)?;
+                        (service.observer)(Event::Changed);
                     }
                     let mut failed = 0;
                     for track in tracks {
@@ -120,6 +123,7 @@ impl Downloads {
                         let result = match action {
                             Action::Download => service.backend.download(track),
                             Action::Remove => service.backend.remove(&track),
+                            Action::RemoveRecord => service.backend.remove_record(&track),
                         };
                         if let Err(error) = result {
                             if service.backend.cancelled() {
@@ -193,6 +197,9 @@ mod tests {
             Ok(())
         }
         fn remove(&self, _: &Track) -> Result<()> {
+            Ok(())
+        }
+        fn remove_record(&self, _: &Track) -> Result<()> {
             Ok(())
         }
     }

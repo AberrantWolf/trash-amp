@@ -201,6 +201,10 @@ impl amp_app::downloads::Backend for Adapter {
     fn remove(&self, track: &Track) -> Result<()> {
         self.remove_download(track)
     }
+    fn remove_record(&self, track: &Track) -> Result<()> {
+        let remote = parse_remote(track)?;
+        self.remove_download_id(&download_id(&remote)?, remote.key)
+    }
 }
 
 fn connection_id(key: ConnectionKey) -> String {
@@ -1471,8 +1475,11 @@ impl Adapter {
             .map(|d| d.id)
             .map(Ok)
             .unwrap_or_else(|| download_id(&remote))?;
+        self.remove_download_id(&id, remote.key)
+    }
+    fn remove_download_id(&self, id: &str, key: ConnectionKey) -> Result<()> {
         for path in [
-            self.root.join("audio").join(&id),
+            self.root.join("audio").join(id),
             self.root.join("audio").join(format!("{id}.part")),
         ] {
             match std::fs::remove_file(path) {
@@ -1485,7 +1492,7 @@ impl Adapter {
             .lock()
             .unwrap()
             .execute("DELETE FROM records WHERE kind='download' AND id=?", [id])?;
-        self.notify_availability(remote.key);
+        self.notify_availability(key);
         Ok(())
     }
 }
@@ -1962,6 +1969,38 @@ mod tests {
         a.remove_download(&t).unwrap();
         assert!(a.downloads().unwrap().is_empty());
     }
+    #[test]
+    fn clearing_a_failed_download_record_keeps_other_saved_audio_for_the_same_track() {
+        let root = tempfile::tempdir().unwrap();
+        let a = Adapter::with_credentials(root.path(), Arc::new(MemorySecrets::default())).unwrap();
+        let saved = track(key(), b"saved");
+        let mut failed = saved.clone();
+        let mut remote = parse_remote(&saved).unwrap();
+        let api::MusicTrackAvailabilityState::Available { digest, .. } =
+            &mut remote.audio.as_mut().unwrap().state
+        else {
+            unreachable!()
+        };
+        *digest = ids::Digest::sha256(b"other");
+        failed.access = MediaAccess::Managed {
+            provider: "collector".into(),
+            item: serde_json::to_string(&remote).unwrap(),
+        };
+        a.schedule(std::slice::from_ref(&saved)).unwrap();
+        let mut record = a.downloads().unwrap().pop().unwrap();
+        record.status = DownloadStatus::Complete;
+        std::fs::write(a.root.join("audio").join(&record.id), b"saved").unwrap();
+        a.put("download", &record.id, &record).unwrap();
+        assert!(a.download(failed.clone()).is_err());
+        assert_eq!(a.downloads().unwrap().len(), 2);
+
+        amp_app::downloads::Backend::remove_record(a.as_ref(), &failed).unwrap();
+        let remaining = a.downloads().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, record.id);
+        assert!(a.downloaded(&saved));
+    }
+
     #[test]
     fn cancelled_and_failed_downloads_release_capacity_and_retry_reserves_it_again() {
         let root = tempfile::tempdir().unwrap();

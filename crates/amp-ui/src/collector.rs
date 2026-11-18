@@ -2,8 +2,8 @@
 use super::*;
 use amp_app::catalog::Generation;
 use amp_collector::{
-    Adapter, ConnectionKey, ConnectionState, ListCommand, PlaybackFormat, SavedConnection,
-    Snapshot, api, ids,
+    Adapter, ConnectionKey, ConnectionState, Download, DownloadStatus, ListCommand, PlaybackFormat,
+    SavedConnection, Snapshot, api, ids,
 };
 use anyhow::Context;
 use std::collections::BTreeMap;
@@ -41,7 +41,8 @@ enum Event {
     OpenFailed(u64, String),
     Message(String),
     Mutation(u64, ConnectionKey, anyhow::Result<()>),
-    Downloads,
+    Downloads(anyhow::Result<Vec<Download>>),
+    DownloadMessage(String),
     PlaybackFormatSaved(anyhow::Result<()>),
     AlbumLoaded(
         u64,
@@ -76,6 +77,7 @@ pub struct Controller {
     album_cancel: Arc<std::sync::atomic::AtomicBool>,
     list_cancel: Arc<std::sync::atomic::AtomicBool>,
     list_request: Option<(u64, ids::CollectionListId, u64)>,
+    download_records: Rc<RefCell<Vec<Download>>>,
 }
 fn connection_kind(state: ConnectionState) -> ConnectionKind {
     match state {
@@ -283,6 +285,32 @@ fn render_list(ui: &PlayerWindow, view: &View, adapter: &Adapter) {
         paths,
     ));
 }
+fn install_downloads(ui: &PlayerWindow, inventory: &mut Vec<Download>, mut entries: Vec<Download>) {
+    entries.sort_by(|a, b| {
+        (&a.track.title, &a.track.artist, &a.id).cmp(&(&b.track.title, &b.track.artist, &b.id))
+    });
+    ui.set_download_rows(ModelRc::new(VecModel::from(
+        entries
+            .iter()
+            .map(|entry| {
+                let status = match entry.status {
+                    DownloadStatus::Pending => "Queued",
+                    DownloadStatus::Complete => "Downloaded",
+                    DownloadStatus::Failed => "Failed",
+                    DownloadStatus::Cancelled => "Cancelled",
+                };
+                DownloadRow {
+                    id: entry.id.clone().into(),
+                    title: entry.track.title.clone().into(),
+                    detail: format!("{status} · {}", entry.track.artist).into(),
+                    pending: entry.status == DownloadStatus::Pending,
+                    complete: entry.status == DownloadStatus::Complete,
+                }
+            })
+            .collect::<Vec<_>>(),
+    )));
+    *inventory = entries;
+}
 impl Controller {
     pub fn new(
         ui: &PlayerWindow,
@@ -326,14 +354,24 @@ impl Controller {
         }));
         let (tx, rx) = mpsc::channel();
         let download_events = tx.clone();
+        let download_adapter = adapter.clone();
+        let inventory_updates = std::sync::Mutex::new(());
+        let download_records = Rc::new(RefCell::new(Vec::new()));
+        install_downloads(ui, &mut download_records.borrow_mut(), adapter.downloads()?);
         let downloads = amp_app::downloads::Downloads::new(
             adapter.clone(),
             Arc::new(move |event| {
-                let event = match event {
-                    amp_app::downloads::Event::Message(message) => Event::Message(message),
-                    amp_app::downloads::Event::Changed => Event::Downloads,
-                };
-                let _ = download_events.send(event);
+                match event {
+                    amp_app::downloads::Event::Message(message) => {
+                        let _ = download_events.send(Event::DownloadMessage(message));
+                    }
+                    amp_app::downloads::Event::Changed => {
+                        // Batch completion and cancellation publish from different workers.
+                        let _update = inventory_updates.lock().unwrap();
+                        let _ =
+                            download_events.send(Event::Downloads(download_adapter.downloads()));
+                    }
+                }
             }),
         )?;
         super::wire_source_selection(ui, state);
@@ -818,15 +856,17 @@ impl Controller {
                     Ok((gib * 1024.0 * 1024.0 * 1024.0) as u64)
                 })();
                 match bytes {
-                    Err(error) => ui.set_connection_status(error.to_string().into()),
+                    Err(error) => ui.set_download_status(error.to_string().into()),
                     Ok(bytes) => {
                         let a = a.clone();
                         let tx = tx.clone();
                         catalog.persist(Box::new(move || {
                             let result = a.set_budget(bytes);
-                            if let Err(error) = &result {
-                                let _ = tx.send(Event::Message(error.to_string()));
-                            }
+                            let message = match &result {
+                                Ok(()) => "Storage limit saved.".into(),
+                                Err(error) => error.to_string(),
+                            };
+                            let _ = tx.send(Event::DownloadMessage(message));
                             result
                         }));
                     }
@@ -839,22 +879,25 @@ impl Controller {
             let view = view.clone();
             let weak = ui.as_weak();
             let downloads = downloads.clone();
+            let inventory = download_records.clone();
             ui.on_download_action(move |verb| {
                 let Some(ui) = weak.upgrade() else { return };
                 if verb == 5 {
                     if let Err(error) = downloads.request_cancel() {
-                        ui.set_connection_status(error.to_string().into());
+                        ui.set_download_status(error.to_string().into());
                     }
                     return;
                 }
                 let tracks = (|| -> anyhow::Result<Vec<Track>> {
                     if verb == 4 {
-                        return Ok(a
-                            .downloads()?
-                            .into_iter()
-                            .filter(|d| d.status != amp_collector::DownloadStatus::Complete)
-                            .map(|d| d.track)
-                            .collect());
+                        let tracks: Vec<_> = inventory
+                            .borrow()
+                            .iter()
+                            .filter(|d| d.status != DownloadStatus::Complete)
+                            .map(|d| d.track.clone())
+                            .collect();
+                        anyhow::ensure!(!tracks.is_empty(), "No downloads to retry.");
+                        return Ok(tracks);
                     }
                     let view = view.borrow();
                     if verb == 2 || verb == 3 {
@@ -880,7 +923,10 @@ impl Controller {
                 let tracks = match tracks {
                     Ok(t) => t,
                     Err(e) => {
-                        ui.set_connection_status(e.to_string().into());
+                        ui.set_download_status(e.to_string().into());
+                        if verb != 4 {
+                            ui.set_status(e.to_string().into());
+                        }
                         return;
                     }
                 };
@@ -890,7 +936,26 @@ impl Controller {
                     amp_app::downloads::Action::Download
                 };
                 if let Err(error) = downloads.start(tracks, action) {
-                    ui.set_connection_status(error.to_string().into());
+                    ui.set_download_status(error.to_string().into());
+                    ui.set_status(error.to_string().into());
+                }
+            });
+        }
+        {
+            let inventory = download_records.clone();
+            let weak = ui.as_weak();
+            ui.on_remove_download_record(move |id| {
+                let Some(ui) = weak.upgrade() else { return };
+                let track = inventory
+                    .borrow()
+                    .iter()
+                    .find(|entry| id == entry.id && entry.status != DownloadStatus::Pending)
+                    .map(|entry| entry.track.clone());
+                if let Some(track) = track
+                    && let Err(error) =
+                        downloads.start(vec![track], amp_app::downloads::Action::RemoveRecord)
+                {
+                    ui.set_download_status(error.to_string().into());
                 }
             });
         }
@@ -910,6 +975,7 @@ impl Controller {
             album_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             list_cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             list_request: None,
+            download_records,
         })
     }
     pub fn poll(&mut self) {
@@ -1137,6 +1203,10 @@ impl Controller {
                     }
                 }
                 Event::Message(message) => ui.set_status(message.into()),
+                Event::DownloadMessage(message) => {
+                    ui.set_download_status(message.clone().into());
+                    ui.set_status(message.into());
+                }
                 Event::ConnectionChecked(v, key, status)
                     if v == current
                         && self.view.borrow().selected == Some(key)
@@ -1226,11 +1296,21 @@ impl Controller {
                         Err(error) => error.to_string().into(),
                     });
                 }
-                Event::Downloads
-                    if self.view.borrow().selected.is_some() && ui.get_collector_active() =>
-                {
-                    // Adapter completion already notified the source owner.
-                    render_list(&ui, &self.view.borrow(), &self.adapter);
+                Event::Downloads(result) => {
+                    match result {
+                        Ok(entries) => {
+                            install_downloads(&ui, &mut self.download_records.borrow_mut(), entries)
+                        }
+                        Err(error) => ui.set_download_status(
+                            format!("Could not read downloads: {error}").into(),
+                        ),
+                    }
+                    if self.view.borrow().selected.is_some() && ui.get_collector_active() {
+                        // Adapter completion already notified the source owner.
+                        let entry = ui.get_list_entry();
+                        render_list(&ui, &self.view.borrow(), &self.adapter);
+                        ui.set_list_entry(entry);
+                    }
                 }
                 _ => {}
             }
@@ -1996,7 +2076,10 @@ mod tests {
             |_, done| done(Ok(())),
         )
         .unwrap();
-        controller.tx.send(Event::Downloads).unwrap();
+        controller
+            .tx
+            .send(Event::Downloads(Ok(Vec::new())))
+            .unwrap();
         controller.poll();
         assert_eq!(
             state.borrow().library.albums[0].tracks[0].availability,
