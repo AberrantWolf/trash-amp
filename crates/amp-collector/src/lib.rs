@@ -5,7 +5,7 @@ mod presentation;
 mod source;
 pub use playback::PlaybackFormat;
 pub use playlists::{AppendScope, PlaylistAction, PlaylistChange};
-pub use presentation::{CatalogView, SourceView};
+pub use presentation::{CatalogView, PlaylistTracks, SourceView};
 pub use source::source_id;
 
 use amp_core::{Album, ItemId, Library, MediaAccess, Track};
@@ -1079,8 +1079,8 @@ impl Adapter {
         Ok(value)
     }
     pub fn list_tracks(&self, key: ConnectionKey, list: &api::CollectionListView) -> Vec<Track> {
-        (0..list.entries.items.len())
-            .filter_map(|index| self.list_track(key, list, index))
+        PlaylistTracks::new(key, list, &self.downloads().unwrap_or_default())
+            .tracks_from(0)
             .collect()
     }
     /// Resolve a displayed entry without shifting positions past unavailable entries.
@@ -1090,42 +1090,7 @@ impl Adapter {
         list: &api::CollectionListView,
         index: usize,
     ) -> Option<Track> {
-        let entry = list.entries.items.get(index)?;
-        let item = entry.item_id?;
-        if let Some(audio) = &entry.audio {
-            let mut track = remote_track(key, item, list.list.collection_id, "", audio);
-            if self.downloaded(&track) {
-                track.availability = amp_core::Availability::Downloaded;
-            } else if audio.can_stream_original {
-                track.availability = amp_core::Availability::Available;
-            }
-            Some(track)
-        } else if let Some(ids::ListTarget::MusicTrack {
-            capture_id,
-            source_representation_id,
-            track_position,
-            ..
-        }) = &entry.source
-        {
-            self.downloads()
-                .ok()?
-                .into_iter()
-                .find(|d| {
-                    d.status == DownloadStatus::Complete
-                        && d.remote.key == key
-                        && d.remote.item == item
-                        && d.remote.collection == list.list.collection_id
-                        && d.remote.capture == *capture_id
-                        && d.remote.source == *source_representation_id
-                        && d.remote.position == *track_position
-                })
-                .map(|mut d| {
-                    d.track.availability = amp_core::Availability::Downloaded;
-                    d.track
-                })
-        } else {
-            None
-        }
+        PlaylistTracks::new(key, list, &self.downloads().unwrap_or_default()).get(index)
     }
     pub async fn submit(&self, command: ListCommand) -> Result<api::CollectionListSummary> {
         self.put("command", &command.receipt, &command)?;
@@ -1880,7 +1845,7 @@ mod tests {
                 availability: api::ListEntryAvailability::Entry,
             }
         };
-        let list = api::CollectionListView {
+        let mut list = api::CollectionListView {
             list: api::CollectionListSummary {
                 id: ids::CollectionListId::new(),
                 collection_id: remote.collection,
@@ -1916,6 +1881,41 @@ mod tests {
         );
         assert_eq!(resolved[0].id, resolved[2].id);
         assert_ne!(resolved[0].id, resolved[1].id);
+
+        let historical = &mut list.entries.items[4];
+        historical.audio = None;
+        historical.source = Some(ids::ListTarget::MusicTrack {
+            item_id: remote.item,
+            capture_id: remote.capture,
+            source_representation_id: remote.source,
+            track_position: remote.position,
+        });
+        adapter.schedule(std::slice::from_ref(&first)).unwrap();
+        let mut download = adapter.downloads().unwrap().pop().unwrap();
+        let pending = [download.clone()];
+        assert!(PlaylistTracks::new(key, &list, &pending).get(4).is_none());
+        download.status = DownloadStatus::Complete;
+        let mut unrelated = download.clone();
+        unrelated.remote.item = ids::ItemId::new();
+        let mismatched_item = [unrelated];
+        assert!(
+            PlaylistTracks::new(key, &list, &mismatched_item)
+                .get(4)
+                .is_none()
+        );
+        let inventory = [download];
+        let other_account = ConnectionKey {
+            user_id: ids::UserId::new(),
+            ..key
+        };
+        assert!(
+            PlaylistTracks::new(other_account, &list, &inventory)
+                .get(4)
+                .is_none()
+        );
+        let playable = PlaylistTracks::new(key, &list, &inventory).get(4).unwrap();
+        assert_eq!(playable.id, first.id);
+        assert_eq!(playable.availability, amp_core::Availability::Downloaded);
     }
     #[test]
     fn snapshots_isolate_servers_accounts_and_survive_restart() {

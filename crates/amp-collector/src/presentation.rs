@@ -57,6 +57,99 @@ pub struct SourceView {
     pub catalog: Option<CatalogView>,
 }
 
+type TrackCoordinates = (ids::CaptureId, ids::RepresentationId, u16);
+
+/// Resolves playlist rows against the published download inventory. Keeps the
+/// displayed positions intact, including entries with no playable track.
+pub struct PlaylistTracks<'a> {
+    key: ConnectionKey,
+    list: &'a api::CollectionListView,
+    retained: BTreeMap<TrackCoordinates, Vec<&'a Download>>,
+}
+
+impl<'a> PlaylistTracks<'a> {
+    pub fn new(
+        key: ConnectionKey,
+        list: &'a api::CollectionListView,
+        downloads: &'a [Download],
+    ) -> Self {
+        let mut retained = BTreeMap::<_, Vec<_>>::new();
+        for download in downloads {
+            let remote = &download.remote;
+            if download.status == DownloadStatus::Complete
+                && remote.key == key
+                && remote.collection == list.list.collection_id
+            {
+                retained
+                    .entry((remote.capture, remote.source, remote.position))
+                    .or_default()
+                    .push(download);
+            }
+        }
+        Self {
+            key,
+            list,
+            retained,
+        }
+    }
+
+    fn retained(&self, entry: &api::PresentedListEntry, item: ids::ItemId) -> Option<&Download> {
+        if let Some(audio) = &entry.audio {
+            self.retained
+                .get(&(
+                    audio.capture_id,
+                    audio.source_representation_id,
+                    audio.track_position,
+                ))?
+                .first()
+                .copied()
+        } else if let Some(ids::ListTarget::MusicTrack {
+            capture_id,
+            source_representation_id,
+            track_position,
+            ..
+        }) = &entry.source
+        {
+            self.retained
+                .get(&(*capture_id, *source_representation_id, *track_position))?
+                .iter()
+                .copied()
+                .find(|download| download.remote.item == item)
+        } else {
+            None
+        }
+    }
+
+    pub fn is_retained(&self, entry: &api::PresentedListEntry) -> bool {
+        entry
+            .item_id
+            .is_some_and(|item| self.retained(entry, item).is_some())
+    }
+
+    pub fn get(&self, index: usize) -> Option<Track> {
+        let entry = self.list.entries.items.get(index)?;
+        let item = entry.item_id?;
+        let retained = self.retained(entry, item);
+        let mut track = if let Some(audio) = &entry.audio {
+            let mut track = remote_track(self.key, item, self.list.list.collection_id, "", audio);
+            if audio.can_stream_original {
+                track.availability = amp_core::Availability::Available;
+            }
+            track
+        } else {
+            retained?.track.clone()
+        };
+        if retained.is_some() {
+            track.availability = amp_core::Availability::Downloaded;
+        }
+        Some(track)
+    }
+
+    pub fn tracks_from(&self, index: usize) -> impl Iterator<Item = Track> + '_ {
+        (index..self.list.entries.items.len()).filter_map(|i| self.get(i))
+    }
+}
+
 impl Adapter {
     pub fn source_view(
         &self,

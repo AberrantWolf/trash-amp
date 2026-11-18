@@ -5,7 +5,8 @@ use amp_app::{browse::SelectionRead, catalog::Generation};
 use amp_collector::Snapshot;
 use amp_collector::{
     Adapter, AppendScope, CatalogView, ConnectionKey, ConnectionState, Download, DownloadStatus,
-    PlaybackFormat, PlaylistAction, PlaylistChange, SavedConnection, SourceView, api, ids,
+    PlaybackFormat, PlaylistAction, PlaylistChange, PlaylistTracks, SavedConnection, SourceView,
+    api, ids,
 };
 use anyhow::Context;
 use std::path::Path;
@@ -243,6 +244,9 @@ fn render_list(ui: &PlayerWindow, view: &View, downloads: &[Download]) {
     };
     ui.set_list_name(list.list.name.clone().into());
     ui.set_list_editable(list.list.can_edit);
+    let tracks = view
+        .selected
+        .map(|key| PlaylistTracks::new(key, list, downloads));
     let paths = list
         .entries
         .items
@@ -257,24 +261,38 @@ fn render_list(ui: &PlayerWindow, view: &View, downloads: &[Download]) {
         list.entries
             .items
             .iter()
-            .map(|e| BrowserRow {
-                kind: 1,
-                title: e.title.clone().into(),
-                subtitle: e.album.as_deref().unwrap_or("").into(),
-                status: (if (view.online && e.audio.as_ref().is_some_and(|audio| audio.can_stream_original))
-                    || downloads.iter().any(|d| d.status == amp_collector::DownloadStatus::Complete && Some(d.remote.key) == view.selected && d.remote.collection == list.list.collection_id && matches!(&e.source, Some(ids::ListTarget::MusicTrack { capture_id, source_representation_id, track_position, .. }) if *capture_id == d.remote.capture && *source_representation_id == d.remote.source && *track_position == d.remote.position)) { "" } else { match e.availability {
+            .map(|e| {
+                let status = if (view.online
+                    && e.audio
+                        .as_ref()
+                        .is_some_and(|audio| audio.can_stream_original))
+                    || tracks.as_ref().is_some_and(|tracks| tracks.is_retained(e))
+                {
+                    ""
+                } else {
+                    match e.availability {
                         api::ListEntryAvailability::Available { .. } => "",
                         api::ListEntryAvailability::Preparing => "Preparing",
                         api::ListEntryAvailability::NeedsPreparation => "Needs preparation",
                         api::ListEntryAvailability::Entry => "Entry",
                         _ => "Unavailable",
-                    }})
-                .into(),
-                ..Default::default()
+                    }
+                };
+                BrowserRow {
+                    kind: 1,
+                    title: e.title.clone().into(),
+                    subtitle: e.album.as_deref().unwrap_or("").into(),
+                    status: status.into(),
+                    ..Default::default()
+                }
             })
             .collect::<Vec<_>>(),
         paths,
     ));
+}
+fn playlist_playable(track: &Track, online: bool) -> bool {
+    track.availability == amp_core::Availability::Downloaded
+        || (online && track.availability == amp_core::Availability::Available)
 }
 fn playlist_request(
     ui: &PlayerWindow,
@@ -669,7 +687,7 @@ impl Controller {
             });
         }
         {
-            let a = adapter.clone();
+            let inventory = download_records.clone();
             let view = view.clone();
             let state = state.clone();
             let weak = ui.as_weak();
@@ -683,24 +701,22 @@ impl Controller {
                 let Ok(index) = usize::try_from(index) else {
                     return;
                 };
-                let playable = |t: &Track| a.downloaded(t) || (view.online && a.can_play(t));
-                let Some(first) = a.list_track(key, list, index).filter(playable) else {
+                let inventory = inventory.borrow();
+                let tracks = PlaylistTracks::new(key, list, &inventory);
+                let playable = |t: &Track| playlist_playable(t, view.online);
+                let Some(first) = tracks.get(index).filter(playable) else {
                     ui.set_connection_status("This entry is not playable".into());
                     return;
                 };
                 let tracks = std::iter::once(first)
-                    .chain(
-                        (index + 1..list.entries.items.len())
-                            .filter_map(|i| a.list_track(key, list, i))
-                            .filter(playable),
-                    )
+                    .chain(tracks.tracks_from(index + 1).filter(playable))
                     .collect();
                 state.borrow().playback.play_list(tracks);
                 ui.set_connection_status("Playing list from track".into());
             });
         }
         {
-            let a = adapter.clone();
+            let inventory = download_records.clone();
             let view = view.clone();
             let state = state.clone();
             let weak = ui.as_weak();
@@ -711,10 +727,10 @@ impl Controller {
                 let Some(list) = view.selected_list() else {
                     return;
                 };
-                let all = a.list_tracks(key, list);
-                let mut tracks = all
-                    .into_iter()
-                    .filter(|t| a.downloaded(t) || (view.online && a.can_play(t)))
+                let inventory = inventory.borrow();
+                let mut tracks = PlaylistTracks::new(key, list, &inventory)
+                    .tracks_from(0)
+                    .filter(|t| playlist_playable(t, view.online))
                     .collect::<Vec<_>>();
                 let excluded = list.entries.items.len() - tracks.len();
                 if shuffle {
@@ -803,7 +819,6 @@ impl Controller {
             });
         }
         {
-            let a = adapter.clone();
             let state = state.clone();
             let view = view.clone();
             let weak = ui.as_weak();
@@ -832,7 +847,9 @@ impl Controller {
                     if verb == 2 || verb == 3 {
                         let key = view.selected.context("Select server")?;
                         let list = view.selected_list().context("Select list")?;
-                        Ok(a.list_tracks(key, list))
+                        Ok(PlaylistTracks::new(key, list, &inventory.borrow())
+                            .tracks_from(0)
+                            .collect())
                     } else {
                         let s = state.borrow();
                         let index = s.selected.context("Select album")?;
