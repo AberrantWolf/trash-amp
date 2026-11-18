@@ -88,6 +88,12 @@ impl<K> Drop for SelectionRead<K> {
 pub struct IndexBuilder {
     pending: Option<(u64, Arc<Library>)>,
     active: Option<(u64, mpsc::Receiver<CatalogIndex>)>,
+    worker: Option<mpsc::Sender<IndexWork>>,
+}
+
+enum IndexWork {
+    Build(Arc<Library>, mpsc::Sender<CatalogIndex>),
+    Release(Arc<CatalogIndex>),
 }
 
 impl IndexBuilder {
@@ -108,16 +114,43 @@ impl IndexBuilder {
         completed
     }
 
+    /// A large retired index can take longer to release than a presentation frame.
+    pub fn release(&mut self, index: Arc<CatalogIndex>) {
+        self.send(IndexWork::Release(index));
+    }
+
     fn start_pending(&mut self) {
         if self.active.is_none()
             && let Some((revision, library)) = self.pending.take()
         {
             let (tx, rx) = mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = tx.send(CatalogIndex::new(&library));
-            });
+            self.send(IndexWork::Build(library, tx));
             self.active = Some((revision, rx));
         }
+    }
+
+    fn send(&mut self, work: IndexWork) {
+        let work = if let Some(worker) = &self.worker {
+            match worker.send(work) {
+                Ok(()) => return,
+                Err(mpsc::SendError(work)) => work,
+            }
+        } else {
+            work
+        };
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(work) = rx.recv() {
+                match work {
+                    IndexWork::Build(library, result) => {
+                        let _ = result.send(CatalogIndex::new(&library));
+                    }
+                    IndexWork::Release(index) => drop(index),
+                }
+            }
+        });
+        let _ = tx.send(work);
+        self.worker = Some(tx);
     }
 }
 

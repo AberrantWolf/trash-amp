@@ -12,6 +12,7 @@ use std::{
 const CACHE_IMAGES: usize = 128;
 const THUMBNAIL_SIZE: u32 = 128;
 type Pixels = Option<(Vec<u8>, u32, u32)>;
+type RowData = (BrowserRow, Option<PathBuf>);
 struct Cache {
     images: HashMap<PathBuf, Option<slint::Image>>,
     recent: VecDeque<PathBuf>,
@@ -114,33 +115,42 @@ pub fn poll() -> bool {
                 .collect::<Vec<_>>(),
         )
     });
+    if changed.is_empty() {
+        return false;
+    }
     for model in models {
-        for (index, path) in model.paths.iter().enumerate() {
-            if path.as_ref().is_some_and(|path| changed.contains(path)) {
-                model.notify.row_changed(index);
-            }
+        let rows: Vec<_> = model
+            .requested_paths
+            .borrow()
+            .iter()
+            .filter_map(|(row, path)| changed.contains(path).then_some(*row))
+            .collect();
+        for row in rows {
+            model.notify.row_changed(row);
         }
     }
-    !changed.is_empty()
+    true
 }
 struct ArtworkModel {
-    rows: Vec<BrowserRow>,
-    paths: Vec<Option<PathBuf>>,
+    count: usize,
+    data: Box<dyn Fn(usize) -> Option<RowData>>,
+    requested_paths: RefCell<HashMap<usize, PathBuf>>,
     notify: ModelNotify,
 }
 impl Model for ArtworkModel {
     type Data = BrowserRow;
     fn row_count(&self) -> usize {
-        self.rows.len()
+        self.count
     }
     fn row_data(&self, row: usize) -> Option<BrowserRow> {
-        let mut value = self.rows.get(row)?.clone();
-        value.artwork = self
-            .paths
-            .get(row)
-            .and_then(Option::as_deref)
-            .and_then(load)
-            .unwrap_or_default();
+        let (mut value, path) = (self.data)(row)?;
+        value.artwork = if let Some(path) = path {
+            let artwork = load(&path).unwrap_or_default();
+            self.requested_paths.borrow_mut().insert(row, path);
+            artwork
+        } else {
+            slint::Image::default()
+        };
         Some(value)
     }
     fn model_tracker(&self) -> &dyn ModelTracker {
@@ -148,9 +158,19 @@ impl Model for ArtworkModel {
     }
 }
 pub fn model(rows: Vec<BrowserRow>, paths: Vec<Option<PathBuf>>) -> ModelRc<BrowserRow> {
+    lazy_model(rows.len(), move |row| {
+        Some((rows.get(row)?.clone(), paths.get(row).cloned().flatten()))
+    })
+}
+
+pub fn lazy_model(
+    count: usize,
+    data: impl Fn(usize) -> Option<RowData> + 'static,
+) -> ModelRc<BrowserRow> {
     let model = Rc::new(ArtworkModel {
-        rows,
-        paths,
+        count,
+        data: Box::new(data),
+        requested_paths: RefCell::default(),
         notify: ModelNotify::default(),
     });
     CACHE.with_borrow_mut(|cache| cache.models.push(Rc::downgrade(&model)));

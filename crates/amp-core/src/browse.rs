@@ -84,16 +84,12 @@ impl CatalogIndex {
     pub fn new(library: &Library) -> Self {
         let mut artists = BTreeMap::<String, Entry>::new();
         let mut albums: Vec<_> = library.albums.iter().collect();
-        albums.sort_by(|a, b| {
-            (normalized(&a.title), normalized(&a.artist), id_key(&a.id)).cmp(&(
-                normalized(&b.title),
-                normalized(&b.artist),
-                id_key(&b.id),
-            ))
-        });
+        albums.sort_by_cached_key(|a| (normalized(&a.title), normalized(&a.artist), id_key(&a.id)));
         let mut index = Self::default();
         let mut sorted_tracks = Vec::new();
         for album in albums {
+            let album_title = normalized(&album.title);
+            let album_artist = normalized(&album.artist);
             let entry = Entry {
                 target: Target::Album(album.id.clone()),
                 title: album.title.clone(),
@@ -103,7 +99,7 @@ impl CatalogIndex {
                 album_count: 0,
                 playback_block: None,
                 scan_status: None,
-                fields: vec![normalized(&album.title), normalized(&album.artist)],
+                fields: vec![album_title.clone(), album_artist.clone()],
             };
             index.albums.push(entry);
             let mut add_artist = |name: &str, album_credit: bool| {
@@ -145,35 +141,29 @@ impl CatalogIndex {
                     fields: vec![
                         normalized(&track.title),
                         normalized(&track.artist),
-                        normalized(&album.title),
-                        normalized(&album.artist),
+                        album_title.clone(),
+                        album_artist.clone(),
                     ],
                 };
-                sorted_tracks.push((
-                    (
-                        normalized(&track.title),
-                        normalized(&track.artist),
-                        normalized(&album.title),
-                        track.disc,
-                        track.number,
-                        (
-                            track.id.library.clone(),
-                            track.id.provider.clone(),
-                            track.id.item.clone(),
-                        ),
-                    ),
-                    entry.clone(),
-                ));
+                sorted_tracks.push((track, entry.clone()));
                 tracks.push(entry);
             }
             index.album_tracks.push(tracks);
         }
-        sorted_tracks.sort_by(|a, b| a.0.cmp(&b.0));
+        // Track search fields start with title, artist and album, in sort order.
+        sorted_tracks.sort_by(|(a, entry_a), (b, entry_b)| {
+            (&entry_a.fields[..3], a.disc, a.number, id_key(&a.id)).cmp(&(
+                &entry_b.fields[..3],
+                b.disc,
+                b.number,
+                id_key(&b.id),
+            ))
+        });
         index.tracks = sorted_tracks.into_iter().map(|(_, entry)| entry).collect();
         index.artists = artists.into_values().collect();
         index
             .artists
-            .sort_by_key(|a| (normalized(&a.title), a.title.clone()));
+            .sort_by_cached_key(|a| (normalized(&a.title), a.title.clone()));
         index
     }
     pub fn search(&self, query: &str) -> Results {

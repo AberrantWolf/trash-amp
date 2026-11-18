@@ -33,6 +33,137 @@ enum SearchUpdate {
     },
     Online(anyhow::Result<Option<(Vec<Entry>, Library)>>),
 }
+
+#[derive(Default)]
+struct SearchResults {
+    artists: Arc<Vec<Entry>>,
+    albums: Arc<Vec<Entry>>,
+    tracks: Arc<Vec<Entry>>,
+}
+
+impl From<Results> for SearchResults {
+    fn from(results: Results) -> Self {
+        Self {
+            artists: Arc::new(results.artists),
+            albums: Arc::new(results.albums),
+            tracks: Arc::new(results.tracks),
+        }
+    }
+}
+
+enum Entries {
+    CatalogAlbums(Arc<CatalogIndex>),
+    Matches(Arc<Vec<Entry>>),
+}
+
+impl Entries {
+    fn entries(&self) -> &[Entry] {
+        match self {
+            Self::CatalogAlbums(index) => &index.albums,
+            Self::Matches(entries) => entries,
+        }
+    }
+}
+
+enum RowGroup {
+    Entries(Entries, usize),
+    Label(BrowserRow, Action),
+}
+
+impl RowGroup {
+    fn len(&self) -> usize {
+        match self {
+            Self::Entries(_, count) => *count,
+            Self::Label(..) => 1,
+        }
+    }
+}
+
+#[derive(Default)]
+struct BrowserRows(Vec<RowGroup>);
+
+impl BrowserRows {
+    fn push_label(&mut self, text: String, kind: i32, action: Action) {
+        self.0.push(RowGroup::Label(label(text, kind), action));
+    }
+
+    fn push_entries(&mut self, entries: Entries, limit: usize) {
+        let count = entries.entries().len().min(limit);
+        if count > 0 {
+            self.0.push(RowGroup::Entries(entries, count));
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.0.iter().map(RowGroup::len).sum()
+    }
+
+    fn get(&self, mut index: usize) -> Option<(&RowGroup, usize)> {
+        for group in &self.0 {
+            if index < group.len() {
+                return Some((group, index));
+            }
+            index -= group.len();
+        }
+        None
+    }
+
+    fn action(&self, index: usize) -> Option<Action> {
+        let (group, index) = self.get(index)?;
+        Some(match group {
+            RowGroup::Entries(entries, _) => Action::Open(entries.entries()[index].target.clone()),
+            RowGroup::Label(_, action) => action.clone(),
+        })
+    }
+
+    fn target(&self, index: usize) -> Option<&Target> {
+        let (group, index) = self.get(index)?;
+        match group {
+            RowGroup::Entries(entries, _) => Some(&entries.entries()[index].target),
+            RowGroup::Label(_, Action::Open(target)) => Some(target),
+            RowGroup::Label(..) => None,
+        }
+    }
+
+    fn position(&self, target: &Target) -> Option<usize> {
+        let mut offset = 0;
+        for group in &self.0 {
+            let found = match group {
+                RowGroup::Entries(entries, count) => entries.entries()[..*count]
+                    .iter()
+                    .position(|entry| entry.target == *target),
+                RowGroup::Label(_, Action::Open(entry)) if entry == target => Some(0),
+                RowGroup::Label(..) => None,
+            };
+            if let Some(index) = found {
+                return Some(offset + index);
+            }
+            offset += group.len();
+        }
+        None
+    }
+
+    fn row_data(
+        &self,
+        index: usize,
+        artwork: &std::collections::BTreeMap<String, String>,
+    ) -> Option<(BrowserRow, Option<PathBuf>)> {
+        let (group, index) = self.get(index)?;
+        Some(match group {
+            RowGroup::Entries(entries, _) => {
+                let entry = &entries.entries()[index];
+                (row(entry, false), artwork_path(&entry.target, artwork))
+            }
+            RowGroup::Label(row, _) => (row.clone(), None),
+        })
+    }
+
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = Action> + '_ {
+        (0..self.len()).filter_map(|index| self.action(index))
+    }
+}
+
 pub(super) struct Browser {
     index: Arc<CatalogIndex>,
     index_builder: amp_app::browse::IndexBuilder,
@@ -43,9 +174,9 @@ pub(super) struct Browser {
     detail: Option<Target>,
     selected_result: Option<Target>,
     history: Vec<Location>,
-    rows: Vec<Action>,
+    rows: Rc<BrowserRows>,
     detail_rows: Vec<Action>,
-    results: Results,
+    results: SearchResults,
     searching: bool,
     search_scope: Option<String>,
     search_error: Option<String>,
@@ -72,9 +203,9 @@ impl Default for Browser {
             detail: None,
             selected_result: None,
             history: vec![],
-            rows: vec![],
+            rows: Rc::default(),
             detail_rows: vec![],
-            results: Results::default(),
+            results: SearchResults::default(),
             searching: false,
             search_scope: None,
             search_error: None,
@@ -90,6 +221,17 @@ impl Default for Browser {
         }
     }
 }
+fn artwork_path(
+    target: &Target,
+    artwork: &std::collections::BTreeMap<String, String>,
+) -> Option<PathBuf> {
+    match target {
+        Target::Album(id) | Target::Track { album: id, .. } => {
+            artwork.get(&id.item).map(PathBuf::from)
+        }
+        Target::Artist(_) => None,
+    }
+}
 fn artwork_paths(
     actions: &[Action],
     artwork: &std::collections::BTreeMap<String, String>,
@@ -97,9 +239,7 @@ fn artwork_paths(
     actions
         .iter()
         .map(|action| match action {
-            Action::Open(Target::Album(id)) | Action::Open(Target::Track { album: id, .. }) => {
-                artwork.get(&id.item).map(PathBuf::from)
-            }
+            Action::Open(target) => artwork_path(target, artwork),
             _ => None,
         })
         .collect()
@@ -160,27 +300,23 @@ fn append_entries(
 }
 fn render_browser(ui: &PlayerWindow, s: &mut State) {
     let b = &mut s.browser;
-    let mut rows = vec![];
-    let mut actions = vec![];
+    let mut rows = BrowserRows::default();
     if b.query.trim().is_empty() {
-        if s.preferences.browse_artists {
-            append_entries(
-                &mut rows,
-                &mut actions,
-                &b.index.album_artists(),
-                usize::MAX,
-            );
-        } else {
-            append_entries(&mut rows, &mut actions, &b.index.albums, usize::MAX);
+        if b.index_version >= b.first_valid_index_version {
+            let entries = if s.preferences.browse_artists {
+                Entries::Matches(Arc::new(b.index.album_artists()))
+            } else {
+                Entries::CatalogAlbums(b.index.clone())
+            };
+            rows.push_entries(entries, usize::MAX);
         }
-        if rows.is_empty() {
+        if rows.0.is_empty() {
             let text = if b.catalog_version == b.index_version {
                 "Open a library to begin"
             } else {
                 "Updating library…"
             };
-            rows.push(label(text.into(), 6));
-            actions.push(Action::None);
+            rows.push_label(text.into(), 6, Action::None);
         }
     } else {
         for (i, (title, entries)) in [
@@ -194,21 +330,21 @@ fn render_browser(ui: &PlayerWindow, s: &mut State) {
             if b.section.is_some_and(|section| section != i) || entries.is_empty() {
                 continue;
             }
-            rows.push(label(format!("{title} ({})", entries.len()), 0));
-            actions.push(Action::None);
-            append_entries(
-                &mut rows,
-                &mut actions,
-                entries,
+            rows.push_label(format!("{title} ({})", entries.len()), 0, Action::None);
+            rows.push_entries(
+                Entries::Matches(entries.clone()),
                 if b.section.is_some() { usize::MAX } else { 5 },
             );
             if b.section.is_none() && entries.len() > 5 {
-                rows.push(label(format!("Show all {} {title}", entries.len()), 4));
-                actions.push(Action::More(i));
+                rows.push_label(
+                    format!("Show all {} {title}", entries.len()),
+                    4,
+                    Action::More(i),
+                );
             }
         }
-        if rows.is_empty() {
-            rows.push(label(
+        if rows.0.is_empty() {
+            rows.push_label(
                 if b.due.is_some() || b.searching {
                     "Searching…"
                 } else {
@@ -216,38 +352,46 @@ fn render_browser(ui: &PlayerWindow, s: &mut State) {
                 }
                 .into(),
                 6,
-            ));
-            actions.push(Action::None);
+                Action::None,
+            );
         }
     }
     if !b.query.trim().is_empty() && ui.get_collector_active() && !ui.get_collector_online() {
-        rows.push(label("Offline track results cover cached albums".into(), 6));
-        actions.push(Action::None);
+        rows.push_label(
+            "Offline track results cover cached albums".into(),
+            6,
+            Action::None,
+        );
     }
     if let Some(error) = &b.search_error {
-        rows.push(label(error.clone(), 6));
-        actions.push(Action::None);
+        rows.push_label(error.clone(), 6, Action::None);
     }
-    b.rows = actions;
-    ui.set_browser_rows(artwork::model(rows, artwork_paths(&b.rows, &s.artwork)));
+    let rows = Rc::new(rows);
+    let artwork = s.artwork.clone();
+    b.rows = rows.clone();
+    ui.set_browser_rows(artwork::lazy_model(rows.len(), move |index| {
+        rows.row_data(index, &artwork)
+    }));
     ui.set_browser_selected(
         b.selected_result
             .as_ref()
-            .and_then(|target| {
-                b.rows
-                    .iter()
-                    .position(|a| matches!(a, Action::Open(t) if t == target))
-            })
+            .and_then(|target| b.rows.position(target))
             .map_or(-1, |i| i as i32),
     );
     ui.set_section_open(b.section.is_some());
     ui.set_can_back(!b.history.is_empty());
 }
 fn render_artist(ui: &PlayerWindow, s: &mut State, name: &str) {
-    let page = s.browser.index.artist(name);
     ui.set_show_queue(false);
     ui.set_artist_view(true);
     ui.set_album_title(name.into());
+    if s.browser.index_version < s.browser.first_valid_index_version {
+        ui.set_album_artist("Updating library…".into());
+        ui.set_artist_rows(ModelRc::default());
+        s.browser.detail_rows.clear();
+        return;
+    }
+    let page = s.browser.index.artist(name);
     ui.set_album_artist(
         format!(
             "{} albums · {} appearances",
@@ -413,13 +557,7 @@ fn open(ui: &PlayerWindow, s: &mut State, target: Target) {
     s.browser.detail = Some(target.clone());
     ui.set_detail_y(0.0);
     show_target(ui, s, &target);
-    ui.set_browser_selected(
-        s.browser
-            .rows
-            .iter()
-            .position(|a| matches!(a, Action::Open(t) if t == &target))
-            .map_or(-1, |i| i as i32),
-    );
+    ui.set_browser_selected(s.browser.rows.position(&target).map_or(-1, |i| i as i32));
 }
 fn schedule(s: &mut State) {
     s.browser
@@ -435,10 +573,9 @@ fn schedule(s: &mut State) {
 pub(super) fn set_search_scope(ui: &PlayerWindow, s: &mut State, scope: Option<String>) {
     if s.browser.search_scope != scope {
         s.browser.search_scope = scope;
-        s.browser.index = Arc::default();
         s.browser.first_valid_index_version = s.browser.catalog_version + 1;
         schedule(s);
-        s.browser.results = Results::default();
+        s.browser.results = SearchResults::default();
         s.browser.search_library = Library::default();
         s.browser.pending_open = None;
         s.browser.pending_track = None;
@@ -456,12 +593,11 @@ pub(super) fn set_search_scope(ui: &PlayerWindow, s: &mut State, scope: Option<S
 fn prepare_rebuild(ui: &PlayerWindow, s: &mut State, reset: bool) {
     s.browser.catalog_version += 1;
     if reset {
-        s.browser.index = Arc::default();
         s.browser.first_valid_index_version = s.browser.catalog_version;
         s.browser.pending_open = None;
         s.browser.pending_track = None;
         s.browser.query.clear();
-        s.browser.results = Results::default();
+        s.browser.results = SearchResults::default();
         s.browser.search_library = Library::default();
         s.browser.section = None;
         s.browser.detail = None;
@@ -483,13 +619,15 @@ pub(super) fn request_rebuild(ui: &PlayerWindow, s: &mut State, reset: bool) {
     s.browser
         .index_builder
         .request(s.browser.catalog_version, s.library.clone());
-    if s.browser.index.albums.is_empty() {
+    if s.browser.index.albums.is_empty()
+        || s.browser.index_version < s.browser.first_valid_index_version
+    {
         render_browser(ui, s);
     }
 }
 
 fn apply_index(ui: &PlayerWindow, s: &mut State, revision: u64, index: CatalogIndex) {
-    s.browser.index = Arc::new(index);
+    let previous = std::mem::replace(&mut s.browser.index, Arc::new(index));
     s.browser.index_version = revision;
     let due = s.browser.due;
     schedule(s);
@@ -500,6 +638,7 @@ fn apply_index(ui: &PlayerWindow, s: &mut State, revision: u64, index: CatalogIn
         render_artist(ui, s, &name);
     }
     render_browser(ui, s);
+    s.browser.index_builder.release(previous);
 }
 
 #[cfg(test)]
@@ -514,11 +653,12 @@ pub(super) fn rebuild(ui: &PlayerWindow, s: &mut State, reset: bool) {
 }
 
 pub(super) fn poll(ui: &PlayerWindow, s: &mut State) {
-    if let Some((revision, index)) = s.browser.index_builder.poll()
-        && revision >= s.browser.first_valid_index_version
-        && revision > s.browser.index_version
-    {
-        apply_index(ui, s, revision, index);
+    if let Some((revision, index)) = s.browser.index_builder.poll() {
+        if revision >= s.browser.first_valid_index_version && revision > s.browser.index_version {
+            apply_index(ui, s, revision, index);
+        } else {
+            s.browser.index_builder.release(Arc::new(index));
+        }
     }
     if ui.get_home() || ui.get_settings() || ui.get_lists_open() {
         s.browser.pending_open = None;
@@ -600,14 +740,14 @@ pub(super) fn poll(ui: &PlayerWindow, s: &mut State) {
                     awaiting_server,
                 } => {
                     s.browser.searching = awaiting_server;
-                    s.browser.results = results;
+                    s.browser.results = results.into();
                     s.browser.search_library = Library::default();
                 }
                 SearchUpdate::Online(result) => {
                     s.browser.searching = false;
                     match result {
                         Ok(Some((tracks, library))) => {
-                            s.browser.results.tracks = tracks;
+                            s.browser.results.tracks = Arc::new(tracks);
                             s.browser.search_library = library;
                         }
                         Ok(None) => {}
@@ -667,18 +807,25 @@ fn context_tracks(s: &State, detail: bool, index: usize) -> Vec<Track> {
                 .map(move |track| ((key(&album.id), key(&track.id)), track))
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    let rows = if detail {
-        &s.browser.detail_rows
+    let end = if detail {
+        s.browser.detail_rows.len()
     } else {
-        &s.browser.rows
+        s.browser.rows.len()
     };
-    rows.iter()
-        .skip(index)
-        .filter_map(|action| match action {
-            Action::Open(Target::Track { album, track }) => {
-                tracks.get(&(key(album), key(track))).map(|t| (*t).clone())
-            }
-            _ => None,
+    (index..end)
+        .filter_map(|index| {
+            let target = if detail {
+                match s.browser.detail_rows.get(index)? {
+                    Action::Open(target) => Some(target),
+                    _ => None,
+                }
+            } else {
+                s.browser.rows.target(index)
+            };
+            let Target::Track { album, track } = target? else {
+                return None;
+            };
+            tracks.get(&(key(album), key(track))).map(|t| (*t).clone())
         })
         .collect()
 }
@@ -690,14 +837,15 @@ pub(super) fn enqueue_track(ui: &PlayerWindow, s: &mut State, track: Track) {
     s.playback.enqueue(track);
     ui.set_status("Added to up next".into());
 }
-fn action(ui: &PlayerWindow, s: &mut State, detail: bool, i: i32, verb: i32) {
-    let action = if detail {
-        &s.browser.detail_rows
+fn row_action(s: &State, detail: bool, index: usize) -> Option<Action> {
+    if detail {
+        s.browser.detail_rows.get(index).cloned()
     } else {
-        &s.browser.rows
+        s.browser.rows.action(index)
     }
-    .get(i as usize)
-    .cloned();
+}
+fn action(ui: &PlayerWindow, s: &mut State, detail: bool, i: i32, verb: i32) {
+    let action = row_action(s, detail, i as usize);
     match action {
         Some(Action::Open(target)) => match verb {
             3 if matches!(target, Target::Track { .. }) && ui.get_tap_to_play() => {
@@ -772,7 +920,7 @@ pub(super) fn wire(ui: &PlayerWindow, state: &Rc<RefCell<State>>) {
             s.browser.pending_open = None;
             s.browser.query = ui.get_search_text().to_string();
             s.browser.section = None;
-            s.browser.results = Results::default();
+            s.browser.results = SearchResults::default();
             s.browser.search_library = Library::default();
             s.browser.selected_result = None;
             // A cleared/edited query must not be resurrected by an older navigation entry.
@@ -903,7 +1051,7 @@ mod tests {
     fn results(ui: &PlayerWindow, s: &mut State, query: &str) {
         s.browser.query = query.into();
         ui.set_search_text(query.into());
-        s.browser.results = s.browser.index.search(query);
+        s.browser.results = s.browser.index.search(query).into();
         render_browser(ui, s);
     }
     #[test]
@@ -1347,7 +1495,7 @@ mod tests {
         results(&ui, &mut state.borrow_mut(), "movement");
         {
             let mut s = state.borrow_mut();
-            s.browser.detail_rows = s.browser.rows.clone();
+            s.browser.detail_rows = s.browser.rows.iter().collect();
         }
         let i = state
             .borrow()
@@ -1406,13 +1554,18 @@ mod tests {
         };
         {
             let mut s = state.borrow_mut();
-            s.browser.rows = vec![
-                Action::Open(targets[0].clone()),
-                Action::None,
-                Action::Open(targets[1].clone()),
-                Action::More(2),
-                Action::Open(targets[2].clone()),
-            ];
+            s.browser.rows = Rc::new(BrowserRows(
+                [
+                    Action::Open(targets[0].clone()),
+                    Action::None,
+                    Action::Open(targets[1].clone()),
+                    Action::More(2),
+                    Action::Open(targets[2].clone()),
+                ]
+                .into_iter()
+                .map(|action| RowGroup::Label(BrowserRow::default(), action))
+                .collect(),
+            ));
             s.browser.detail_rows = vec![
                 Action::Open(targets[2].clone()),
                 Action::Open(targets[0].clone()),
@@ -1556,6 +1709,72 @@ mod tests {
         assert!(
             count > 0 && count < 100,
             "instantiated {count} scrolled rows"
+        );
+
+        // A refresh arriving while Show all is open keeps the scroll position.
+        // A subsequent edit can search the refreshed data while another index builds.
+        let mut refreshed = state.borrow().library.as_ref().clone();
+        refreshed.albums.last_mut().unwrap().tracks[0].title = "Refresh needle".into();
+        let refreshed = Arc::new(refreshed);
+        let queue_refresh = || {
+            let mut s = state.borrow_mut();
+            s.library = refreshed.clone();
+            request_rebuild(&ui, &mut s, false);
+            s.browser.catalog_version
+        };
+        let start = Instant::now();
+        let revision = queue_refresh();
+        let mut slowest_scroll_tick = Duration::ZERO;
+        let mut scroll = -50_000.0;
+        loop {
+            assert!(start.elapsed() < Duration::from_secs(10));
+            let tick = Instant::now();
+            scroll -= 10.0;
+            ui.set_browser_y(scroll);
+            poll(&ui, &mut state.borrow_mut());
+            slint::platform::update_timers_and_animations();
+            slowest_scroll_tick = slowest_scroll_tick.max(tick.elapsed());
+            let s = state.borrow();
+            if s.browser.index_version == revision
+                && s.browser.due.is_none()
+                && !s.browser.searching
+            {
+                assert_eq!(s.browser.results.tracks.len(), 99_999);
+                break;
+            }
+            drop(s);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(ui.get_browser_y(), scroll);
+        assert!(ui.get_section_open());
+        let refresh_elapsed = start.elapsed();
+
+        queue_refresh();
+        let typed = Instant::now();
+        for query in ["Refresh", "Refresh nee", "Refresh needle"] {
+            ui.set_search_text(query.into());
+            ui.invoke_search_changed();
+            poll(&ui, &mut state.borrow_mut());
+        }
+        let typing_elapsed = typed.elapsed();
+        loop {
+            assert!(typed.elapsed() < Duration::from_secs(10));
+            poll(&ui, &mut state.borrow_mut());
+            let s = state.borrow();
+            if s.browser.index_version == s.browser.catalog_version
+                && s.browser.due.is_none()
+                && !s.browser.searching
+            {
+                assert_eq!(s.browser.results.tracks.len(), 1);
+                assert_eq!(s.browser.results.tracks[0].title, "Refresh needle");
+                break;
+            }
+            drop(s);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        eprintln!(
+            "100,000-track refresh {refresh_elapsed:?}, slowest scrolling UI tick {slowest_scroll_tick:?}, three edits {typing_elapsed:?}, final search {:?}",
+            typed.elapsed()
         );
         drop(state);
         let _ = std::fs::remove_file(path);
