@@ -108,6 +108,7 @@ export component PlayerWindow inherits Window {
     in property <string> elapsed: "0:00";
     in property <string> duration: "0:00";
     in property <bool> playing;
+    in property <bool> has-current-track;
     in-out property <float> progress;
     out property <bool> scrubbing: playhead.scrubbing;
     in property <float> level;
@@ -127,6 +128,7 @@ export component PlayerWindow inherits Window {
     in-out property <length> track-y;
     in-out property <string> search-text;
     in-out property <bool> search-editing;
+    private property <bool> form-editing;
     in-out property <bool> focus-search;
     callback search-changed();
     callback focus-search-requested();
@@ -180,8 +182,16 @@ export component PlayerWindow inherits Window {
     out property <bool> tap-to-play: root.touch-input || !root.wide;
     in property <bool> short: false;
     changed short => { if root.short { root.search-editing = false; } }
-    changed settings => { if root.settings { root.search-editing = false; root.lists-open = false; root.home = false; } }
-    changed lists-open => { if root.lists-open { root.search-editing = false; root.settings = false; root.home = false; } }
+    changed settings => {
+        if root.settings { root.search-editing = false; root.lists-open = false; root.home = false; }
+        else { root.form-editing = false; }
+    }
+    changed lists-open => {
+        if root.lists-open { root.search-editing = false; root.settings = false; root.home = false; }
+        else { root.form-editing = false; }
+    }
+    changed settings-tab => { root.form-editing = false; }
+    changed collector-playback-format => { root.form-editing = false; }
     changed show-library => { if !root.show-library && !root.wide { root.search-editing = false; } }
     changed wide => { if !root.wide && !root.show-library { root.search-editing = false; } }
     in property <bool> can-open-folder: true;
@@ -210,13 +220,26 @@ export component PlayerWindow inherits Window {
       height: max(0px, min(root.height - (root.edge-to-edge ? 0px : root.safe-area-insets.bottom),
           root.virtual-keyboard-size.height > 0px ? root.virtual-keyboard-position.y : root.height)
           - root.safe-area-insets.top);
+      capture-key-pressed(event) => {
+        // An active transport owns Space before the focused button sees it.
+        if ((root.playing || root.has-current-track) && !root.search-editing && !root.form-editing
+            && root.error-message == "" && event.text == " " && !event.modifiers.alt
+            && !event.modifiers.control && !event.modifiers.meta && !event.modifiers.shift) {
+            if !event.repeat { root.toggle-play(); }
+            return accept;
+        }
+        return reject;
+      }
       key-pressed(event) => {
         if ((event.modifiers.control || event.modifiers.meta) && (event.text == "f" || event.text == "F")) {
             root.focus-search-requested(); return accept;
         }
         if (root.search-editing) { return reject; }
         if (!root.settings && !root.lists-open && !event.modifiers.alt && !event.modifiers.control && !event.modifiers.meta) {
-            if (event.text == " ") { root.toggle-play(); return accept; }
+            if (event.text == " " && !event.modifiers.shift) {
+                if !event.repeat { root.toggle-play(); }
+                return accept;
+            }
             if (event.text == Key.LeftArrow) { root.previous(); return accept; }
             if (event.text == Key.RightArrow) { root.next(); return accept; }
         }
@@ -332,7 +355,8 @@ export component PlayerWindow inherits Window {
                     IconButton { label: "Remove list downloads"; icon: @image-url("icons/remove-download.svg"); enabled: root.list-index > 0; clicked => { root.download-action(3); } }
                 }
                 HorizontalLayout {
-                    LineEdit { text <=> root.list-name; placeholder-text: "List name"; accessible-label: "List name"; }
+                    LineEdit { text <=> root.list-name; placeholder-text: "List name"; accessible-label: "List name";
+                        changed has-focus => { root.form-editing = self.has-focus; } }
                     IconButton { label: "Create"; icon: @image-url("icons/plus.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable; clicked => { root.list-command(0); } }
                     IconButton { label: "Rename"; icon: @image-url("icons/edit.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-index > 0; clicked => { root.list-command(1); } }
                     IconButton { label: "Delete"; icon: @image-url("icons/trash.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-index > 0; clicked => { root.list-command(2); } }
@@ -396,6 +420,7 @@ export component PlayerWindow inherits Window {
                             toggled => { root.preferences-changed(); } }
                         Text { text: "AcoustID application key for local album matching"; color: Theme.text; wrap: word-wrap; }
                         LineEdit { text <=> root.acoustid-api-key; accessible-label: "AcoustID application key";
+                            changed has-focus => { root.form-editing = self.has-focus; }
                             edited => { root.preferences-changed(); } }
                         Text { text: "Matching is explicit: it sends audio fingerprints and durations, never audio files. Register an application key at acoustid.org."; color: Theme.muted; wrap: word-wrap; }
                         HorizontalLayout {
@@ -449,12 +474,14 @@ export component PlayerWindow inherits Window {
                         Text { text: "Servers"; color: Theme.text; font-weight: 600; }
                         ComboBox { model: root.servers; current-index <=> root.server-index; accessible-label: "Server to manage"; enabled: root.servers.length > 0; selected(_) => { root.server-changed(self.current-index); } }
                         if root.device-library-available: Button { text: "Open Device Music Library"; clicked => { root.open-device-library(); } }
-                        LineEdit { text <=> root.server-url; placeholder-text: "https://collector.example:8443"; accessible-label: "Collector server URL"; }
+                        LineEdit { text <=> root.server-url; placeholder-text: "https://collector.example:8443"; accessible-label: "Collector server URL";
+                            changed has-focus => { root.form-editing = self.has-focus; } }
                         HorizontalLayout {
                             Button { text: "Connect / Reconnect"; enabled: !root.collector-busy; clicked => { root.connect-server(); } }
                             Button { text: "Cancel"; enabled: root.collector-busy; clicked => { root.cancel-connect(); } }
                         }
-                        LineEdit { text <=> root.certificate-path; placeholder-text: "Optional owner-provided PEM or pairing JSON path"; accessible-label: "Owner-provided trust file"; }
+                        LineEdit { text <=> root.certificate-path; placeholder-text: "Optional owner-provided PEM or pairing JSON path"; accessible-label: "Owner-provided trust file";
+                            changed has-focus => { root.form-editing = self.has-focus; } }
                         Text { text: root.connection-status; color: Theme.text; wrap: word-wrap; }
                         Button { text: root.removing-connection ? "Removing connection…" : "Remove connection"; enabled: root.collector-active && !root.collector-busy && !root.removing-connection; clicked => { root.remove-server(); } }
                         Text { text: "Collector playback format"; color: Theme.text; font-weight: 600; }
@@ -468,6 +495,7 @@ export component PlayerWindow inherits Window {
                             text <=> root.collector-opus-bitrate;
                             placeholder-text: "6–256 kbps";
                             accessible-label: "Opus bitrate in kbps";
+                            changed has-focus => { root.form-editing = self.has-focus; }
                             edited(_) => { root.collector-playback-status = ""; }
                             accepted => { root.save-collector-playback(); }
                         }
@@ -482,7 +510,8 @@ export component PlayerWindow inherits Window {
                         Text { text: "Downloads"; color: Theme.text; font-weight: 600; }
                         Text { text: "Audio storage limit (GiB)"; color: Theme.muted; }
                         HorizontalLayout {
-                            LineEdit { text <=> root.download-budget; placeholder-text: "Audio budget (GiB)"; accessible-label: "Download budget in GiB"; }
+                            LineEdit { text <=> root.download-budget; placeholder-text: "Audio budget (GiB)"; accessible-label: "Download budget in GiB";
+                                changed has-focus => { root.form-editing = self.has-focus; } }
                             Button { text: "Set GiB limit"; clicked => { root.save-budget(); } }
                         }
                         HorizontalLayout {

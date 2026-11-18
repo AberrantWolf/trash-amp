@@ -745,6 +745,7 @@ fn render_playback(ui: &PlayerWindow, state: &State, last_notice: &mut u64) {
             .map_or(-1, |i| i as i32),
     );
     ui.set_playing(snapshot.playing);
+    ui.set_has_current_track(snapshot.current.is_some());
     ui.set_level(snapshot.level);
     if let Some(track) = &snapshot.current {
         ui.set_now_title(track.title.clone().into());
@@ -2530,6 +2531,72 @@ mod tests {
         assert_eq!(start.get(), 1);
         assert_eq!(ui.get_list_entry(), 1);
     }
+    #[test]
+    fn space_controls_active_playback_after_clicking_play_album() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::platform::{Key, PointerEventButton, WindowEvent};
+        use std::cell::Cell;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(980., 680.));
+        ui.set_tracks(ModelRc::new(VecModel::from(vec![
+            super::TrackRow::default(),
+        ])));
+        let album_plays = Rc::new(Cell::new(0));
+        let plays = album_plays.clone();
+        ui.on_play_album(move || plays.set(plays.get() + 1));
+        let toggles = Rc::new(Cell::new(0));
+        let count = toggles.clone();
+        ui.on_toggle_play(move || count.set(count.get() + 1));
+        ui.show().unwrap();
+
+        let play_album = ElementHandle::find_by_accessible_label(&ui, "Play album")
+            .next()
+            .unwrap();
+        play_album.mock_single_click(PointerEventButton::Left);
+        assert_eq!(album_plays.get(), 1);
+        ui.set_playing(true);
+        ui.set_has_current_track(true);
+        let press = |text: SharedString| {
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text });
+        };
+        press(" ".into());
+        assert_eq!(album_plays.get(), 1);
+        assert_eq!(toggles.get(), 1);
+        ui.set_playing(false);
+        ui.window()
+            .dispatch_event(WindowEvent::KeyPressRepeated { text: " ".into() });
+        assert_eq!(toggles.get(), 1);
+        press(" ".into());
+        assert_eq!(toggles.get(), 2);
+        press(Key::Return.into());
+        assert_eq!(album_plays.get(), 2);
+
+        let search = ElementHandle::find_by_accessible_label(&ui, "Search library")
+            .next()
+            .unwrap();
+        search.mock_single_click(PointerEventButton::Left);
+        press("a".into());
+        press(" ".into());
+        assert_eq!(ui.get_search_text(), "a ");
+        assert_eq!(toggles.get(), 2);
+
+        ui.set_settings(true);
+        ui.set_settings_tab(1);
+        let trust = ElementHandle::find_by_accessible_label(&ui, "Owner-provided trust file")
+            .next()
+            .unwrap();
+        trust.mock_single_click(PointerEventButton::Left);
+        press("a".into());
+        press(" ".into());
+        assert_eq!(ui.get_certificate_path(), "a ");
+        assert_eq!(toggles.get(), 2);
+    }
+
     #[test]
     fn keyboard_transport_and_sort_preserve_album_selection() {
         use slint::platform::WindowEvent;

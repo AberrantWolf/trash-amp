@@ -107,7 +107,7 @@ only for this session.
 - Artist pages with primary albums and compact album-grouped guest appearances; Back restores search and browsing positions.
 - Desktop single-click selection, double-click/hover-button playback, and a current-track marker.
 - Mobile single-tap playback from a track through the remaining album, playlist, or visible track results. Playable tracks have no availability label; exceptions use smaller, muted text.
-- Space to play/pause and Left/Right to go previous/next when browsing. Focused controls retain their native keyboard behavior; Enter plays a selected track. Previous restarts after three seconds.
+- Space toggles an active or paused track even when a button has focus. Text fields still accept spaces, and Enter activates a focused button or plays a selected track. Left/Right go previous/next when browsing. Previous restarts after three seconds.
 - OS media keys and Now Playing metadata through Souvlaki (macOS integrated; Windows/Linux still need platform validation).
 - Audio read-ahead defaults to 15 seconds. Playback starts as decoded samples become available while read-ahead continues; it does not wait for the buffer to fill. Settings → General offers a saved 3–60 second buffer; restart the app to apply changes. Larger buffers help cover cellular stalls but use more memory. iOS pauses on output disconnection and audio interruptions, keeping the transport button in sync when returning to the app.
 - Audio-output recovery preserves the queue and playback position, pauses on device loss or a default-output change, and reconnects in the background. Press Play to resume; an explicit Play request while disconnected is retained.
