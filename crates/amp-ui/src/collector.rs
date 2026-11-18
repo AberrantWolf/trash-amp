@@ -1989,6 +1989,10 @@ mod tests {
         let mut cached = list.clone();
         cached.list.id = cached_id;
         cached.list.name = "Cached list".into();
+        cached.list.can_edit = true;
+        let mut refreshed = list.clone();
+        refreshed.list.name = "Refreshed earlier list".into();
+        refreshed.list.revision = ids::Revision(2);
         let snapshot:Snapshot=serde_json::from_value(serde_json::json!({"library":library,"collections":[],"lists":[list,cached],"artwork":{},"album_collections":{},"updated":0})).unwrap();
         {
             let mut view = controller.view.borrow_mut();
@@ -2029,7 +2033,7 @@ mod tests {
         assert!(ui.get_status().contains("current list failure"));
 
         // A different, already cached list does not start a replacement request.
-        // The earlier request must still be invalidated, including its errors.
+        // The earlier request can succeed even though it no longer owns the picker.
         controller.list_request.cancel();
         let pending = controller.list_request.begin((v, key, list_id)).unwrap();
         ui.set_collector_list_loading(true);
@@ -2043,7 +2047,7 @@ mod tests {
                 key,
                 list_id,
                 pending.serial,
-                Err(anyhow::anyhow!("no longer selected")),
+                Ok(Box::new(refreshed)),
             ))
             .unwrap();
         controller.poll();
@@ -2055,6 +2059,23 @@ mod tests {
             pending.is_cancelled(),
             "A cached selection must cancel the previous in-flight load"
         );
+        controller.view.borrow_mut().online = true;
+        let (target, edit) = playlist_request(
+            &ui,
+            &state.borrow(),
+            &controller.view.borrow(),
+            ListAction::Delete,
+        )
+        .unwrap();
+        assert_eq!(target, key);
+        let PlaylistAction::Update {
+            list,
+            change: PlaylistChange::Edit(api::CollectionListChange::Delete),
+        } = edit
+        else {
+            panic!("Expected a delete for the cached selection");
+        };
+        assert_eq!(list.id, cached_id);
         drop(controller);
         drop(state);
         drop(services);
