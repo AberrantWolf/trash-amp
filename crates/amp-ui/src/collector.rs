@@ -4,8 +4,8 @@ use amp_app::catalog::Generation;
 #[cfg(test)]
 use amp_collector::Snapshot;
 use amp_collector::{
-    Adapter, CatalogView, ConnectionKey, ConnectionState, Download, DownloadStatus, ListCommand,
-    PlaybackFormat, SavedConnection, SourceView, api, ids,
+    Adapter, AppendScope, CatalogView, ConnectionKey, ConnectionState, Download, DownloadStatus,
+    PlaybackFormat, PlaylistAction, PlaylistChange, SavedConnection, SourceView, api, ids,
 };
 use anyhow::Context;
 use std::path::Path;
@@ -40,8 +40,7 @@ enum Event {
     Connected(u64, anyhow::Result<Box<Connected>>),
     Approval(u64, String),
     OpenFailed(u64, String),
-    Message(String),
-    Mutation(u64, ConnectionKey, anyhow::Result<()>),
+    Mutation(u64, ConnectionKey, bool, anyhow::Result<()>),
     Downloads(anyhow::Result<Vec<Download>>),
     DownloadMessage(String),
     PlaybackFormatSaved(anyhow::Result<()>),
@@ -281,6 +280,92 @@ fn render_list(ui: &PlayerWindow, view: &View, downloads: &[Download]) {
         paths,
     ));
 }
+fn playlist_request(
+    ui: &PlayerWindow,
+    state: &State,
+    view: &View,
+    action: ListAction,
+) -> anyhow::Result<(ConnectionKey, PlaylistAction)> {
+    let key = view.selected.context("Select server")?;
+    if action == ListAction::Discard {
+        return Ok((key, PlaylistAction::Discard));
+    }
+    anyhow::ensure!(view.online, "List editing requires a connection");
+    if action == ListAction::Retry {
+        return Ok((key, PlaylistAction::Retry));
+    }
+    if action == ListAction::Create {
+        let snapshot = view.snapshot.as_ref().context("Refresh server")?;
+        let collection = snapshot
+            .collections
+            .iter()
+            .find(|collection| {
+                collection.can_edit_playlists
+                    && view.collection.is_none_or(|id| collection.id == id)
+            })
+            .context("Select an editable collection")?;
+        return Ok((
+            key,
+            PlaylistAction::Create {
+                collection: collection.id,
+                name: ui.get_list_name().to_string(),
+            },
+        ));
+    }
+    let list = view.selected_list().context("Select list")?;
+    let change = match action {
+        ListAction::Rename => PlaylistChange::Edit(api::CollectionListChange::Rename {
+            name: ui.get_list_name().to_string(),
+        }),
+        ListAction::Delete => PlaylistChange::Edit(api::CollectionListChange::Delete),
+        ListAction::AppendAlbum | ListAction::AppendDisc | ListAction::AppendTrack => {
+            let album = state.selected.context("Select album")?;
+            let (scope, index) = match action {
+                ListAction::AppendTrack => (
+                    AppendScope::Track,
+                    usize::try_from(ui.get_selected_track()).context("Select track")?,
+                ),
+                ListAction::AppendDisc => (AppendScope::Disc, 0),
+                _ => (AppendScope::Album, 0),
+            };
+            let track = displayed_tracks(state, album)
+                .into_iter()
+                .nth(index)
+                .context("Select track")?;
+            PlaylistChange::Append {
+                track: Box::new(track),
+                scope,
+            }
+        }
+        ListAction::RemoveEntry | ListAction::MoveUp | ListAction::MoveDown => {
+            let i = usize::try_from(ui.get_list_entry()).context("Select entry")?;
+            let entries = &list.entries.items;
+            let entry = entries.get(i).context("Select entry")?;
+            PlaylistChange::Edit(if action == ListAction::RemoveEntry {
+                api::CollectionListChange::Remove { entry_id: entry.id }
+            } else {
+                let before = if action == ListAction::MoveUp {
+                    entries.get(i.checked_sub(1).context("Already first")?)
+                } else {
+                    entries.get(i + 2)
+                };
+                api::CollectionListChange::Move {
+                    entry_id: entry.id,
+                    before: before.map(|row| row.id),
+                }
+            })
+        }
+        ListAction::Create | ListAction::Retry | ListAction::Discard => unreachable!(),
+    };
+    Ok((
+        key,
+        PlaylistAction::Update {
+            list: list.list.clone(),
+            change,
+        },
+    ))
+}
+
 fn install_downloads(ui: &PlayerWindow, inventory: &mut Vec<Download>, mut entries: Vec<Download>) {
     entries.sort_by(|a, b| {
         (&a.track.title, &a.track.artist, &a.id).cmp(&(&b.track.title, &b.track.artist, &b.id))
@@ -658,163 +743,35 @@ impl Controller {
             let tx = tx.clone();
             let g = generation.clone();
             let catalog = catalog.clone();
-            ui.on_list_command(move |verb| {
+            ui.on_list_command(move |action| {
                 let Some(ui) = weak.upgrade() else { return };
-                if verb == 8 || verb == 9 {
-                    if let Some(key) = view.borrow().selected {
-                        if verb == 9 {
-                            let a = a.clone();
-                            let tx = tx.clone();
-                            catalog.persist(Box::new(move || {
-                                let result = a.discard_commands(key);
-                                if let Err(error) = &result {
-                                    let _ = tx.send(Event::Message(error.to_string()));
-                                }
-                                result
-                            }));
-                        } else {
-                            let pending = a.pending_commands(key).unwrap_or_default();
-                            let a = a.clone();
-                            let tx = tx.clone();
-                            let v = g.current();
-                            view.borrow_mut().operation =
-                                Some((v, catalog.snapshot().source_load_revision));
-                            let catalog = catalog.clone();
-                            std::thread::spawn(move || {
-                                let result = (|| -> anyhow::Result<()> {
-                                    let rt = runtime()?;
-                                    for c in pending {
-                                        rt.block_on(a.submit(c))?;
-                                    }
-                                    Ok(())
-                                })();
-                                let refresh_after = result.is_ok();
-                                let _ = tx.send(Event::Mutation(v, key, result));
-                                if refresh_after {
-                                    open_source(&catalog, v, key);
-                                }
-                            });
-                        }
-                    }
+                if ui.get_collector_busy() {
                     return;
                 }
-                let result = (|| -> anyhow::Result<_> {
-                    let view = view.borrow();
-                    if !view.online {
-                        anyhow::bail!("List editing requires a connection")
-                    };
-                    let key = view.selected.context("Select server")?;
-                    if !a.pending_commands(key)?.is_empty() {
-                        anyhow::bail!(
-                            "Retry or discard unresolved changes before making another change"
-                        )
-                    };
-                    let snapshot = view.snapshot.as_ref().context("Refresh server")?;
-                    let list = view.selected_list();
-                    let collection = if verb == 0 {
-                        view.collection
-                            .or_else(|| {
-                                snapshot
-                                    .collections
-                                    .iter()
-                                    .find(|c| c.can_edit_playlists)
-                                    .map(|c| c.id)
-                            })
-                            .context("Select an editable collection")?
-                    } else {
-                        list.context("Select list")?.list.collection_id
-                    };
-                    let change = match verb {
-                        0 => None,
-                        1 => Some(api::CollectionListChange::Rename {
-                            name: ui.get_list_name().to_string(),
-                        }),
-                        2 => Some(api::CollectionListChange::Delete),
-                        3 | 4 | 10 => {
-                            let s = state.borrow();
-                            s.selected.context("Select album")?;
-                            let tracks = displayed_tracks(&s, s.selected.unwrap());
-                            let track = if verb == 4 {
-                                tracks.get(ui.get_selected_track() as usize)
-                            } else {
-                                tracks.first()
-                            }
-                            .context("Select track")?;
-                            let amp_core::MediaAccess::Managed { item, .. } = &track.access else {
-                                anyhow::bail!("Choose a server album")
-                            };
-                            let r: amp_collector::RemoteTrack = serde_json::from_str(item)?;
-                            if r.collection != collection {
-                                anyhow::bail!("List belongs to another collection")
-                            };
-                            Some(api::CollectionListChange::Append {
-                                item_id: r.item,
-                                source_representation_id: (verb != 3).then_some(r.source),
-                                track_position: (verb == 4).then_some(r.position),
-                            })
-                        }
-                        5..=7 => {
-                            let list = list.context("Select list")?;
-                            let i = ui.get_list_entry() as usize;
-                            let entry = list.entries.items.get(i).context("Select entry")?;
-                            Some(if verb == 5 {
-                                api::CollectionListChange::Remove { entry_id: entry.id }
-                            } else {
-                                let before = if verb == 6 {
-                                    list.entries
-                                        .items
-                                        .get(i.checked_sub(1).context("Already first")?)
-                                        .map(|e| e.id)
-                                } else {
-                                    list.entries.items.get(i + 2).map(|e| e.id)
-                                };
-                                api::CollectionListChange::Move {
-                                    entry_id: entry.id,
-                                    before,
-                                }
-                            })
-                        }
-                        _ => anyhow::bail!("Unknown list command"),
-                    };
-                    Ok(ListCommand {
-                        key,
-                        collection,
-                        list: list.map(|l| l.list.id),
-                        create: (verb == 0).then(|| api::CreateCollectionList {
-                            kind: None,
-                            name: ui.get_list_name().to_string(),
-                        }),
-                        update: change.map(|change| api::UpdateCollectionList {
-                            expected_revision: list.expect("existing list").list.revision,
-                            change,
-                        }),
-                        receipt: uuid::Uuid::new_v4().to_string(),
-                    })
-                })();
-                match result {
-                    Err(e) => ui.set_connection_status(e.to_string().into()),
-                    Ok(command) => {
-                        ui.set_collector_busy(true);
-                        let a = a.clone();
-                        let tx = tx.clone();
-                        let key = command.key;
-                        let v = g.current();
-                        view.borrow_mut().operation =
-                            Some((v, catalog.snapshot().source_load_revision));
-                        let catalog = catalog.clone();
-                        std::thread::spawn(move || {
-                            let result = (|| -> anyhow::Result<()> {
-                                runtime()?.block_on(a.submit(command))?;
-                                Ok(())
-                            })();
-                            let refresh_after = result.is_ok();
-                            let _ = tx.send(Event::Mutation(v, key, result));
-                            if refresh_after {
-                                open_source(&catalog, v, key);
-                            }
-                        });
+                let request = playlist_request(&ui, &state.borrow(), &view.borrow(), action);
+                let (key, request) = match request {
+                    Ok(request) => request,
+                    Err(error) => {
+                        ui.set_connection_status(error.to_string().into());
+                        return;
                     }
-                }
+                };
+                let refresh = !matches!(request, PlaylistAction::Discard);
+                let v = g.current();
+                view.borrow_mut().operation = Some((v, catalog.snapshot().source_load_revision));
+                ui.set_collector_busy(true);
+                let a = a.clone();
+                let tx = tx.clone();
+                let catalog = catalog.clone();
+                std::thread::spawn(move || {
+                    let result =
+                        runtime().and_then(|rt| rt.block_on(a.apply_playlist_action(key, request)));
+                    let refresh_after = refresh && result.is_ok();
+                    let _ = tx.send(Event::Mutation(v, key, refresh, result));
+                    if refresh_after {
+                        open_source(&catalog, v, key);
+                    }
+                });
             });
         }
         {
@@ -1228,9 +1185,22 @@ impl Controller {
                         connection_error(&ui, format!("Could not connect to Collector: {e:#}"))
                     }
                 },
-                Event::Mutation(v, _key, Err(error)) if v == current => {
-                    self.view.borrow_mut().operation = None;
-                    ui.set_connection_status(format!("List change unresolved: {error}. Refresh and retry the original command.").into());
+                Event::Mutation(v, key, refresh, result)
+                    if v == current && self.view.borrow().selected == Some(key) =>
+                {
+                    match result {
+                        Err(error) => {
+                            self.view.borrow_mut().operation = None;
+                            ui.set_connection_status(
+                                format!("Could not update playlist. {error}").into(),
+                            );
+                        }
+                        Ok(()) if !refresh => {
+                            self.view.borrow_mut().operation = None;
+                            ui.set_connection_status("Unresolved list changes cleared".into());
+                        }
+                        Ok(()) => {}
+                    }
                 }
                 Event::Removed(key, result) => {
                     ui.set_removing_connection(false);
@@ -1257,7 +1227,6 @@ impl Controller {
                         ),
                     }
                 }
-                Event::Message(message) => ui.set_status(message.into()),
                 Event::DownloadMessage(message) => {
                     ui.set_download_status(message.clone().into());
                     ui.set_status(message.into());

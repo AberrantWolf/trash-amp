@@ -15,6 +15,7 @@ import { ConnectionIndicator, ConnectionKind } from "connection-indicator.slint"
 export { ConnectionKind }
 export struct AlbumMatchRow { artwork: image, title:string, artist:string, detail:string, tracks:string, release:string, applicable:bool }
 export struct DownloadRow { id: string, title: string, detail: string, pending: bool, complete: bool }
+export enum ListAction { create, rename, delete, append-album, append-track, remove-entry, move-up, move-down, retry, discard, append-disc }
 enum HomeAction { browse, open-folder, refresh-folder, refresh-device, refresh-server, add-server }
 export component PlayerWindow inherits Window {
     in-out property <string> error-title: "Connection failed";
@@ -80,7 +81,7 @@ export component PlayerWindow inherits Window {
     in property <bool> album-ambiguous;
     callback album-source-selected(int);
     callback connect-server(); callback cancel-connect(); callback refresh-server(); callback remove-server();
-    callback list-command(int); callback play-list(bool); callback play-list-from(int); callback download-action(int); callback save-budget();
+    callback list-command(ListAction); callback play-list(bool); callback play-list-from(int); callback download-action(int); callback save-budget();
     title: "Trash Amp";
     in property <string> application-version;
     preferred-width: 980px; preferred-height: 680px; min-width: 330px; min-height: 230px; max-width: 10000px; max-height: 10000px;
@@ -387,21 +388,21 @@ export component PlayerWindow inherits Window {
                 HorizontalLayout {
                     LineEdit { text <=> root.list-name; placeholder-text: "List name"; accessible-label: "List name";
                         changed has-focus => { root.form-editing = self.has-focus; } }
-                    IconButton { label: "Create"; icon: @image-url("icons/plus.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable; clicked => { root.list-command(0); } }
-                    IconButton { label: "Rename"; icon: @image-url("icons/edit.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-index > 0; clicked => { root.list-command(1); } }
-                    IconButton { label: "Delete"; icon: @image-url("icons/trash.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-index > 0; clicked => { root.list-command(2); } }
+                    IconButton { label: "Create"; icon: @image-url("icons/plus.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable; clicked => { root.list-command(ListAction.create); } }
+                    IconButton { label: "Rename"; icon: @image-url("icons/edit.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-index > 0; clicked => { root.list-command(ListAction.rename); } }
+                    IconButton { label: "Delete"; icon: @image-url("icons/trash.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-index > 0; clicked => { root.list-command(ListAction.delete); } }
                 }
                 HorizontalLayout {
-                    Button { text: "Append album"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.selected-album >= 0; clicked => { root.list-command(3); } }
-                    Button { text: "Append disc"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.selected-album >= 0; clicked => { root.list-command(10); } }
-                    Button { text: "Append track"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.selected-track >= 0; clicked => { root.list-command(4); } }
-                    Button { text: "Remove entry"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-entry >= 0; clicked => { root.list-command(5); } }
-                    IconButton { label: "Move up"; icon: @image-url("icons/up.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-entry > 0; clicked => { root.list-command(6); } }
-                    IconButton { label: "Move down"; icon: @image-url("icons/down.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-entry >= 0; clicked => { root.list-command(7); } }
+                    Button { text: "Append album"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.selected-album >= 0; clicked => { root.list-command(ListAction.append-album); } }
+                    Button { text: "Append disc"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.selected-album >= 0; clicked => { root.list-command(ListAction.append-disc); } }
+                    Button { text: "Append track"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.selected-track >= 0; clicked => { root.list-command(ListAction.append-track); } }
+                    Button { text: "Remove entry"; enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-entry >= 0; clicked => { root.list-command(ListAction.remove-entry); } }
+                    IconButton { label: "Move up"; icon: @image-url("icons/up.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-entry > 0; clicked => { root.list-command(ListAction.move-up); } }
+                    IconButton { label: "Move down"; icon: @image-url("icons/down.svg"); enabled: !root.collector-busy && root.collector-online && root.list-editable && root.list-entry >= 0; clicked => { root.list-command(ListAction.move-down); } }
                 }
                 HorizontalLayout {
-                    Button { text: "Retry original changes"; enabled: !root.collector-album-loading && !root.collector-busy && root.collector-online; clicked => { root.list-command(8); } }
-                    Button { text: "Discard unresolved changes"; clicked => { root.list-command(9); } }
+                    Button { text: "Retry original changes"; enabled: !root.collector-album-loading && !root.collector-busy && root.collector-online; clicked => { root.list-command(ListAction.retry); } }
+                    Button { text: "Discard unresolved changes"; enabled: !root.collector-busy; clicked => { root.list-command(ListAction.discard); } }
                 }
                 if root.collector-list-loading: Text { text: "Loading playlist entries…"; color: Theme.muted; wrap: word-wrap; }
                 ListView {

@@ -1,8 +1,10 @@
 //! Collector transport, local persistence and media access. No UI dependencies.
 mod playback;
+mod playlists;
 mod presentation;
 mod source;
 pub use playback::PlaybackFormat;
+pub use playlists::{AppendScope, PlaylistAction, PlaylistChange};
 pub use presentation::{CatalogView, SourceView};
 pub use source::source_id;
 

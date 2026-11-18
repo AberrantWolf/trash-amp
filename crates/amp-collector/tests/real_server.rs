@@ -781,29 +781,27 @@ async fn two_real_servers_stream_download_edit_and_retain_offline_audio() {
         })
         .await
         .unwrap();
-    let remote: &amp_collector::RemoteTrack =
-        &serde_json::from_str(match &a.library.albums[0].tracks[0].access {
-            amp_core::MediaAccess::Managed { item, .. } => item,
-            _ => panic!(),
-        })
-        .unwrap();
+    let append = |revision| {
+        let mut list = created.clone();
+        list.revision = revision;
+        amp_collector::PlaylistAction::Update {
+            list,
+            change: amp_collector::PlaylistChange::Append {
+                track: Box::new(a.library.albums[0].tracks[0].clone()),
+                scope: amp_collector::AppendScope::Track,
+            },
+        }
+    };
+    assert!(
+        adapter
+            .apply_playlist_action(two, append(created.revision))
+            .await
+            .is_err()
+    );
+    assert!(adapter.pending_commands(two).unwrap().is_empty());
     for revision in [created.revision, Revision(created.revision.0 + 1)] {
         adapter
-            .submit(ListCommand {
-                key: one,
-                collection,
-                list: Some(created.id),
-                create: None,
-                update: Some(api::UpdateCollectionList {
-                    expected_revision: revision,
-                    change: api::CollectionListChange::Append {
-                        item_id: item,
-                        source_representation_id: Some(remote.source),
-                        track_position: Some(1),
-                    },
-                }),
-                receipt: format!("append-{}", revision.0),
-            })
+            .apply_playlist_action(one, append(revision))
             .await
             .unwrap();
     }
