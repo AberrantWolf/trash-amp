@@ -115,9 +115,13 @@ Use the pinned Rust toolchain and a full Xcode installation with iOS SDKs:
 
 ```sh
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim
-cargo check -p trash-amp-ios --target aarch64-apple-ios-sim
+SDKROOT="$(xcrun --sdk iphonesimulator --show-sdk-path)" IPHONEOS_DEPLOYMENT_TARGET=15.0 \
+  cargo check --locked -p trash-amp-ios --target aarch64-apple-ios-sim --all-targets
 ./scripts/bundle-ios.sh --simulator
 ```
+
+The Apple CI workflow runs the simulator-target compile check. Playback, touch
+input and VoiceOver still require native acceptance.
 
 The simulator bundle is written to
 `target/aarch64-apple-ios-sim/debug/Trash Amp.app`. It is signed ad hoc and needs no
@@ -323,5 +327,6 @@ interruption qualification were not repeated for this UI change.
    while locked, disk pressure, credential removal and offline playback.
 5. Qualify touch input, VoiceOver, text sizing, keyboard avoidance, rotation and
    iPad multitasking. Add mobile-specific tests where they exercise behavior.
-6. Establish simulator/device CI, supported OS versions, scene lifecycle validation,
-   signed archives, notices, privacy metadata and distribution assets.
+6. Establish simulator and device runtime validation, supported OS versions,
+   scene lifecycle validation, signed archives, notices, privacy metadata and
+   distribution assets.

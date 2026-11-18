@@ -145,10 +145,31 @@ jobs:
         if: always() && env.REQUIRE_MACOS_NOTARIZATION == 'true'
         run: ./scripts/cleanup-macos-signing.sh
 
+  ios-simulator:
+    name: Check iOS simulator targets
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      IPHONEOS_DEPLOYMENT_TARGET: '15.0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install the pinned Rust toolchain and simulator target
+        run: rustup target add aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: aarch64-apple-ios-sim
+          cache-on-failure: true
+      - name: Install the native build tools
+        run: command -v cmake || brew install cmake
+      - name: Check the iOS app and its test targets
+        run: |
+          export SDKROOT="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+          cargo check --locked -p trash-amp-ios --target aarch64-apple-ios-sim --all-targets
+
   release:
     name: Publish prerelease
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: build
+    needs: [build, ios-simulator]
     runs-on: ubuntu-latest
     permissions:
       contents: write
