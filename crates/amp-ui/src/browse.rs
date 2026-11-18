@@ -67,14 +67,18 @@ impl Entries {
 
 enum RowGroup {
     Entries(Entries, usize),
-    Label(BrowserRow, Action),
+    Label {
+        title: SharedString,
+        kind: i32,
+        action: Action,
+    },
 }
 
 impl RowGroup {
     fn len(&self) -> usize {
         match self {
             Self::Entries(_, count) => *count,
-            Self::Label(..) => 1,
+            Self::Label { .. } => 1,
         }
     }
 }
@@ -84,7 +88,11 @@ struct BrowserRows(Vec<RowGroup>);
 
 impl BrowserRows {
     fn push_label(&mut self, text: String, kind: i32, action: Action) {
-        self.0.push(RowGroup::Label(label(text, kind), action));
+        self.0.push(RowGroup::Label {
+            title: text.into(),
+            kind,
+            action,
+        });
     }
 
     fn push_entries(&mut self, entries: Entries, limit: usize) {
@@ -112,7 +120,7 @@ impl BrowserRows {
         let (group, index) = self.get(index)?;
         Some(match group {
             RowGroup::Entries(entries, _) => Action::Open(entries.entries()[index].target.clone()),
-            RowGroup::Label(_, action) => action.clone(),
+            RowGroup::Label { action, .. } => action.clone(),
         })
     }
 
@@ -120,8 +128,11 @@ impl BrowserRows {
         let (group, index) = self.get(index)?;
         match group {
             RowGroup::Entries(entries, _) => Some(&entries.entries()[index].target),
-            RowGroup::Label(_, Action::Open(target)) => Some(target),
-            RowGroup::Label(..) => None,
+            RowGroup::Label {
+                action: Action::Open(target),
+                ..
+            } => Some(target),
+            RowGroup::Label { .. } => None,
         }
     }
 
@@ -132,8 +143,11 @@ impl BrowserRows {
                 RowGroup::Entries(entries, count) => entries.entries()[..*count]
                     .iter()
                     .position(|entry| entry.target == *target),
-                RowGroup::Label(_, Action::Open(entry)) if entry == target => Some(0),
-                RowGroup::Label(..) => None,
+                RowGroup::Label {
+                    action: Action::Open(entry),
+                    ..
+                } if entry == target => Some(0),
+                RowGroup::Label { .. } => None,
             };
             if let Some(index) = found {
                 return Some(offset + index);
@@ -154,7 +168,14 @@ impl BrowserRows {
                 let entry = &entries.entries()[index];
                 (row(entry, false), artwork_path(&entry.target, artwork))
             }
-            RowGroup::Label(row, _) => (row.clone(), None),
+            RowGroup::Label { title, kind, .. } => (
+                BrowserRow {
+                    title: title.clone(),
+                    kind: *kind,
+                    ..Default::default()
+                },
+                None,
+            ),
         })
     }
 
@@ -698,13 +719,13 @@ pub(super) fn poll(ui: &PlayerWindow, s: &mut State) {
                     catalog_version,
                     update,
                 })
+                .is_ok()
             };
             if cancelled()
-                || send(SearchUpdate::Cached {
+                || !send(SearchUpdate::Cached {
                     results,
                     awaiting_server: cached_tracks.is_some(),
                 })
-                .is_err()
             {
                 return;
             }
@@ -1563,7 +1584,11 @@ mod tests {
                     Action::Open(targets[2].clone()),
                 ]
                 .into_iter()
-                .map(|action| RowGroup::Label(BrowserRow::default(), action))
+                .map(|action| RowGroup::Label {
+                    title: SharedString::default(),
+                    kind: 0,
+                    action,
+                })
                 .collect(),
             ));
             s.browser.detail_rows = vec![
