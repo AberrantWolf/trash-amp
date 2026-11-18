@@ -13,11 +13,21 @@ struct View {
     connections: Vec<SavedConnection>,
     selected: Option<ConnectionKey>,
     snapshot: Option<Snapshot>,
-    list: Option<usize>,
+    list: Option<ids::CollectionListId>,
     collection: Option<ids::CollectionId>,
     online: bool,
     connection: ConnectionState,
     operation: Option<(u64, u64)>,
+}
+impl View {
+    fn selected_list(&self) -> Option<&api::CollectionListView> {
+        let id = self.list?;
+        self.snapshot
+            .as_ref()?
+            .lists
+            .iter()
+            .find(|l| l.list.id == id)
+    }
 }
 struct Connected {
     connections: Vec<SavedConnection>,
@@ -217,28 +227,28 @@ fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, adapter: 
             )
             .collect::<Vec<_>>(),
     )));
-    ui.set_list_index(view.list.map_or(0, |i| i as i32 + 1));
-    ui.set_list_entry(-1);
-    ui.set_list_rows(ModelRc::default());
-    ui.set_list_editable(
+    ui.set_list_index(
         view.snapshot
             .as_ref()
-            .is_some_and(|s| s.collections.iter().any(|c| c.can_edit_playlists)),
+            .and_then(|s| s.lists.iter().position(|l| Some(l.list.id) == view.list))
+            .map_or(0, |i| i as i32 + 1),
     );
     render_list(ui, view, adapter);
 }
 fn render_list(ui: &PlayerWindow, view: &View, adapter: &Adapter) {
-    let downloads = adapter.downloads().unwrap_or_default();
-    let Some(list) = view
-        .snapshot
-        .as_ref()
-        .and_then(|s| s.lists.get(view.list.unwrap_or(usize::MAX)))
-    else {
+    ui.set_list_entry(-1);
+    let Some(list) = view.selected_list() else {
+        ui.set_list_editable(
+            view.snapshot
+                .as_ref()
+                .is_some_and(|s| s.collections.iter().any(|c| c.can_edit_playlists)),
+        );
         ui.set_list_name("".into());
+        ui.set_list_rows(ModelRc::default());
         return;
     };
+    let downloads = adapter.downloads().unwrap_or_default();
     ui.set_list_name(list.list.name.clone().into());
-    ui.set_list_entry(-1);
     ui.set_list_editable(list.list.can_edit);
     let paths = list
         .entries
@@ -546,15 +556,20 @@ impl Controller {
             ui.on_list_selected(move |i| {
                 let Some(ui) = weak.upgrade() else { return };
                 let mut view = view.borrow_mut();
-                view.list = if i > 0 {
-                    Some(i as usize - 1)
-                } else {
-                    ui.set_list_rows(ModelRc::default());
-                    None
-                };
-                if i <= 0 {
+                let list = usize::try_from(i).ok().and_then(|index| {
+                    let list = view.snapshot.as_ref()?.lists.get(index.checked_sub(1)?)?;
+                    Some(list.list.id)
+                });
+                if view.list == list {
                     return;
                 }
+                view.list = list;
+                ui.set_collector_list_loading(
+                    view.online
+                        && view.selected_list().is_some_and(|list| {
+                            list.entries.items.len() < list.list.entry_count as usize
+                        }),
+                );
                 render_list(&ui, &view, &a);
             });
         }
@@ -567,8 +582,7 @@ impl Controller {
                 let Some(ui) = weak.upgrade() else { return };
                 let view = view.borrow();
                 let Some(key) = view.selected else { return };
-                let Some(list) = view.list.and_then(|i| view.snapshot.as_ref()?.lists.get(i))
-                else {
+                let Some(list) = view.selected_list() else {
                     return;
                 };
                 let Ok(index) = usize::try_from(index) else {
@@ -599,8 +613,7 @@ impl Controller {
                 let Some(ui) = weak.upgrade() else { return };
                 let view = view.borrow();
                 let Some(key) = view.selected else { return };
-                let Some(list) = view.list.and_then(|i| view.snapshot.as_ref()?.lists.get(i))
-                else {
+                let Some(list) = view.selected_list() else {
                     return;
                 };
                 let all = a.list_tracks(key, list);
@@ -683,7 +696,7 @@ impl Controller {
                         )
                     };
                     let snapshot = view.snapshot.as_ref().context("Refresh server")?;
-                    let list = view.list.and_then(|i| snapshot.lists.get(i));
+                    let list = view.selected_list();
                     let collection = if verb == 0 {
                         view.collection
                             .or_else(|| {
@@ -846,10 +859,7 @@ impl Controller {
                     let view = view.borrow();
                     if verb == 2 || verb == 3 {
                         let key = view.selected.context("Select server")?;
-                        let list = view
-                            .list
-                            .and_then(|i| view.snapshot.as_ref()?.lists.get(i))
-                            .context("Select list")?;
+                        let list = view.selected_list().context("Select list")?;
                         Ok(a.list_tracks(key, list))
                     } else {
                         let s = state.borrow();
@@ -960,19 +970,28 @@ impl Controller {
             self.album_cancel.store(true, Ordering::Release);
             ui.set_collector_album_loading(false);
         }
-        let list = if ui.get_lists_open() {
-            self.view.borrow().list.and_then(|index| {
-                self.view
-                    .borrow()
-                    .snapshot
-                    .as_ref()?
-                    .lists
-                    .get(index)
-                    .map(|l| (l.list.id, l.entries.items.len() as u32, l.list.entry_count))
-            })
-        } else {
-            None
-        };
+        let list = self
+            .view
+            .borrow()
+            .selected_list()
+            .filter(|_| ui.get_lists_open())
+            .map(|l| {
+                (
+                    l.list.id,
+                    l.entries.items.len(),
+                    l.list.entry_count as usize,
+                )
+            });
+        let target = key.and_then(|_| list.map(|(id, _, _)| (catalog.generation, id)));
+        if target.is_none()
+            || self
+                .list_request
+                .is_some_and(|(generation, id, _)| Some((generation, id)) != target)
+        {
+            self.list_request = None;
+            self.list_cancel.store(true, Ordering::Release);
+            ui.set_collector_list_loading(false);
+        }
         if let (Some(key), Some((list, loaded, total))) = (key, list) {
             let request = (catalog.generation, list);
             if !catalog.scanning
@@ -986,7 +1005,6 @@ impl Controller {
                 let serial = self.read_serial;
                 self.list_request = Some((request.0, request.1, serial));
                 ui.set_collector_list_loading(true);
-                ui.set_status("Loading playlist entries…".into());
                 self.list_cancel.store(true, Ordering::Release);
                 self.list_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let cancelled = self.list_cancel.clone();
@@ -1003,10 +1021,6 @@ impl Controller {
                     let _ = tx.send(Event::ListLoaded(v, key, list, serial, result));
                 });
             }
-        } else {
-            self.list_request = None;
-            ui.set_collector_list_loading(false);
-            self.list_cancel.store(true, Ordering::Release);
         }
 
         if catalog.generation == self.generation.current()
@@ -1036,32 +1050,22 @@ impl Controller {
             ui.set_collector_active(selected.is_some());
             if let Some(key) = selected {
                 let entry_id = view
-                    .list
-                    .and_then(|index| view.snapshot.as_ref()?.lists.get(index))
+                    .selected_list()
                     .and_then(|list| list.entries.items.get(ui.get_list_entry() as usize))
                     .map(|entry| entry.id);
-                let list_id = view
-                    .list
-                    .and_then(|i| view.snapshot.as_ref()?.lists.get(i))
-                    .map(|l| l.list.id);
                 view.snapshot = self.adapter.display_snapshot(key).ok().flatten();
                 if let Some(snapshot) = &mut view.snapshot {
                     snapshot.library = (*catalog.library).clone();
                     snapshot.artwork = (*catalog.artwork).clone();
                 }
-                view.list = list_id.and_then(|id| {
-                    view.snapshot
-                        .as_ref()?
-                        .lists
-                        .iter()
-                        .position(|l| l.list.id == id)
-                });
+                if view.selected_list().is_none() {
+                    view.list = None;
+                }
                 view.online = catalog.source_online.unwrap_or(false);
                 install(&ui, &self.state, &view, &self.adapter);
                 if let Some(entry) = entry_id {
                     ui.set_list_entry(
-                        view.list
-                            .and_then(|index| view.snapshot.as_ref()?.lists.get(index))
+                        view.selected_list()
                             .and_then(|list| {
                                 list.entries.items.iter().position(|item| item.id == entry)
                             })
@@ -1185,7 +1189,11 @@ impl Controller {
                 Event::ListLoaded(v, key, id, serial, result)
                     if self.list_request == Some((v, id, serial))
                         && v == current
-                        && self.view.borrow().selected == Some(key) =>
+                        && ui.get_lists_open()
+                        && {
+                            let view = self.view.borrow();
+                            view.selected == Some(key) && view.list == Some(id)
+                        } =>
                 {
                     ui.set_collector_list_loading(false);
                     match result {
@@ -1194,11 +1202,20 @@ impl Controller {
                         }
                         Ok(()) => {
                             let mut view = self.view.borrow_mut();
-                            if let Ok(Some(snapshot)) = self.adapter.snapshot(key) {
-                                view.list =
-                                    snapshot.lists.iter().position(|list| list.list.id == id);
-                                view.snapshot = Some(snapshot);
-                                render_list(&ui, &view, &self.adapter);
+                            if let Ok(Some(saved)) = self.adapter.snapshot(key)
+                                && let Some(loaded) =
+                                    saved.lists.into_iter().find(|l| l.list.id == id)
+                                && let Some(row) = view
+                                    .snapshot
+                                    .as_mut()
+                                    .and_then(|s| s.lists.iter_mut().find(|l| l.list.id == id))
+                            {
+                                if loaded.list.revision.0 >= row.list.revision.0 {
+                                    *row = loaded;
+                                    render_list(&ui, &view, &self.adapter);
+                                } else {
+                                    self.list_request = None;
+                                }
                             }
                         }
                     }
@@ -1515,7 +1532,8 @@ mod tests {
         let state = test_state(&services, Library::default());
         let ui = PlayerWindow::new().unwrap();
         let adapter = Adapter::open(&data.join("collector")).unwrap();
-        let id = uuid::Uuid::new_v4().to_string();
+        let list_id = ids::CollectionListId::new();
+        let id = list_id.to_string();
         let list = serde_json::from_value(serde_json::json!({
             "list": { "id": id, "collection_id": id, "revision": 1, "name": "Before", "kind": "music_tracks", "entry_count": 1, "can_edit": false },
             "entries": { "items": [{ "id": id, "position": 0, "title": "Song", "availability": { "status": "entry" } }], "next_cursor": null }
@@ -1535,7 +1553,7 @@ mod tests {
                 summaries_pending: false,
                 updated: 0,
             }),
-            list: Some(0),
+            list: Some(list_id),
             collection: None,
             online: false,
             connection: ConnectionState::Disconnected,
@@ -1871,11 +1889,15 @@ mod tests {
                 next_cursor: None,
             },
         };
-        let snapshot:Snapshot=serde_json::from_value(serde_json::json!({"library":library,"collections":[],"lists":[list],"artwork":{},"album_collections":{},"updated":0})).unwrap();
+        let cached_id = ids::CollectionListId::new();
+        let mut cached = list.clone();
+        cached.list.id = cached_id;
+        cached.list.name = "Cached list".into();
+        let snapshot:Snapshot=serde_json::from_value(serde_json::json!({"library":library,"collections":[],"lists":[list,cached],"artwork":{},"album_collections":{},"updated":0})).unwrap();
         {
             let mut view = controller.view.borrow_mut();
             view.snapshot = Some(snapshot);
-            view.list = Some(0);
+            view.list = Some(list_id);
         }
         ui.set_lists_open(true);
         ui.set_collector_list_loading(true);
@@ -1907,6 +1929,33 @@ mod tests {
         controller.poll();
         assert!(!ui.get_collector_list_loading());
         assert!(ui.get_status().contains("current list failure"));
+
+        // A different, already cached list does not start a replacement request.
+        // The earlier request must still be invalidated, including its errors.
+        controller.list_request = Some((v, list_id, 10));
+        ui.set_collector_list_loading(true);
+        ui.set_list_index(2);
+        ui.invoke_list_selected(2);
+        ui.set_status("Cached list ready".into());
+        controller
+            .tx
+            .send(Event::ListLoaded(
+                v,
+                key,
+                list_id,
+                10,
+                Err(anyhow::anyhow!("no longer selected")),
+            ))
+            .unwrap();
+        controller.poll();
+        assert_eq!(ui.get_list_index(), 2);
+        assert_eq!(ui.get_list_name(), "Cached list");
+        assert!(!ui.get_collector_list_loading());
+        assert_eq!(ui.get_status(), "Cached list ready");
+        assert!(
+            controller.list_cancel.load(Ordering::Acquire),
+            "A cached selection must cancel the previous in-flight load"
+        );
         drop(controller);
         drop(state);
         drop(services);
