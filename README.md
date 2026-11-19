@@ -4,9 +4,10 @@ An album-focused music player written in Rust, with a [Slint](https://slint.dev)
 It plays local folders (including network shares), CUE/BIN and redumper disc
 images, and Collector servers, and fills in missing names from MusicBrainz.
 
-macOS is the primary target. Beta builds for Apple Silicon (macOS 15+) are on the
-[Releases](https://github.com/AberrantWolf/trash-amp/releases) page. Linux builds
-and runs from source; iOS is an early development host.
+macOS is the primary target. Beta builds for Apple Silicon (macOS 15+) and a Linux
+`.deb` (x86-64, glibc 2.35+, such as Ubuntu 22.04 or Debian 12 and later) are on the
+[Releases](https://github.com/AberrantWolf/trash-amp/releases) page. iOS is an early
+development host.
 
 ## Building
 
@@ -40,8 +41,16 @@ Other distributions need the equivalent ALSA, D-Bus, fontconfig, FreeType and
 xkbcommon development packages. The build also uses CMake and a C compiler.
 
 Collector logins are saved through Secret Service (KWallet or GNOME Keyring),
-which must be running and unlocked. Linux is not yet a release platform; media
-keys and file dialogs are unverified there.
+which must be running and unlocked. Media keys and file dialogs are not yet
+verified on Linux.
+
+To build the `.deb` into `target/dist`:
+
+```sh
+cargo install --locked cargo-deb
+cargo install --locked cargo-about --version 0.9.2 --features cli
+./scripts/package-linux.sh
+```
 
 ### iOS
 

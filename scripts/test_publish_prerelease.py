@@ -64,6 +64,31 @@ class PublishPrereleaseTests(unittest.TestCase):
             self.assertIn(argument, create)
         self.assertNotIn('--draft', create)
 
+    def add_package(self, name, content=b'second package fixture'):
+        package = self.directory / name
+        package.write_bytes(content)
+        digest = hashlib.sha256(content).hexdigest()
+        Path(str(package) + '.sha256').write_text(f'{digest}  {package.name}\n')
+        return package
+
+    def test_every_checksummed_package_is_published(self):
+        deb = self.add_package('trash-amp_0.1.0~beta.1-1_amd64.deb')
+        result, commands = self.publish()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        create = commands[-1]
+        for package in (self.archive, deb):
+            self.assertIn(str(package), create)
+            self.assertIn(str(package) + '.sha256', create)
+        self.assertNotIn(str(self.log), create)
+
+    def test_one_corrupt_package_blocks_the_whole_release(self):
+        deb = self.add_package('trash-amp_0.1.0~beta.1-1_amd64.deb')
+        deb.write_bytes(b'corrupt package')
+        result, commands = self.publish()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('checksum does not match', result.stderr)
+        self.assertEqual(commands, [])
+
     def test_interrupted_draft_uploads_before_publishing(self):
         result, commands = self.publish(GH_TEST_STATE='draft')
         self.assertEqual(result.returncode, 0, result.stderr)

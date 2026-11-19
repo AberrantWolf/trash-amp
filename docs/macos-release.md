@@ -145,7 +145,7 @@ does not resolve this account-level rejection.
 
 ## GitHub build and automatic publication
 
-`.github/workflows/macos-alpha.yml` (display name **macOS prerelease**) validates
+`.github/workflows/macos-alpha.yml` (display name **Prerelease**) validates
 and packages pull requests, main pushes and manual runs. Before validating a
 push or manual run, it checks for a successful run of this workflow in this
 repository for the **exact Git commit**. Previous successful push/manual runs
@@ -168,7 +168,11 @@ Tag/version agreement and bundled release notes are checked before signing.
 The resulting ZIP and checksum are uploaded as `macos-arm64-prerelease` and
 published automatically only after downloaded-artifact checksum verification.
 Missing secrets fail the run; tags cannot fall back to ad-hoc signing.
-`scripts/publish-prerelease.sh` uploads the ZIP and checksum before publication.
+A separate Linux job on Ubuntu 22.04 runs Clippy and the tests, builds the
+`.deb` with `scripts/package-linux.sh`, installs it and starts the app under a
+virtual display, then uploads it as `linux-amd64-prerelease`. Tags publish only
+after both platforms pass.
+`scripts/publish-prerelease.sh` uploads every package and checksum before publication.
 It finishes an interrupted draft automatically; upload failures leave it
 unpublished. Rerunning an already published tag leaves its notes and assets
 unchanged. Testing prereleases are not marked as the latest stable release.

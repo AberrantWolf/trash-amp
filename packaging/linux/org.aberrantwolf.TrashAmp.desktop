@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Trash Amp
+GenericName=Music Player
+Comment=Play your albums from local folders, disc images and Collector servers
+Exec=trash-amp
+Icon=org.aberrantwolf.TrashAmp
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;album;flac;cue;collector;
+StartupWMClass=org.aberrantwolf.TrashAmp

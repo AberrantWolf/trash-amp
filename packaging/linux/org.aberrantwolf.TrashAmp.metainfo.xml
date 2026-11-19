@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.aberrantwolf.TrashAmp</id>
+  <name>Trash Amp</name>
+  <summary>Album-focused music player</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="org.aberrantwolf">
+    <name>AberrantWolf</name>
+  </developer>
+  <description>
+    <p>
+      Trash Amp is a music player built around albums. It plays local folders,
+      including network shares, CUE/BIN and redumper disc images, and music from
+      Collector servers, and fills in missing album details from MusicBrainz.
+    </p>
+  </description>
+  <launchable type="desktop-id">org.aberrantwolf.TrashAmp.desktop</launchable>
+  <url type="homepage">https://github.com/AberrantWolf/trash-amp</url>
+  <url type="bugtracker">https://github.com/AberrantWolf/trash-amp/issues</url>
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Player</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+</component>

@@ -10,7 +10,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import tomllib
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,11 +17,37 @@ TOOL_VERSION = "0.9.2"
 TOOL_SHA256 = "ae72f0df0c399a1e96336f696fa55b1b28679fd725632eba8cf8e4568467cc3e"
 
 
+def cargo_about(work):
+    """Use an installed cargo-about, or download the verified macOS release."""
+    installed = shutil.which("cargo-about")
+    if installed:
+        version = subprocess.run([installed, "--version"], capture_output=True, text=True).stdout
+        if version.split()[-1:] == [TOOL_VERSION]:
+            return installed
+    if os.uname().sysname != "Darwin" or os.uname().machine != "arm64":
+        raise SystemExit(
+            f"Install cargo-about {TOOL_VERSION}: "
+            f"cargo install --locked cargo-about --version {TOOL_VERSION} --features cli"
+        )
+    archive = work / "cargo-about.tar.gz"
+    url = f"https://github.com/EmbarkStudios/cargo-about/releases/download/{TOOL_VERSION}/cargo-about-{TOOL_VERSION}-aarch64-apple-darwin.tar.gz"
+    with urllib.request.urlopen(url, timeout=60) as response:
+        archive.write_bytes(response.read())
+    if hashlib.sha256(archive.read_bytes()).hexdigest() != TOOL_SHA256:
+        raise SystemExit("cargo-about archive checksum mismatch")
+    with tarfile.open(archive) as tar:
+        tar.extractall(work, filter="data")
+    return work / f"cargo-about-{TOOL_VERSION}-aarch64-apple-darwin/cargo-about"
+
+
 def main():
     output = Path(sys.argv[1]).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    if os.uname().sysname != "Darwin" or os.uname().machine != "arm64":
-        raise SystemExit("Notice generation currently supports Apple Silicon macOS.")
+    host = next(
+        line.split()[1]
+        for line in subprocess.check_output(["rustc", "-vV"], cwd=ROOT, text=True).splitlines()
+        if line.startswith("host:")
+    )
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--locked", "--format-version", "1"], cwd=ROOT
     ))
@@ -32,25 +57,15 @@ def main():
     if upstream_slint.read_bytes() != slint_text:
         raise SystemExit("Slint license changed; update the bundled license before packaging.")
     skia = next(p for p in metadata["packages"] if p["name"] == "skia-bindings")
-    skia_manifest = tomllib.loads(Path(skia["manifest_path"]).read_text())
-    if skia["version"] != "0.153.3" or skia_manifest["package"]["metadata"]["skia"] != "m153-0.101.2":
+    if skia["version"] != "0.153.3" or (skia["metadata"] or {}).get("skia") != "m153-0.101.2":
         raise SystemExit("Skia version changed; update assets/native-licenses before packaging.")
 
     with tempfile.TemporaryDirectory(prefix="trash-amp-notices-") as work:
-        work = Path(work)
-        archive = work / "cargo-about.tar.gz"
-        url = f"https://github.com/EmbarkStudios/cargo-about/releases/download/{TOOL_VERSION}/cargo-about-{TOOL_VERSION}-aarch64-apple-darwin.tar.gz"
-        with urllib.request.urlopen(url, timeout=60) as response:
-            archive.write_bytes(response.read())
-        if hashlib.sha256(archive.read_bytes()).hexdigest() != TOOL_SHA256:
-            raise SystemExit("cargo-about archive checksum mismatch")
-        with tarfile.open(archive) as tar:
-            tar.extractall(work, filter="data")
-        tool = work / f"cargo-about-{TOOL_VERSION}-aarch64-apple-darwin/cargo-about"
+        tool = cargo_about(Path(work))
         notices = output / "THIRD_PARTY_LICENSES.html"
         subprocess.run([
             str(tool), "about", "generate", "--manifest-path", str(ROOT / "crates/amp-desktop/Cargo.toml"),
-            "--config", str(ROOT / "about.toml"), "--locked", "--fail",
+            "--config", str(ROOT / "about.toml"), "--target", host, "--locked", "--fail",
             "--output-file", str(notices), str(ROOT / "assets/licenses.hbs"),
         ], cwd=ROOT, check=True)
     # cargo-about recognizes the LicenseRef choice but cannot harvest its text.

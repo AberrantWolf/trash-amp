@@ -32,6 +32,10 @@ fn processing_settings(ui: &PlayerWindow) -> AudioProcessingSettings {
 
 /// A launcher supplies sandbox storage and the native capabilities it implements.
 /// Absence of a picker hides folder selection without identifying an OS in the UI.
+/// Desktop application ID. Linux desktop entries, icons and AppStream metadata
+/// use the same name so the window is matched to its launcher.
+pub const APP_ID: &str = "org.aberrantwolf.TrashAmp";
+
 pub struct AppConfig {
     pub collector: Arc<amp_collector::Adapter>,
     pub args: Vec<String>,
@@ -855,6 +859,9 @@ pub fn run(config: AppConfig) -> anyhow::Result<()> {
     let library = initial.library.clone();
     let preferences = initial.preferences.clone();
     let ui = PlayerWindow::new()?;
+    // Must follow platform creation and precede the first show.
+    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
+    slint::set_xdg_app_id(APP_ID)?;
     ui.set_home(true);
     {
         let weak = ui.as_weak();
