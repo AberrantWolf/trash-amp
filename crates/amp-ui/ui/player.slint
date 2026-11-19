@@ -838,11 +838,17 @@ export component PlayerWindow inherits Window {
             VerticalLayout {
                 padding: 8px; spacing: 4px;
                 Text { text: root.scan-summary; color: Theme.muted; wrap: word-wrap; font-size: 12px * root.text-scale; accessible-live-region: polite; }
-                HorizontalLayout {
+                // Stack the actions when wide system fonts (e.g. DejaVu Sans) would overflow a narrow window.
+                if root.width >= 360px * root.text-scale: HorizontalLayout {
                     spacing: 8px;
                     Button { text: root.scan-details-open ? "Hide details" : "View details"; clicked => { root.scan-details-open = !root.scan-details-open; } }
                     Button { text: root.scanning ? "Refreshing…" : "Retry refresh"; enabled: !root.scanning; clicked => { root.refresh-folder(); } }
                     Rectangle { horizontal-stretch: 1; }
+                }
+                if root.width < 360px * root.text-scale: VerticalLayout {
+                    spacing: 4px;
+                    Button { text: root.scan-details-open ? "Hide details" : "View details"; clicked => { root.scan-details-open = !root.scan-details-open; } }
+                    Button { text: root.scanning ? "Refreshing…" : "Retry refresh"; enabled: !root.scanning; clicked => { root.refresh-folder(); } }
                 }
                 if root.scan-details-open: ScrollView {
                     height: min(140px, root.height / 4);
