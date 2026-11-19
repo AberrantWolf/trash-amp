@@ -72,7 +72,7 @@ class PublishPrereleaseTests(unittest.TestCase):
         return package
 
     def test_every_checksummed_package_is_published(self):
-        deb = self.add_package('trash-amp_0.1.0~beta.1-1_amd64.deb')
+        deb = self.add_package('trash-amp-0.1.0-beta.1-linux-amd64.deb')
         result, commands = self.publish()
         self.assertEqual(result.returncode, 0, result.stderr)
         create = commands[-1]
@@ -82,11 +82,18 @@ class PublishPrereleaseTests(unittest.TestCase):
         self.assertNotIn(str(self.log), create)
 
     def test_one_corrupt_package_blocks_the_whole_release(self):
-        deb = self.add_package('trash-amp_0.1.0~beta.1-1_amd64.deb')
+        deb = self.add_package('trash-amp-0.1.0-beta.1-linux-amd64.deb')
         deb.write_bytes(b'corrupt package')
         result, commands = self.publish()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('checksum does not match', result.stderr)
+        self.assertEqual(commands, [])
+
+    def test_asset_names_github_would_rewrite_are_refused(self):
+        self.add_package('trash-amp_0.1.0~beta.1-1_amd64.deb')
+        result, commands = self.publish()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('GitHub would rename', result.stderr)
         self.assertEqual(commands, [])
 
     def test_interrupted_draft_uploads_before_publishing(self):

@@ -14,6 +14,7 @@ test -s "$notes"
 assets=$(python3 - "$directory" <<'PY'
 import hashlib
 from pathlib import Path
+import re
 import sys
 directory = Path(sys.argv[1])
 assets = sorted(p for p in directory.iterdir()
@@ -22,6 +23,10 @@ assets = sorted(p for p in directory.iterdir()
 if not assets:
     raise SystemExit('No release packages with checksums found; refusing to publish.')
 for asset in assets:
+    # GitHub rewrites other characters (e.g. "~") in asset names, which would
+    # leave the published checksum file naming a file that does not exist.
+    if not re.fullmatch(r'[A-Za-z0-9._-]+', asset.name):
+        raise SystemExit(f'{asset.name}: GitHub would rename this asset; refusing to publish.')
     checksum = Path(str(asset) + '.sha256').read_text().split()
     with asset.open('rb') as source:
         digest = hashlib.file_digest(source, 'sha256').hexdigest()

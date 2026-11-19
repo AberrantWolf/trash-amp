@@ -18,6 +18,9 @@ python3 scripts/generate-notices.py "$target/release/notices" >/dev/null
 
 dist=$target/dist
 mkdir -p "$dist"
-deb=$(cargo deb -p trash-amp --no-build --output "$dist" | tail -n 1)
+# cargo-deb names the file after the Debian version (0.1.0~beta.9-1), and
+# GitHub replaces the "~" when uploading, which breaks the checksum file.
+deb=$dist/trash-amp-$version-linux-amd64.deb
+cargo deb -p trash-amp --no-build --output "$deb" >/dev/null
 (cd "$dist" && sha256sum "$(basename "$deb")" > "$(basename "$deb").sha256")
 printf '%s\n' "$deb" "$deb.sha256"
