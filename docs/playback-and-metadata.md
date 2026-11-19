@@ -6,8 +6,7 @@
 | --- | --- |
 | WAV, FLAC, MP3, Ogg Vorbis | Supported; primary validation targets |
 | CDDA (CUE/BIN, redumper raw dumps) | Supported for single-session, all-audio discs |
-| Opus from Collector | Supported (Original Ogg Opus and Low Bandwidth streams, decoded with libopus) |
-| Local Opus files | Scanned, but decoded by Symphonia 0.5, which has no Opus codec; expect playback to fail |
+| Opus | Supported in local `.opus`/`.ogg` files and from Collector, decoded with bundled libopus. Chained Ogg streams are not supported |
 | AAC/M4A | Plays where Symphonia decodes it; gapless playback is not handled |
 
 Stereo and mono are supported. Multichannel files are rejected until there is an

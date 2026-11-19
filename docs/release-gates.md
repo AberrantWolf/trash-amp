@@ -37,7 +37,7 @@ support beyond the evidence recorded below.
 - [ ] Qualify output-device loss/change, USB/Bluetooth reconnect, sleep/wake and playback after resume in the native app. Verify that recovery preserves position, leaves playback paused until Play, keeps the UI responsive and honors explicit Play/Pause requests while disconnected. Include a replacement output with a different sample rate and repeated disconnects.
 - [ ] Exercise rapid seek/next/previous, queue edits, source switching and unavailable files during playback. Verify accurate state, cancellation and actionable errors without hangs.
 - [ ] Exercise stalled/disconnected/reconnected network shares and Collector routes in the native app. Cover denied/revoked access, changed media, two-account isolation, interrupted downloads, cancel/retry and restart recovery. Automated fixtures supplement the native failure matrix; see [Collector connection](collector-connection.md).
-- [ ] Validate playback of each advertised format (WAV/FLAC/MP3/Vorbis/CDDA) through the actual output path. Use output capture to qualify gapless claims; retain explicit limits for AAC/M4A, Opus, multichannel and bit-perfect output.
+- [ ] Validate playback of each advertised format (WAV/FLAC/MP3/Vorbis/Opus/CDDA) through the actual output path. Use output capture to qualify gapless claims; retain explicit limits for AAC/M4A, multichannel and bit-perfect output.
 - [ ] Run real redumper/BIN and CUE boundary comparisons before qualifying those paths, or explicitly label them experimental in the final release notes. Keep raw mixed-mode/multisession, HTOA controls and unapplied de-emphasis limits visible.
 - [ ] Check keyboard-only navigation, focus, VoiceOver labels, text scaling and reduced motion throughout browsing, transport, settings and lists. Verify media keys and Now Playing from the packaged app.
 - [ ] Measure optimized large-library scrolling/search, UI responsiveness, memory, idle/playing CPU and hidden-window energy with real libraries and the 2,000-album demo. Record hardware and window dimensions; address hangs or unbounded growth.
@@ -51,7 +51,7 @@ expanding advertised support.
 
 - Incremental/progressive scans, filesystem artwork caching and multi-disc grouping.
 - Manual metadata correction/ambiguity resolution, broader identification, Cover Art Archive and optional GnuDB.
-- AAC/M4A gapless and Opus support; multichannel mapping; complete disc handling including HTOA access, de-emphasis, raw mixed-mode/multisession and Q/index reconstruction.
+- AAC/M4A gapless; multichannel mapping; complete disc handling including HTOA access, de-emphasis, raw mixed-mode/multisession and Q/index reconstruction.
 - Native output selection/rate switching, audiophile output modes, effects and DLNA. Playlists and equalizers remain outside the initial scope.
 - Marquee and FFT visualization, with combined animation performance/energy measurements when implemented.
 - Linux/Windows packaging, signing and native acceptance before claiming support.

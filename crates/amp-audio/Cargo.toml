@@ -8,7 +8,7 @@ bs2b.workspace = true
 amp-core.workspace = true
 anyhow.workspace = true
 junk-libs-disc.workspace = true
-junk-libs-audio = { workspace = true, features = ["decode-compressed"] }
+junk-libs-audio = { workspace = true, features = ["decode-compressed", "decode-opus"] }
 junk-libs-playback.workspace = true
 symphonia = { version = "0.5.5", default-features = false, features = ["flac"] }
 symphonia-adapter-libopus = "0.2"

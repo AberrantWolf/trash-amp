@@ -711,6 +711,52 @@ mod tests {
         }
     }
     #[test]
+    fn local_ogg_opus_plays_its_exact_length_and_seeks() {
+        // 250 ms of 440 Hz stereo, encoded by libopus at 48 kHz.
+        let bytes =
+            include_bytes!("../../amp-collector/tests/fixtures/digital-audio/original-opus.ogg");
+        for name in ["tone.opus", "tone.ogg"] {
+            let (dir, mut track) = fixture(48_000, 1);
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            track.access = MediaAccess::File {
+                locator: path.to_string_lossy().into_owned(),
+            };
+            let decode = |from| {
+                let mut reader = Converted::new(&track, from, 48_000, None).unwrap();
+                std::iter::from_fn(|| reader.next().unwrap()).collect::<Vec<_>>()
+            };
+            let frames = decode(0);
+            assert_eq!(frames.len(), 12_000, "{name} plays its trimmed length");
+            // Same samples as the Collector stream decoder, which calls libopus directly.
+            let mut stream = stream::StreamDecoder::open(
+                std::io::Cursor::new(bytes),
+                stream::StreamFormat::Opus,
+            )
+            .unwrap();
+            let mut streamed = Vec::new();
+            while let Some(chunk) = stream.read_frames(4_096).unwrap() {
+                streamed.extend(chunk.samples);
+            }
+            let local = frames.iter().flatten().copied().collect::<Vec<_>>();
+            assert_eq!(local.len(), streamed.len());
+            let difference = local
+                .iter()
+                .zip(&streamed)
+                .fold(0f32, |max, (a, b)| max.max((a - b).abs()));
+            assert!(
+                difference < 1e-4,
+                "{name} differs from libopus by {difference}"
+            );
+            assert!(local.iter().any(|s| s.abs() > 0.05), "{name} is not silent");
+            assert_eq!(
+                decode(6_000).len(),
+                6_000,
+                "{name} seeks to the requested frame"
+            );
+        }
+    }
+    #[test]
     fn cue_track_boundaries_and_sector_seek_are_sample_exact() {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("disc.bin");

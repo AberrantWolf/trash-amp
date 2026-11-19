@@ -240,8 +240,8 @@ dependencies = [
  "bs2b",
  "cpal",
  "hound",
- "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98)",
- "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98)",
+ "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=f0faaa73205ad7c71923142e13398a6c5236a412)",
+ "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=f0faaa73205ad7c71923142e13398a6c5236a412)",
  "junk-libs-playback",
  "objc2 0.6.4",
  "objc2-avf-audio",
@@ -273,7 +273,7 @@ dependencies = [
  "collector-store",
  "fs2",
  "hex",
- "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98)",
+ "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=f0faaa73205ad7c71923142e13398a6c5236a412)",
  "keyring",
  "rcgen 0.13.2",
  "reqwest",
@@ -306,8 +306,8 @@ dependencies = [
  "hound",
  "httpdate",
  "image",
- "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98)",
- "junk-libs-music 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=0becbd0c382df3d494244c7ccc20de05cba580cf)",
+ "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=f0faaa73205ad7c71923142e13398a6c5236a412)",
+ "junk-libs-music 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=f0faaa73205ad7c71923142e13398a6c5236a412)",
  "libc",
  "lofty",
  "rusqlite",
@@ -3969,30 +3969,6 @@ dependencies = [
 [[package]]
 name = "junk-libs-audio"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=0becbd0c382df3d494244c7ccc20de05cba580cf#0becbd0c382df3d494244c7ccc20de05cba580cf"
-dependencies = [
- "serde",
- "symphonia",
- "symphonia-metadata",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "junk-libs-audio"
-version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98#2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98"
-dependencies = [
- "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98)",
- "rubato",
- "serde",
- "symphonia",
- "symphonia-metadata",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "junk-libs-audio"
-version = "0.1.0"
 source = "git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f#da0145bc430bbb8d4f101e23ee7376f7e76fe64f"
 dependencies = [
  "claxon",
@@ -4006,14 +3982,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "junk-libs-core"
+name = "junk-libs-audio"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98#2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=f0faaa73205ad7c71923142e13398a6c5236a412#f0faaa73205ad7c71923142e13398a6c5236a412"
 dependencies = [
- "crc32fast",
- "md5",
+ "junk-libs-disc 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=f0faaa73205ad7c71923142e13398a6c5236a412)",
+ "rubato",
  "serde",
- "sha1",
+ "symphonia",
+ "symphonia-adapter-libopus",
+ "symphonia-bundle-mp3 0.5.5 (git+https://github.com/AberrantWolf/junk-libs?rev=f0faaa73205ad7c71923142e13398a6c5236a412)",
+ "symphonia-metadata",
  "thiserror 2.0.20",
 ]
 
@@ -4033,6 +4012,18 @@ dependencies = [
 name = "junk-libs-core"
 version = "0.1.0"
 source = "git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f#da0145bc430bbb8d4f101e23ee7376f7e76fe64f"
+dependencies = [
+ "crc32fast",
+ "md5",
+ "serde",
+ "sha1",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "junk-libs-core"
+version = "0.1.0"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=f0faaa73205ad7c71923142e13398a6c5236a412#f0faaa73205ad7c71923142e13398a6c5236a412"
 dependencies = [
  "crc32fast",
  "md5",
@@ -4048,21 +4039,6 @@ source = "git+https://github.com/AberrantWolf/junk-libs?rev=317517c430744e4f1196
 dependencies = [
  "log",
  "quick-xml",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "junk-libs-disc"
-version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98#2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98"
-dependencies = [
- "chd",
- "crc32fast",
- "junk-libs-core 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98)",
- "log",
- "md5",
- "serde",
- "sha1",
  "thiserror 2.0.20",
 ]
 
@@ -4097,6 +4073,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "junk-libs-disc"
+version = "0.1.0"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=f0faaa73205ad7c71923142e13398a6c5236a412#f0faaa73205ad7c71923142e13398a6c5236a412"
+dependencies = [
+ "chd",
+ "crc32fast",
+ "junk-libs-core 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=f0faaa73205ad7c71923142e13398a6c5236a412)",
+ "log",
+ "md5",
+ "serde",
+ "sha1",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "junk-libs-disc-id"
 version = "0.1.0"
 source = "git+https://github.com/AberrantWolf/junk-libs?rev=317517c430744e4f1196e30850b37b3f13c10560#317517c430744e4f1196e30850b37b3f13c10560"
@@ -4123,10 +4114,10 @@ dependencies = [
 [[package]]
 name = "junk-libs-music"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=0becbd0c382df3d494244c7ccc20de05cba580cf#0becbd0c382df3d494244c7ccc20de05cba580cf"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f#da0145bc430bbb8d4f101e23ee7376f7e76fe64f"
 dependencies = [
  "chromaprint-next",
- "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=0becbd0c382df3d494244c7ccc20de05cba580cf)",
+ "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f)",
  "musicbrainz_rs",
  "serde",
  "serde_json",
@@ -4137,10 +4128,10 @@ dependencies = [
 [[package]]
 name = "junk-libs-music"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f#da0145bc430bbb8d4f101e23ee7376f7e76fe64f"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=f0faaa73205ad7c71923142e13398a6c5236a412#f0faaa73205ad7c71923142e13398a6c5236a412"
 dependencies = [
  "chromaprint-next",
- "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f)",
+ "junk-libs-audio 0.1.0 (git+https://github.com/AberrantWolf/junk-libs?rev=f0faaa73205ad7c71923142e13398a6c5236a412)",
  "musicbrainz_rs",
  "serde",
  "serde_json",
@@ -4168,7 +4159,7 @@ dependencies = [
 [[package]]
 name = "junk-libs-playback"
 version = "0.1.0"
-source = "git+https://github.com/AberrantWolf/junk-libs?rev=2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98#2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=f0faaa73205ad7c71923142e13398a6c5236a412#f0faaa73205ad7c71923142e13398a6c5236a412"
 dependencies = [
  "thiserror 2.0.20",
 ]
@@ -7324,6 +7315,17 @@ dependencies = [
 name = "symphonia-bundle-mp3"
 version = "0.5.5"
 source = "git+https://github.com/AberrantWolf/junk-libs?rev=da0145bc430bbb8d4f101e23ee7376f7e76fe64f#da0145bc430bbb8d4f101e23ee7376f7e76fe64f"
+dependencies = [
+ "lazy_static",
+ "log",
+ "symphonia-core",
+ "symphonia-metadata",
+]
+
+[[package]]
+name = "symphonia-bundle-mp3"
+version = "0.5.5"
+source = "git+https://github.com/AberrantWolf/junk-libs?rev=f0faaa73205ad7c71923142e13398a6c5236a412#f0faaa73205ad7c71923142e13398a6c5236a412"
 dependencies = [
  "lazy_static",
  "log",

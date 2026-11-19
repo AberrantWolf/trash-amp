@@ -14,7 +14,7 @@ edition = "2024"
 license = "MIT"
 
 [workspace.dependencies]
-junk-libs-music = { git = "https://github.com/AberrantWolf/junk-libs", rev = "0becbd0c382df3d494244c7ccc20de05cba580cf" }
+junk-libs-music = { git = "https://github.com/AberrantWolf/junk-libs", rev = "f0faaa73205ad7c71923142e13398a6c5236a412" }
 amp-apple-library = { path = "crates/amp-apple-library" }
 bs2b = "0.2"
 amp-app = { path = "crates/amp-app" }
@@ -29,9 +29,9 @@ amp-audio = { path = "crates/amp-audio" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-junk-libs-disc = { git = "https://github.com/AberrantWolf/junk-libs", rev = "2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98" }
-junk-libs-audio = { git = "https://github.com/AberrantWolf/junk-libs", rev = "2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98", features = ["decode-wav", "disc-readers", "resample"] }
-junk-libs-playback = { git = "https://github.com/AberrantWolf/junk-libs", rev = "2c8eaf8fd5a7f3e5f4873d3463b8008039e9af98" }
+junk-libs-disc = { git = "https://github.com/AberrantWolf/junk-libs", rev = "f0faaa73205ad7c71923142e13398a6c5236a412" }
+junk-libs-audio = { git = "https://github.com/AberrantWolf/junk-libs", rev = "f0faaa73205ad7c71923142e13398a6c5236a412", features = ["decode-wav", "disc-readers", "resample"] }
+junk-libs-playback = { git = "https://github.com/AberrantWolf/junk-libs", rev = "f0faaa73205ad7c71923142e13398a6c5236a412" }
 
 [profile.dev.package."*"]
 opt-level = 2
