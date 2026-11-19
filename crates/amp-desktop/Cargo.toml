@@ -33,8 +33,8 @@ amp-apple-library.workspace = true
 # finds the directly linked ones (ALSA, D-Bus, fontconfig, FreeType).
 [package.metadata.deb]
 name = "trash-amp"
-maintainer = "AberrantWolf"
-copyright = "AberrantWolf"
+maintainer = "Scott Harper <AberrantWolf@users.noreply.github.com>"
+copyright = "2026 Trash Amp contributors"
 license-file = ["../../LICENSE", "0"]
 section = "sound"
 priority = "optional"
