@@ -15,7 +15,7 @@ reqwest = { version = "0.12", default-features = false }
 bytes = "1"
 rusqlite = { version = "0.41", features = ["bundled"] }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
-keyring = { version = "3", features = ["apple-native"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 hex = "0.4"

@@ -28,14 +28,49 @@ use std::{
     },
 };
 
+/// The platform credential store, named for user-facing messages.
+const CREDENTIAL_STORE: &str = if cfg!(any(target_os = "macos", target_os = "ios")) {
+    "Keychain"
+} else if cfg!(target_os = "windows") {
+    "Windows Credential Manager"
+} else {
+    "the system keyring"
+};
+
+/// Open a credential-store entry. keyring silently substitutes an in-memory
+/// mock store on platforms without an enabled backend, where saves appear to
+/// succeed but are never read back, so refuse it instead.
+fn credential_entry(account: &str) -> std::result::Result<keyring::Entry, String> {
+    let entry = keyring::Entry::new("trash-amp.collector", account)
+        .map_err(|error| credential_error("open", &error))?;
+    if entry.get_credential().is::<keyring::mock::MockCredential>() {
+        return Err("This build has no credential store for this platform".into());
+    }
+    Ok(entry)
+}
+
+fn credential_error(action: &str, error: &keyring::Error) -> String {
+    let mut message = format!("Could not {action} the Collector credential in {CREDENTIAL_STORE}");
+    if cfg!(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "windows"
+    ))) && matches!(
+        error,
+        keyring::Error::NoStorageAccess(_) | keyring::Error::PlatformFailure(_)
+    ) {
+        message.push_str(
+            ". Make sure a Secret Service password manager, such as KWallet or GNOME Keyring, is running and unlocked",
+        );
+    }
+    message
+}
+
 pub struct Keychain;
 impl Keychain {
     fn entry(key: ConnectionKey) -> ids::Result<keyring::Entry> {
-        keyring::Entry::new(
-            "trash-amp.collector",
-            &format!("{}/{}", key.server_id, key.user_id),
-        )
-        .map_err(|_| ids::Error::Unavailable("Keychain unavailable".into()))
+        credential_entry(&format!("{}/{}", key.server_id, key.user_id))
+            .map_err(ids::Error::Unavailable)
     }
 }
 impl NativeCredentialStorage for Keychain {
@@ -49,23 +84,21 @@ impl NativeCredentialStorage for Keychain {
                 &serde_json::to_string(value)
                     .map_err(|_| ids::Error::Invalid("Invalid credential".into()))?,
             )
-            .map_err(|_| ids::Error::Unavailable("Could not save credential in Keychain".into()))
+            .map_err(|error| ids::Error::Unavailable(credential_error("save", &error)))
     }
     fn load(&self, key: ConnectionKey) -> ids::Result<Option<EnrolledCredential>> {
         match Self::entry(key)?.get_password() {
             Ok(value) => serde_json::from_str(&value)
                 .map(Some)
-                .map_err(|_| ids::Error::Invalid("Invalid Keychain credential".into())),
+                .map_err(|_| ids::Error::Invalid("Invalid saved Collector credential".into())),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(_) => Err(ids::Error::Unavailable("Could not read Keychain".into())),
+            Err(error) => Err(ids::Error::Unavailable(credential_error("read", &error))),
         }
     }
     fn remove(&self, key: ConnectionKey) -> ids::Result<()> {
         match Self::entry(key)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err(ids::Error::Unavailable(
-                "Could not remove Keychain credential".into(),
-            )),
+            Err(error) => Err(ids::Error::Unavailable(credential_error("remove", &error))),
         }
     }
     fn load_legacy(&self, _: ids::ServerId) -> ids::Result<Option<EnrolledCredential>> {
@@ -529,7 +562,7 @@ impl Adapter {
         progress: &mut dyn FnMut(String),
     ) -> Result<ConnectionKey> {
         let endpoint = url.to_string();
-        let entry = keyring::Entry::new("trash-amp.collector", "enrollment")?;
+        let entry = credential_entry("enrollment").map_err(anyhow::Error::msg)?;
         #[derive(Serialize, Deserialize)]
         struct Attempt {
             endpoint: String,
@@ -539,13 +572,15 @@ impl Adapter {
         let saved = match entry.get_password() {
             Ok(raw) => Some(serde_json::from_str::<Attempt>(&raw)?),
             Err(keyring::Error::NoEntry) => None,
-            Err(e) => return Err(e.into()),
+            Err(error) => bail!(credential_error("read", &error)),
         };
         if let Some(attempt) = saved.as_ref().filter(|a| a.endpoint == endpoint)
             && let Some(credential) = &attempt.completed
         {
             let key = self.save_connection(credential, endpoint)?;
-            entry.delete_credential()?;
+            entry
+                .delete_credential()
+                .map_err(|error| anyhow::anyhow!(credential_error("remove", &error)))?;
             return Ok(key);
         }
         let pending = if let Some(attempt) = saved.filter(|a| a.endpoint == endpoint) {
@@ -570,11 +605,13 @@ impl Adapter {
             }
         };
         let client = pending.client()?;
-        entry.set_password(&serde_json::to_string(&Attempt {
-            endpoint: endpoint.clone(),
-            pending: pending.clone(),
-            completed: None,
-        })?)?;
+        entry
+            .set_password(&serde_json::to_string(&Attempt {
+                endpoint: endpoint.clone(),
+                pending: pending.clone(),
+                completed: None,
+            })?)
+            .map_err(|error| anyhow::anyhow!(credential_error("save", &error)))?;
         progress(pending.start.verification_url.clone());
         loop {
             if cancelled() {
@@ -593,13 +630,17 @@ impl Adapter {
             }
         }
         let credential = pending.clone().complete(&client).await?;
-        entry.set_password(&serde_json::to_string(&Attempt {
-            endpoint: endpoint.clone(),
-            pending,
-            completed: Some(credential.clone()),
-        })?)?;
+        entry
+            .set_password(&serde_json::to_string(&Attempt {
+                endpoint: endpoint.clone(),
+                pending,
+                completed: Some(credential.clone()),
+            })?)
+            .map_err(|error| anyhow::anyhow!(credential_error("save", &error)))?;
         let key = self.save_connection(&credential, endpoint)?;
-        entry.delete_credential()?;
+        entry
+            .delete_credential()
+            .map_err(|error| anyhow::anyhow!(credential_error("remove", &error)))?;
         Ok(key)
     }
     pub async fn refresh(
@@ -1702,6 +1743,36 @@ async fn remote_read<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_store_is_a_real_platform_backend() {
+        // keyring falls back to a non-persistent mock store when no backend
+        // feature matches the target. Opening an entry does not touch the store.
+        credential_entry("backend-check").expect("credential store backend");
+    }
+
+    /// Writes to the user's real credential store; run with `--ignored`.
+    #[test]
+    #[ignore = "uses the system credential store"]
+    fn credential_store_round_trips_between_entries() {
+        let account = format!("test/{}", uuid::Uuid::new_v4());
+        credential_entry(&account)
+            .unwrap()
+            .set_password("secret")
+            .unwrap();
+        // A separate entry must see the value, as Keychain::entry creates one per call.
+        let read = credential_entry(&account).unwrap().get_password();
+        credential_entry(&account)
+            .unwrap()
+            .delete_credential()
+            .unwrap();
+        assert_eq!(read.unwrap(), "secret");
+        assert!(matches!(
+            credential_entry(&account).unwrap().get_password(),
+            Err(keyring::Error::NoEntry)
+        ));
+    }
+
     #[derive(Default)]
     struct MemorySecrets(Mutex<Vec<EnrolledCredential>>);
     impl NativeCredentialStorage for MemorySecrets {
