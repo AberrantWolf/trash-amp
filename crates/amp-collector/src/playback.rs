@@ -1,5 +1,5 @@
 use super::*;
-use amp_audio::{ByteSource, MediaHint, MediaInput, PcmReader, StreamDecoder, StreamFormat};
+use amp_audio::{ByteSource, MediaHint, MediaInput, StreamDecoder, StreamFormat};
 use amp_core::Availability;
 use reqwest::{StatusCode, Url, header};
 use std::{
@@ -161,7 +161,8 @@ impl Adapter {
             position: 0,
             range: None,
         };
-        open_seekable_audio(file, hint, position).map(Some)
+        // AudioDecoder seeks every format, and detects Opus in .ogg from its header.
+        Ok(Some(MediaInput::Encoded(ByteSource::new(file, hint))))
     }
 }
 
@@ -179,34 +180,6 @@ fn playback_audio_type(
         (PlaybackFormat::LowBandwidth { .. }, "audio/ogg") => ("opus", Some(StreamFormat::Opus)),
         _ => bail!("Collector returned an unexpected playback format"),
     })
-}
-
-fn open_seekable_audio(
-    mut file: impl Read + Seek + Send + 'static,
-    hint: MediaHint,
-    position: Duration,
-) -> Result<MediaInput> {
-    let opus = match hint.extension.as_deref() {
-        Some("opus") => true,
-        // Collector labels Original Ogg files by container, including Vorbis.
-        Some("ogg") => StreamDecoder::ogg_has_opus_header(&mut file)?,
-        _ => false,
-    };
-    if !opus {
-        return Ok(MediaInput::Encoded(ByteSource::new(file, hint)));
-    }
-    // A saved Opus file starts at zero. Decode from its headers to preserve
-    // pre-skip and decoder state before discarding the prefix.
-    let mut reader = StreamDecoder::open(file, StreamFormat::Opus)?;
-    let mut remaining =
-        (position.as_secs_f64() * f64::from(reader.format().sample_rate())).round() as u64;
-    while remaining > 0 {
-        let chunk = reader
-            .read_frames(remaining.min(4096) as usize)?
-            .context("Playback position is beyond the track")?;
-        remaining -= chunk.frame_count();
-    }
-    Ok(MediaInput::Streamed(Box::new(reader)))
 }
 
 pub(super) async fn playback_descriptor(
@@ -403,36 +376,33 @@ async fn cancellable<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use amp_audio::FramePosition;
     use junk_libs_audio::AudioDecoder;
 
     #[test]
-    fn original_ogg_routes_vorbis_and_opus_using_the_identification_packet() {
+    fn original_ogg_vorbis_and_opus_decode_and_seek_from_their_headers() {
         let (extension, _) = playback_audio_type(PlaybackFormat::Original, "audio/ogg").unwrap();
+        // Collector labels both by container, so the decoder must tell them apart.
         let open = |bytes: &'static [u8]| {
-            open_seekable_audio(
+            AudioDecoder::open(ByteSource::new(
                 io::Cursor::new(bytes),
                 MediaHint::new(Some(bytes.len() as u64), Some(extension), Some("audio/ogg")),
-                Duration::from_millis(125),
-            )
+            ))
             .unwrap()
         };
 
-        let MediaInput::Encoded(vorbis) = open(include_bytes!(
+        let mut vorbis = open(include_bytes!(
             "../tests/fixtures/digital-audio/original-vorbis.ogg"
-        )) else {
-            panic!("Vorbis originals must retain their seekable audio source");
-        };
-        let mut vorbis = AudioDecoder::open(vorbis).unwrap();
+        ));
         assert_eq!(vorbis.format().sample_rate(), 44_100);
         let chunk = vorbis.read_frames(512).unwrap().unwrap();
         assert!(chunk.samples.iter().any(|sample| sample.abs() > 0.01));
 
-        let MediaInput::Streamed(mut opus) = open(include_bytes!(
+        let mut opus = open(include_bytes!(
             "../tests/fixtures/digital-audio/original-opus.ogg"
-        )) else {
-            panic!("Opus originals must use the Opus decoder");
-        };
+        ));
         assert_eq!(opus.format().sample_rate(), 48_000);
+        opus.seek_exact(FramePosition(6_000)).unwrap();
         let mut frames = 0;
         while let Some(chunk) = opus.read_frames(512).unwrap() {
             frames += chunk.frame_count();

@@ -68,20 +68,12 @@ enum Packets {
         pre_skip: u64,
         skip_remaining: u64,
         finished: bool,
+        /// Linear output gain from `OpusHead`, which RFC 7845 requires players to apply.
+        gain: Option<f32>,
     },
 }
 
 impl StreamDecoder {
-    /// Inspect the first Ogg identification packet and leave the source positioned
-    /// where it started so its decoder can still read the complete header.
-    pub fn ogg_has_opus_header(reader: &mut (impl Read + Seek)) -> Result<bool> {
-        let start = reader.stream_position()?;
-        let packet = ogg::PacketReader::new(reader.by_ref().take(64 * 1024)).read_packet_expected();
-        reader.seek(SeekFrom::Start(start))?;
-        let packet = packet?;
-        Ok(packet.first_in_stream() && packet.data.starts_with(b"OpusHead"))
-    }
-
     pub fn open(reader: impl Read + Send + 'static, format: StreamFormat) -> Result<Self> {
         match format {
             StreamFormat::Flac => Self::open_flac(reader),
@@ -164,6 +156,9 @@ impl StreamDecoder {
             "Missing Ogg Opus tags"
         );
         let pre_skip = u64::from(u16::from_le_bytes([header.data[10], header.data[11]]));
+        // Q7.8 dB, converted the same way as junk-libs' AudioDecoder.
+        let gain_db = f32::from(i16::from_le_bytes([header.data[16], header.data[17]])) / 256.0;
+        let gain = (gain_db != 0.0).then(|| 10_f32.powf(gain_db / 20.0));
         let mut params = CodecParameters::new();
         params
             .for_codec(CODEC_TYPE_OPUS)
@@ -178,6 +173,7 @@ impl StreamDecoder {
                 pre_skip,
                 skip_remaining: pre_skip,
                 finished: false,
+                gain,
             },
             decoder: Box::new(decoder),
             format: PcmFormat::new(48_000, u16::from(channels))?,
@@ -187,7 +183,7 @@ impl StreamDecoder {
     }
 
     fn decode_packet(&mut self) -> Result<bool> {
-        let (packet, skip, end) = match &mut self.packets {
+        let (packet, skip, end, gain) = match &mut self.packets {
             Packets::Flac { container, track } => {
                 let packet = loop {
                     match container.next_packet() {
@@ -201,7 +197,7 @@ impl StreamDecoder {
                         Err(error) => return Err(error.into()),
                     }
                 };
-                (packet, None, None)
+                (packet, None, None, None)
             }
             Packets::Opus {
                 reader,
@@ -209,6 +205,7 @@ impl StreamDecoder {
                 pre_skip,
                 skip_remaining,
                 finished,
+                gain,
             } => {
                 if *finished {
                     return Ok(false);
@@ -225,6 +222,7 @@ impl StreamDecoder {
                     Packet::new_from_boxed_slice(*serial, 0, 0, packet.data.into_boxed_slice()),
                     Some(skip_remaining),
                     end,
+                    *gain,
                 )
             }
         };
@@ -237,20 +235,23 @@ impl StreamDecoder {
         );
         let mut samples = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
         samples.copy_interleaved_ref(decoded);
-        let mut samples = samples.samples();
+        let mut samples = samples.samples_mut();
         if let Some(skip) = skip {
             let skipped = (*skip).min((samples.len() / channels) as u64);
             *skip -= skipped;
-            samples = &samples[skipped as usize * channels..];
+            samples = &mut samples[skipped as usize * channels..];
         }
         if let Some(end) = end {
             let buffered_end = self.position.0 + (self.buffered.len() / channels) as u64;
             let remaining = end
                 .saturating_sub(buffered_end)
                 .min((samples.len() / channels) as u64);
-            samples = &samples[..remaining as usize * channels];
+            samples = &mut samples[..remaining as usize * channels];
         }
-        self.buffered.extend(samples);
+        if let Some(gain) = gain {
+            junk_libs_audio::apply_gain(samples, gain)?;
+        }
+        self.buffered.extend(samples.iter());
         Ok(true)
     }
 }

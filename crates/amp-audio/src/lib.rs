@@ -710,11 +710,77 @@ mod tests {
             assert_eq!(count, (frames as f64 * 48000.0 / 44100.0).round() as u32);
         }
     }
+    // 250 ms of 440 Hz stereo, encoded by libopus at 48 kHz.
+    const OPUS_TONE: &[u8] =
+        include_bytes!("../../amp-collector/tests/fixtures/digital-audio/original-opus.ogg");
+
+    fn stream_opus(bytes: Vec<u8>) -> Vec<f32> {
+        let mut stream =
+            stream::StreamDecoder::open(std::io::Cursor::new(bytes), stream::StreamFormat::Opus)
+                .unwrap();
+        let mut samples = Vec::new();
+        while let Some(chunk) = stream.read_frames(4_096).unwrap() {
+            samples.extend(chunk.samples);
+        }
+        samples
+    }
+
+    /// Set the `OpusHead` output gain (Q7.8 dB) and recompute the first page's CRC.
+    fn with_opus_gain(gain_q78: i16) -> Vec<u8> {
+        let mut bytes = OPUS_TONE.to_vec();
+        assert_eq!(&bytes[..4], b"OggS");
+        let segments = usize::from(bytes[26]);
+        let head = 27 + segments;
+        assert_eq!(&bytes[head..head + 8], b"OpusHead");
+        bytes[head + 16..head + 18].copy_from_slice(&gain_q78.to_le_bytes());
+        let page_end = head
+            + bytes[27..head]
+                .iter()
+                .map(|&s| usize::from(s))
+                .sum::<usize>();
+        bytes[22..26].fill(0);
+        let crc = bytes[..page_end].iter().fold(0u32, |crc, &byte| {
+            (0..8).fold(crc ^ (u32::from(byte) << 24), |crc, _| {
+                (crc << 1)
+                    ^ if crc & 0x8000_0000 != 0 {
+                        0x04c1_1db7
+                    } else {
+                        0
+                    }
+            })
+        });
+        bytes[22..26].copy_from_slice(&crc.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn opus_stream_applies_header_output_gain_like_the_file_decoder() {
+        let plain = stream_opus(OPUS_TONE.to_vec());
+        let louder = with_opus_gain(6 * 256);
+        let streamed = stream_opus(louder.clone());
+        let gain = 10_f32.powf(6.0 / 20.0);
+        assert_eq!(plain.len(), streamed.len());
+        for (plain, streamed) in plain.iter().zip(&streamed) {
+            assert!((plain * gain - streamed).abs() < 1e-5);
+        }
+        let mut file = AudioDecoder::open(ByteSource::new(
+            std::io::Cursor::new(louder),
+            MediaHint::new(None, Some("opus"), Some("audio/ogg")),
+        ))
+        .unwrap();
+        let mut decoded = Vec::new();
+        while let Some(chunk) = file.read_frames(4_096).unwrap() {
+            decoded.extend(chunk.samples);
+        }
+        assert_eq!(decoded.len(), streamed.len());
+        for (decoded, streamed) in decoded.iter().zip(&streamed) {
+            assert!((decoded - streamed).abs() < 1e-4);
+        }
+    }
+
     #[test]
     fn local_ogg_opus_plays_its_exact_length_and_seeks() {
-        // 250 ms of 440 Hz stereo, encoded by libopus at 48 kHz.
-        let bytes =
-            include_bytes!("../../amp-collector/tests/fixtures/digital-audio/original-opus.ogg");
+        let bytes = OPUS_TONE;
         for name in ["tone.opus", "tone.ogg"] {
             let (dir, mut track) = fixture(48_000, 1);
             let path = dir.path().join(name);
@@ -729,15 +795,7 @@ mod tests {
             let frames = decode(0);
             assert_eq!(frames.len(), 12_000, "{name} plays its trimmed length");
             // Same samples as the Collector stream decoder, which calls libopus directly.
-            let mut stream = stream::StreamDecoder::open(
-                std::io::Cursor::new(bytes),
-                stream::StreamFormat::Opus,
-            )
-            .unwrap();
-            let mut streamed = Vec::new();
-            while let Some(chunk) = stream.read_frames(4_096).unwrap() {
-                streamed.extend(chunk.samples);
-            }
+            let streamed = stream_opus(bytes.to_vec());
             let local = frames.iter().flatten().copied().collect::<Vec<_>>();
             assert_eq!(local.len(), streamed.len());
             let difference = local
