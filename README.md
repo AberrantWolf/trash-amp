@@ -33,14 +33,15 @@ Tested on Kubuntu (Wayland). Install the native development libraries:
 ```sh
 sudo apt install libasound2-dev libdbus-1-dev libfontconfig-dev libfreetype-dev libxkbcommon-dev
 # Only needed for `cargo test --workspace` (Collector server tests):
-sudo apt install libssl-dev
+sudo apt install libssl-dev flac ffmpeg
 ```
 
 Other distributions need the equivalent ALSA, D-Bus, fontconfig, FreeType and
 xkbcommon development packages. The build also uses CMake and a C compiler.
 
-Linux is not yet a release platform; media keys, file dialogs and credential
-storage are unverified there.
+Collector logins are saved through Secret Service (KWallet or GNOME Keyring),
+which must be running and unlocked. Linux is not yet a release platform; media
+keys and file dialogs are unverified there.
 
 ### iOS
 
