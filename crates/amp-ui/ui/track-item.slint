@@ -13,37 +13,62 @@ export component TrackItem inherits Rectangle {
     in property <bool> current;
     in property <bool> tap-to-play;
     in property <bool> keyboard-selected;
-    callback select(); callback play(); callback enqueue();
+    in property <bool> can-add-to-list;
+    in property <bool> context-menu;
+    in property <[string]> recent-lists;
+    callback select(); callback play(); callback enqueue(); callback add-to-list(); callback add-to-recent(int);
     height: TrackMetrics.height(root.track, root.text-scale);
     accessible-role: list-item;
     accessible-label: root.track.title + (root.track.status != "" ? ", " + root.track.status : "") + (root.track.scan-status != "" ? ", " + root.track.scan-status : "") + (root.current ? ", current track" : "");
     accessible-action-default => { root.play(); }
     background: root.selected ? Theme.selection : (row.has-hover || play-touch.has-hover ? Theme.hover : transparent);
-    if root.keyboard-selected: Rectangle { width: 2px; height: 100%; background: Theme.accent; }
-    row := TouchArea {
-        x: 42px; width: parent.width - 90px;
-        clicked => { root.select(); if root.tap-to-play { root.play(); } }
-        double-clicked => { if !root.tap-to-play { root.play(); } }
-    }
-    HorizontalLayout {
-        spacing: 10px;
-        Rectangle {
-            width: 36px;
-            Text { visible: !row.has-hover && !play-touch.has-hover; text: root.current ? "▶" : root.track.number; color: root.current ? Theme.accent : Theme.muted; vertical-alignment: center; horizontal-alignment: center; }
-            Image { visible: row.has-hover || play-touch.has-hover; source: @image-url("icons/play.svg"); colorize: Theme.text; width: 18px; height: 18px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
-            play-touch := TouchArea {
-                accessible-role: button; accessible-label: "Play " + root.track.title;
-                accessible-action-default => { root.play(); }
-                clicked => { root.play(); }
+    // Desktop right-click menu around the row.
+    menu := ContextMenuArea {
+        enabled: root.context-menu;
+            Menu {
+                MenuItem { title: "Play"; activated => { root.play(); } }
+                MenuItem { title: "Add to up next"; activated => { root.enqueue(); } }
+                if root.can-add-to-list: MenuSeparator {}
+                if root.can-add-to-list: Menu {
+                    title: "Add to list";
+                    for name[i] in root.recent-lists: MenuItem { title: name; activated => { root.add-to-recent(i); } }
+                    if root.recent-lists.length > 0: MenuSeparator {}
+                    MenuItem { title: "Choose a list…"; activated => { root.add-to-list(); } }
+                }
             }
+        if root.keyboard-selected: Rectangle { width: 2px; height: 100%; background: Theme.accent; }
+        row := TouchArea {
+            x: 42px; width: parent.width - (root.can-add-to-list ? 134px : 90px);
+            clicked => { root.select(); if root.tap-to-play { root.play(); } }
+            // The row takes every button, so it opens the menu on a right press.
+            pointer-event(event) => {
+                if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && root.context-menu {
+                    menu.show({ x: self.x + self.mouse-x, y: self.y + self.mouse-y });
+                }
+            }
+            double-clicked => { if !root.tap-to-play { root.play(); } }
         }
-        VerticalLayout {
-            alignment: center; spacing: 1px;
-            Text { text: root.track.title; color: Theme.text; font-size: 14px * root.text-scale; overflow: elide; vertical-alignment: center; }
-            if root.track.status != "": Text { text: root.track.status; color: Theme.muted; font-size: 11px * root.text-scale; overflow: elide; }
-            if root.track.scan-status != "": Text { text: root.track.scan-status; color: Theme.muted; font-size: 11px * root.text-scale; overflow: elide; }
+        HorizontalLayout {
+            spacing: 10px;
+            Rectangle {
+                width: 36px;
+                Text { visible: !row.has-hover && !play-touch.has-hover; text: root.current ? "▶" : root.track.number; color: root.current ? Theme.accent : Theme.muted; vertical-alignment: center; horizontal-alignment: center; }
+                Image { visible: row.has-hover || play-touch.has-hover; source: @image-url("icons/play.svg"); colorize: Theme.text; width: 18px; height: 18px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+                play-touch := TouchArea {
+                    accessible-role: button; accessible-label: "Play " + root.track.title;
+                    accessible-action-default => { root.play(); }
+                    clicked => { root.play(); }
+                }
+            }
+            VerticalLayout {
+                alignment: center; spacing: 1px;
+                Text { text: root.track.title; color: Theme.text; font-size: 14px * root.text-scale; overflow: elide; vertical-alignment: center; }
+                if root.track.status != "": Text { text: root.track.status; color: Theme.muted; font-size: 11px * root.text-scale; overflow: elide; }
+                if root.track.scan-status != "": Text { text: root.track.scan-status; color: Theme.muted; font-size: 11px * root.text-scale; overflow: elide; }
+            }
+            Text { text: root.track.duration; color: Theme.muted; width: 44px; vertical-alignment: center; }
+            if root.can-add-to-list: IconButton { label: "Add " + root.track.title + " to a list"; icon: @image-url("icons/list-add.svg"); quiet: true; clicked => { root.add-to-list(); } }
+            IconButton { label: "Add " + root.track.title + " to up next"; icon: @image-url("icons/queue.svg"); quiet: true; clicked => { root.enqueue(); } }
         }
-        Text { text: root.track.duration; color: Theme.muted; width: 44px; vertical-alignment: center; }
-        IconButton { label: "Add " + root.track.title + " to up next"; icon: @image-url("icons/queue.svg"); quiet: true; clicked => { root.enqueue(); } }
     }
 }

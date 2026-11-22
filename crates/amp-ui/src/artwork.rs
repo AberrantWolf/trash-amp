@@ -132,7 +132,7 @@ pub fn poll() -> bool {
     true
 }
 struct ArtworkModel {
-    count: usize,
+    count: std::cell::Cell<usize>,
     data: Box<dyn Fn(usize) -> Option<RowData>>,
     requested_paths: RefCell<HashMap<usize, PathBuf>>,
     notify: ModelNotify,
@@ -140,7 +140,7 @@ struct ArtworkModel {
 impl Model for ArtworkModel {
     type Data = BrowserRow;
     fn row_count(&self) -> usize {
-        self.count
+        self.count.get()
     }
     fn row_data(&self, row: usize) -> Option<BrowserRow> {
         let (mut value, path) = (self.data)(row)?;
@@ -167,14 +167,75 @@ pub fn lazy_model(
     count: usize,
     data: impl Fn(usize) -> Option<RowData> + 'static,
 ) -> ModelRc<BrowserRow> {
+    lazy_model_rc(count, data).into()
+}
+
+fn lazy_model_rc(
+    count: usize,
+    data: impl Fn(usize) -> Option<RowData> + 'static,
+) -> Rc<ArtworkModel> {
     let model = Rc::new(ArtworkModel {
-        count,
+        count: count.into(),
         data: Box::new(data),
         requested_paths: RefCell::default(),
         notify: ModelNotify::default(),
     });
     CACHE.with_borrow_mut(|cache| cache.models.push(Rc::downgrade(&model)));
-    ModelRc::from(model)
+    model
+}
+
+/// Rows that can be edited in place, so a removal or move only touches the
+/// affected rows and the rest of the view keeps its state and scroll position.
+pub struct Rows {
+    model: Rc<ArtworkModel>,
+    rows: Rc<RefCell<Vec<RowData>>>,
+}
+
+impl Rows {
+    pub fn new(rows: Vec<BrowserRow>, paths: Vec<Option<PathBuf>>) -> Self {
+        let mut paths = paths.into_iter();
+        let rows = Rc::new(RefCell::new(
+            rows.into_iter()
+                .map(|row| (row, paths.next().flatten()))
+                .collect::<Vec<_>>(),
+        ));
+        let data = rows.clone();
+        let count = rows.borrow().len();
+        Self {
+            model: lazy_model_rc(count, move |row| data.borrow().get(row).cloned()),
+            rows,
+        }
+    }
+
+    pub fn model(&self) -> ModelRc<BrowserRow> {
+        ModelRc::from(self.model.clone())
+    }
+
+    pub fn remove(&self, index: usize) {
+        let mut rows = self.rows.borrow_mut();
+        if index >= rows.len() {
+            return;
+        }
+        rows.remove(index);
+        self.model.count.set(rows.len());
+        drop(rows);
+        // Requested rows are keyed by position; rows re-register when read.
+        self.model.requested_paths.borrow_mut().clear();
+        self.model.notify.row_removed(index, 1);
+    }
+
+    pub fn move_row(&self, from: usize, to: usize) {
+        let mut rows = self.rows.borrow_mut();
+        if from >= rows.len() || to >= rows.len() || from == to {
+            return;
+        }
+        let row = rows.remove(from);
+        rows.insert(to, row);
+        drop(rows);
+        self.model.requested_paths.borrow_mut().clear();
+        self.model.notify.row_removed(from, 1);
+        self.model.notify.row_added(to, 1);
+    }
 }
 
 #[cfg(test)]
@@ -190,6 +251,26 @@ mod tests {
         let (_, width, height) = decode(&path).unwrap();
         std::fs::remove_file(path).unwrap();
         assert_eq!((width, height), (128, 64));
+    }
+    #[test]
+    fn editable_rows_remove_and_move_in_place() {
+        let row = |title: &str| BrowserRow {
+            title: title.into(),
+            ..Default::default()
+        };
+        let rows = Rows::new(vec![row("a"), row("b"), row("c")], vec![]);
+        let model = rows.model();
+        let titles = || {
+            (0..model.row_count())
+                .map(|i| model.row_data(i).unwrap().title.to_string())
+                .collect::<Vec<_>>()
+        };
+        rows.remove(1);
+        assert_eq!(titles(), ["a", "c"]);
+        rows.move_row(0, 1);
+        assert_eq!(titles(), ["c", "a"]);
+        rows.remove(5);
+        assert_eq!(titles(), ["c", "a"]);
     }
     #[test]
     fn invalid_artwork_falls_back() {

@@ -858,6 +858,13 @@ pub(super) fn enqueue_track(ui: &PlayerWindow, s: &mut State, track: Track) {
     s.playback.enqueue(track);
     ui.set_status("Added to up next".into());
 }
+/// The album or track a browser or artist-page row shows.
+pub(super) fn row_target(s: &State, detail: bool, index: usize) -> Option<Target> {
+    match row_action(s, detail, index)? {
+        Action::Open(target) => Some(target),
+        Action::More(_) | Action::None => None,
+    }
+}
 fn row_action(s: &State, detail: bool, index: usize) -> Option<Action> {
     if detail {
         s.browser.detail_rows.get(index).cloned()

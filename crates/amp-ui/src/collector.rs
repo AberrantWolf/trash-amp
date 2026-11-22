@@ -5,8 +5,9 @@ use amp_app::{browse::SelectionRead, catalog::Generation};
 use amp_collector::Snapshot;
 use amp_collector::{
     Adapter, AppendScope, CatalogView, ConnectionKey, ConnectionState, Download, DownloadStatus,
-    PlaybackFormat, PlaylistAction, PlaylistChange, PlaylistTracks, SavedConnection, SourceView,
-    api, ids,
+    PlaybackFormat, PlaylistAction, PlaylistChange, PlaylistOutcome, PlaylistTracks,
+    SavedConnection, SourceView, api, apply_list_change, by_recent_use, ids, patch_lists,
+    track_collection,
 };
 use anyhow::Context;
 use std::path::Path;
@@ -19,14 +20,31 @@ struct View {
     online: bool,
     connection: ConnectionState,
     operation: Option<(u64, u64)>,
+    /// The open list's rows, edited in place for removals and moves.
+    list_rows: RefCell<Option<artwork::Rows>>,
+    /// The open list as it was before an edit shown ahead of the server's answer.
+    optimistic: Option<api::CollectionListView>,
+    /// Lists most recently created or added to on this device, newest first.
+    recent: Vec<ids::CollectionListId>,
 }
 impl View {
     fn selected_list(&self) -> Option<&api::CollectionListView> {
+        self.selected_list_index().map(|(_, list)| list)
+    }
+    fn selected_list_index(&self) -> Option<(usize, &api::CollectionListView)> {
         let id = self.list?;
         self.snapshot
             .as_ref()?
             .lists
             .iter()
+            .enumerate()
+            .find(|(_, l)| l.list.id == id)
+    }
+    fn list_mut(&mut self, id: ids::CollectionListId) -> Option<&mut api::CollectionListView> {
+        self.snapshot
+            .as_mut()?
+            .lists
+            .iter_mut()
             .find(|l| l.list.id == id)
     }
 }
@@ -40,7 +58,7 @@ enum Event {
     Connected(u64, anyhow::Result<Box<Connected>>),
     Approval(u64, String),
     OpenFailed(u64, String),
-    Mutation(u64, ConnectionKey, bool, anyhow::Result<()>),
+    Mutation(u64, ConnectionKey, Purpose, Applied),
     Downloads(anyhow::Result<Vec<Download>>),
     DownloadMessage(String),
     PlaybackFormatSaved(anyhow::Result<()>),
@@ -188,30 +206,6 @@ fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, downloads
     ui.set_collector_active(view.selected.is_some());
     ui.set_collector_online(view.online);
     ui.set_connection_kind(connection_kind(view.connection));
-    ui.set_saved_lists(ModelRc::new(VecModel::from(
-        std::iter::once(SharedString::from("Select a list"))
-            .chain(
-                view.snapshot
-                    .as_ref()
-                    .map(|s| {
-                        s.lists
-                            .iter()
-                            .map(|l| {
-                                SharedString::from(format!(
-                                    "{} · {}",
-                                    l.list.name,
-                                    s.collections
-                                        .iter()
-                                        .find(|c| c.id == l.list.collection_id)
-                                        .map_or("", |c| c.name.as_str())
-                                ))
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default(),
-            )
-            .collect::<Vec<_>>(),
-    )));
     ui.set_collections(ModelRc::new(VecModel::from(
         std::iter::once(SharedString::from("All music collections"))
             .chain(
@@ -222,28 +216,142 @@ fn install(ui: &PlayerWindow, state: &Rc<RefCell<State>>, view: &View, downloads
             )
             .collect::<Vec<_>>(),
     )));
-    ui.set_list_index(
-        view.snapshot
-            .as_ref()
-            .and_then(|s| s.lists.iter().position(|l| Some(l.list.id) == view.list))
-            .map_or(0, |i| i as i32 + 1),
-    );
     render_list(ui, view, downloads);
+}
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+fn entry_artwork(snapshot: &CatalogView, entry: &api::PresentedListEntry) -> Option<PathBuf> {
+    entry
+        .item_id
+        .and_then(|id| snapshot.artwork.get(&id.to_string()))
+        .map(PathBuf::from)
+}
+fn list_subtitle(snapshot: &CatalogView, list: &api::CollectionListView) -> String {
+    let mut text = plural(list.list.entry_count as usize, "track");
+    if snapshot.collections.len() > 1
+        && let Some(collection) = snapshot
+            .collections
+            .iter()
+            .find(|c| c.id == list.list.collection_id)
+    {
+        text = format!("{text} · {}", collection.name);
+    }
+    text
+}
+/// One row per list, covered by the first entry that has artwork.
+fn list_cards<'a>(
+    snapshot: &CatalogView,
+    lists: impl Iterator<Item = &'a api::CollectionListView>,
+) -> ModelRc<BrowserRow> {
+    let (rows, paths): (Vec<_>, Vec<_>) = lists
+        .map(|list| {
+            (
+                BrowserRow {
+                    kind: 1,
+                    title: list.list.name.clone().into(),
+                    subtitle: list_subtitle(snapshot, list).into(),
+                    status: if list.list.can_edit { "" } else { "Read only" }.into(),
+                    ..Default::default()
+                },
+                list.entries
+                    .items
+                    .iter()
+                    .find_map(|entry| entry_artwork(snapshot, entry)),
+            )
+        })
+        .collect();
+    artwork::model(rows, paths)
+}
+/// How many lists a right-click "Add to list" menu offers directly.
+const MENU_LISTS: usize = 5;
+/// Editable lists for right-click menus, most recently used first.
+fn menu_lists(view: &View) -> Vec<&api::CollectionListView> {
+    let Some(snapshot) = view.snapshot.as_ref() else {
+        return Vec::new();
+    };
+    let mut lists = by_recent_use(
+        snapshot.lists.iter().filter(|l| l.list.can_edit),
+        &view.recent,
+    );
+    lists.truncate(MENU_LISTS);
+    lists
+}
+/// Everything on the Lists page except the open list's rows.
+fn render_lists(ui: &PlayerWindow, view: &View) {
+    let several = view
+        .snapshot
+        .as_ref()
+        .is_some_and(|s| s.collections.len() > 1);
+    ui.set_recent_lists(ModelRc::new(VecModel::from(
+        menu_lists(view)
+            .iter()
+            .map(|list| {
+                let collection = several
+                    .then(|| {
+                        view.snapshot
+                            .as_ref()?
+                            .collections
+                            .iter()
+                            .find(|c| c.id == list.list.collection_id)
+                    })
+                    .flatten();
+                SharedString::from(match collection {
+                    Some(collection) => format!("{} · {}", list.list.name, collection.name),
+                    None => list.list.name.clone(),
+                })
+            })
+            .collect::<Vec<_>>(),
+    )));
+    let snapshot = view.snapshot.as_ref();
+    let editable = |collection: &api::ClientCollection| collection.can_edit_playlists;
+    ui.set_can_add_to_list(
+        view.online && snapshot.is_some_and(|s| s.collections.iter().any(editable)),
+    );
+    ui.set_can_create_list(snapshot.is_some_and(|s| {
+        s.collections
+            .iter()
+            .any(|c| editable(c) && view.collection.is_none_or(|id| c.id == id))
+    }));
+    let Some(snapshot) = snapshot else {
+        ui.set_list_cards(ModelRc::default());
+        ui.set_open_list(-1);
+        return;
+    };
+    ui.set_list_cards(list_cards(snapshot, snapshot.lists.iter()));
+    let Some((index, list)) = view.selected_list_index() else {
+        ui.set_open_list(-1);
+        ui.set_list_editable(false);
+        return;
+    };
+    ui.set_open_list(index as i32);
+    ui.set_open_list_title(list.list.name.clone().into());
+    let mut detail = list_subtitle(snapshot, list);
+    if !list.list.can_edit {
+        detail += " · Read only";
+    }
+    ui.set_open_list_detail(detail.into());
+    ui.set_open_list_art(
+        list.entries
+            .items
+            .iter()
+            .position(|entry| entry_artwork(snapshot, entry).is_some())
+            .map_or(-1, |i| i as i32),
+    );
+    ui.set_list_editable(list.list.can_edit);
 }
 fn render_list(ui: &PlayerWindow, view: &View, downloads: &[Download]) {
     ui.set_list_entry(-1);
-    let Some(list) = view.selected_list() else {
-        ui.set_list_editable(
-            view.snapshot
-                .as_ref()
-                .is_some_and(|s| s.collections.iter().any(|c| c.can_edit_playlists)),
-        );
-        ui.set_list_name("".into());
+    render_lists(ui, view);
+    let (Some(snapshot), Some(list)) = (view.snapshot.as_ref(), view.selected_list()) else {
+        view.list_rows.replace(None);
         ui.set_list_rows(ModelRc::default());
         return;
     };
-    ui.set_list_name(list.list.name.clone().into());
-    ui.set_list_editable(list.list.can_edit);
     let tracks = view
         .selected
         .map(|key| PlaylistTracks::new(key, list, downloads));
@@ -251,13 +359,9 @@ fn render_list(ui: &PlayerWindow, view: &View, downloads: &[Download]) {
         .entries
         .items
         .iter()
-        .map(|e| {
-            e.item_id
-                .and_then(|id| view.snapshot.as_ref()?.artwork.get(&id.to_string()))
-                .map(PathBuf::from)
-        })
+        .map(|e| entry_artwork(snapshot, e))
         .collect();
-    ui.set_list_rows(artwork::model(
+    let rows = artwork::Rows::new(
         list.entries
             .items
             .iter()
@@ -278,33 +382,288 @@ fn render_list(ui: &PlayerWindow, view: &View, downloads: &[Download]) {
                         _ => "Unavailable",
                     }
                 };
+                let subtitle = [e.artist.as_deref(), e.album.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" · ");
                 BrowserRow {
                     kind: 1,
                     title: e.title.clone().into(),
-                    subtitle: e.album.as_deref().unwrap_or("").into(),
+                    artist: e.artist.as_deref().unwrap_or("").into(),
+                    subtitle: subtitle.into(),
                     status: status.into(),
                     ..Default::default()
                 }
             })
             .collect::<Vec<_>>(),
         paths,
-    ));
+    );
+    ui.set_list_rows(rows.model());
+    view.list_rows.replace(Some(rows));
 }
 fn playlist_playable(track: &Track, online: bool) -> bool {
     track.availability == amp_core::Availability::Downloaded
         || (online && track.availability == amp_core::Availability::Available)
 }
-fn playlist_request(
+/// Music chosen for "Add to list", kept while the picker is open.
+#[derive(Clone)]
+enum AddTarget {
+    Album {
+        item: ids::ItemId,
+        collection: ids::CollectionId,
+        /// The selected disc's first track, when the album has several discs.
+        disc: Option<Box<Track>>,
+    },
+    /// Tracks from one collection, added in order.
+    Tracks(Vec<Track>),
+}
+impl AddTarget {
+    fn changes(&self, disc_only: bool) -> Vec<PlaylistChange> {
+        match self {
+            Self::Album {
+                disc: Some(track), ..
+            } if disc_only => vec![PlaylistChange::Append {
+                track: track.clone(),
+                scope: AppendScope::Disc,
+            }],
+            Self::Album {
+                item, collection, ..
+            } => vec![PlaylistChange::AppendItem {
+                item: *item,
+                collection: *collection,
+            }],
+            Self::Tracks(tracks) => tracks
+                .iter()
+                .map(|track| PlaylistChange::Append {
+                    track: Box::new(track.clone()),
+                    scope: AppendScope::Track,
+                })
+                .collect(),
+        }
+    }
+    fn collection(&self) -> Option<ids::CollectionId> {
+        match self {
+            Self::Album { collection, .. } => Some(*collection),
+            Self::Tracks(tracks) => tracks
+                .first()
+                .and_then(track_collection)
+                .map(|(_, collection)| collection),
+        }
+    }
+}
+#[derive(Default)]
+struct AddPicker {
+    target: Option<(AddTarget, String)>,
+    lists: Vec<ids::CollectionListId>,
+}
+fn album_target(
+    view: &View,
+    album: &amp_core::Album,
+    disc: Option<Box<Track>>,
+) -> Option<AddTarget> {
+    let snapshot = view.snapshot.as_ref()?;
+    let item = album.id.item.parse().ok()?;
+    let collection = snapshot
+        .album_collections
+        .get(&album.id.item)
+        .copied()
+        .or_else(|| {
+            album
+                .tracks
+                .first()
+                .and_then(track_collection)
+                .map(|(_, collection)| collection)
+        })?;
+    Some(AddTarget::Album {
+        item,
+        collection,
+        disc,
+    })
+}
+/// Resolve what an "Add to list" action refers to, with a description for messages.
+fn add_target(
     ui: &PlayerWindow,
     state: &State,
     view: &View,
+    source: AddSource,
+    row: i32,
+) -> Option<(AddTarget, String)> {
+    let describe = |title: &str, artist: &str| {
+        if artist.is_empty() {
+            format!("“{title}”")
+        } else {
+            format!("“{title}” by {artist}")
+        }
+    };
+    let track = |track: Track| {
+        let text = describe(&track.title, &track.artist);
+        Some((AddTarget::Tracks(vec![track]), text))
+    };
+    match source {
+        AddSource::Album => {
+            let index = state.selected?;
+            let album = state.library.albums.get(index)?;
+            let disc = ui
+                .get_show_disc_selector()
+                .then(|| {
+                    displayed_tracks(state, index)
+                        .into_iter()
+                        .next()
+                        .map(Box::new)
+                })
+                .flatten();
+            let target = album_target(view, album, disc)?;
+            Some((target, describe(&album.title, &album.artist)))
+        }
+        AddSource::Track => track(
+            displayed_tracks(state, state.selected?)
+                .into_iter()
+                .nth(usize::try_from(row).ok()?)?,
+        ),
+        AddSource::Browser | AddSource::Detail => {
+            let target = browse::row_target(
+                state,
+                source == AddSource::Detail,
+                usize::try_from(row).ok()?,
+            )?;
+            match target {
+                amp_core::browse::Target::Album(id) => {
+                    let album = state.library.albums.iter().find(|a| a.id == id)?;
+                    let target = album_target(view, album, None)?;
+                    Some((target, describe(&album.title, &album.artist)))
+                }
+                target @ amp_core::browse::Target::Track { .. } => {
+                    track(browse::resolve_track(state, &target)?)
+                }
+                amp_core::browse::Target::Artist(_) => None,
+            }
+        }
+        AddSource::Queue => {
+            // The playing track and everything after it, from this server's
+            // first collection in the queue; a list holds one collection's music.
+            let key = view.selected?;
+            let playback = state.playback.snapshot();
+            let queue = playback
+                .current
+                .iter()
+                .chain(playback.up_next.iter())
+                .collect::<Vec<_>>();
+            let (_, collection) = queue
+                .iter()
+                .filter_map(|t| track_collection(t))
+                .find(|(owner, _)| *owner == key)?;
+            let tracks = queue
+                .iter()
+                .filter(|t| track_collection(t) == Some((key, collection)))
+                .map(|t| (*t).clone())
+                .collect::<Vec<_>>();
+            let left_out = queue.len() - tracks.len();
+            let mut text = format!("{} from up next", plural(tracks.len(), "track"));
+            if left_out > 0 {
+                text += &format!(" ({left_out} from elsewhere left out)");
+            }
+            Some((AddTarget::Tracks(tracks), text))
+        }
+    }
+}
+/// What a running list change is for, so its result can be reported in place.
+enum Purpose {
+    Edit,
+    /// Adding the described music from the library.
+    Add(String),
+}
+fn needs_resync(outcomes: &[PlaylistOutcome]) -> bool {
+    outcomes
+        .iter()
+        .any(|o| matches!(o, PlaylistOutcome::Retried | PlaylistOutcome::Discarded))
+}
+type StartJob = dyn Fn(&PlayerWindow, ConnectionKey, Job, Purpose);
+/// Adds a target, described by the string, to a list; true adds only the selected disc.
+type StartAdd = dyn Fn(&PlayerWindow, AddTarget, String, AddTo, bool);
+enum AddTo {
+    Existing(api::CollectionListSummary),
+    New {
+        collection: ids::CollectionId,
+        name: String,
+    },
+}
+enum Job {
+    Single(PlaylistAction),
+    /// Append in order, each change at the revision the previous one produced.
+    Add {
+        list: AddTo,
+        changes: Vec<PlaylistChange>,
+    },
+}
+/// Outcomes the server accepted, and the error that stopped the job, if any.
+struct Applied {
+    outcomes: Vec<PlaylistOutcome>,
+    error: Option<anyhow::Error>,
+}
+async fn run_job(adapter: &Adapter, key: ConnectionKey, job: Job) -> Applied {
+    let mut outcomes = Vec::new();
+    let error = match job {
+        Job::Single(action) => match adapter.apply_playlist_action(key, action).await {
+            Ok(outcome) => {
+                outcomes.push(outcome);
+                None
+            }
+            Err(error) => Some(error),
+        },
+        Job::Add { list, changes } => 'add: {
+            let mut list = match list {
+                AddTo::Existing(list) => list,
+                AddTo::New { collection, name } => match adapter
+                    .apply_playlist_action(key, PlaylistAction::Create { collection, name })
+                    .await
+                {
+                    Ok(created) => {
+                        let PlaylistOutcome::Created(list) = &created else {
+                            unreachable!("creating a list reports its summary")
+                        };
+                        let list = list.clone();
+                        outcomes.push(created);
+                        list
+                    }
+                    Err(error) => break 'add Some(error),
+                },
+            };
+            for change in changes {
+                let action = PlaylistAction::Update {
+                    list: list.clone(),
+                    change,
+                };
+                match adapter.apply_playlist_action(key, action).await {
+                    Ok(outcome) => {
+                        if let PlaylistOutcome::Updated { list: next, .. } = &outcome {
+                            list = next.clone();
+                        }
+                        outcomes.push(outcome);
+                    }
+                    Err(error) => break 'add Some(error),
+                }
+            }
+            None
+        }
+    };
+    Applied { outcomes, error }
+}
+fn playlist_request(
+    view: &View,
     action: ListAction,
+    entry: i32,
+    name: &str,
 ) -> anyhow::Result<(ConnectionKey, PlaylistAction)> {
     let key = view.selected.context("Select server")?;
     if action == ListAction::Discard {
         return Ok((key, PlaylistAction::Discard));
     }
-    anyhow::ensure!(view.online, "List editing requires a connection");
+    anyhow::ensure!(
+        view.online,
+        "Editing lists needs a connection to the server"
+    );
     if action == ListAction::Retry {
         return Ok((key, PlaylistAction::Retry));
     }
@@ -322,45 +681,27 @@ fn playlist_request(
             key,
             PlaylistAction::Create {
                 collection: collection.id,
-                name: ui.get_list_name().to_string(),
+                name: name.to_owned(),
             },
         ));
     }
-    let list = view.selected_list().context("Select list")?;
+    let list = view.selected_list().context("Open a list")?;
     let change = match action {
         ListAction::Rename => PlaylistChange::Edit(api::CollectionListChange::Rename {
-            name: ui.get_list_name().to_string(),
+            name: name.to_owned(),
         }),
         ListAction::Delete => PlaylistChange::Edit(api::CollectionListChange::Delete),
-        ListAction::AppendAlbum | ListAction::AppendDisc | ListAction::AppendTrack => {
-            let album = state.selected.context("Select album")?;
-            let (scope, index) = match action {
-                ListAction::AppendTrack => (
-                    AppendScope::Track,
-                    usize::try_from(ui.get_selected_track()).context("Select track")?,
-                ),
-                ListAction::AppendDisc => (AppendScope::Disc, 0),
-                _ => (AppendScope::Album, 0),
-            };
-            let track = displayed_tracks(state, album)
-                .into_iter()
-                .nth(index)
-                .context("Select track")?;
-            PlaylistChange::Append {
-                track: Box::new(track),
-                scope,
-            }
-        }
         ListAction::RemoveEntry | ListAction::MoveUp | ListAction::MoveDown => {
-            let i = usize::try_from(ui.get_list_entry()).context("Select entry")?;
+            let i = usize::try_from(entry).context("Choose an entry")?;
             let entries = &list.entries.items;
-            let entry = entries.get(i).context("Select entry")?;
+            let entry = entries.get(i).context("Choose an entry")?;
             PlaylistChange::Edit(if action == ListAction::RemoveEntry {
                 api::CollectionListChange::Remove { entry_id: entry.id }
             } else {
                 let before = if action == ListAction::MoveUp {
                     entries.get(i.checked_sub(1).context("Already first")?)
                 } else {
+                    anyhow::ensure!(i + 1 < entries.len(), "Already last");
                     entries.get(i + 2)
                 };
                 api::CollectionListChange::Move {
@@ -378,6 +719,19 @@ fn playlist_request(
             change,
         },
     ))
+}
+fn sync_banner(ui: &PlayerWindow, adapter: &Adapter, key: Option<ConnectionKey>) {
+    let pending = key.is_some_and(|key| {
+        adapter
+            .pending_commands(key)
+            .is_ok_and(|pending| !pending.is_empty())
+    });
+    ui.set_list_sync_pending(pending);
+    if pending {
+        ui.set_list_sync_error(
+            "A list change from an earlier session was not confirmed by the server. Try it again, or discard it to keep the lists as they are on the server.".into(),
+        );
+    }
 }
 
 fn install_downloads(ui: &PlayerWindow, inventory: &mut Vec<Download>, mut entries: Vec<Download>) {
@@ -426,6 +780,9 @@ impl Controller {
             online: accepted.source_online.unwrap_or(false),
             connection: ConnectionState::Disconnected,
             operation: None,
+            list_rows: RefCell::default(),
+            optimistic: None,
+            recent: Vec::new(),
         }));
         let (tx, rx) = mpsc::channel();
         let download_events = tx.clone();
@@ -450,9 +807,17 @@ impl Controller {
             }),
         )?;
         super::wire_source_selection(ui, state);
+        {
+            let mut view = view.borrow_mut();
+            view.recent = view
+                .selected
+                .map(|key| adapter.recent_lists(key))
+                .unwrap_or_default();
+        }
         if view.borrow().selected.is_some() {
             install(ui, state, &view.borrow(), &download_records.borrow());
         }
+        sync_banner(ui, &adapter, view.borrow().selected);
         ui.set_download_budget(
             (adapter.budget()? as f64 / (1024. * 1024. * 1024.))
                 .to_string()
@@ -666,13 +1031,12 @@ impl Controller {
             let view = view.clone();
             let weak = ui.as_weak();
             let inventory = download_records.clone();
-            ui.on_list_selected(move |i| {
+            ui.on_open_list_at(move |i| {
                 let Some(ui) = weak.upgrade() else { return };
                 let mut view = view.borrow_mut();
-                let list = usize::try_from(i).ok().and_then(|index| {
-                    let list = view.snapshot.as_ref()?.lists.get(index.checked_sub(1)?)?;
-                    Some(list.list.id)
-                });
+                let list = usize::try_from(i)
+                    .ok()
+                    .and_then(|index| Some(view.snapshot.as_ref()?.lists.get(index)?.list.id));
                 if view.list == list {
                     return;
                 }
@@ -747,28 +1111,13 @@ impl Controller {
                 );
             });
         }
-        {
+        let start: Rc<StartJob> = {
             let a = adapter.clone();
             let view = view.clone();
-            let state = state.clone();
-            let weak = ui.as_weak();
             let tx = tx.clone();
             let g = generation.clone();
             let catalog = catalog.clone();
-            ui.on_list_command(move |action| {
-                let Some(ui) = weak.upgrade() else { return };
-                if ui.get_collector_busy() {
-                    return;
-                }
-                let request = playlist_request(&ui, &state.borrow(), &view.borrow(), action);
-                let (key, request) = match request {
-                    Ok(request) => request,
-                    Err(error) => {
-                        ui.set_connection_status(error.to_string().into());
-                        return;
-                    }
-                };
-                let refresh = !matches!(request, PlaylistAction::Discard);
+            Rc::new(move |ui, key, job, purpose| {
                 let v = g.current();
                 view.borrow_mut().operation = Some((v, catalog.snapshot().source_load_revision));
                 ui.set_collector_busy(true);
@@ -776,14 +1125,219 @@ impl Controller {
                 let tx = tx.clone();
                 let catalog = catalog.clone();
                 std::thread::spawn(move || {
-                    let result =
-                        runtime().and_then(|rt| rt.block_on(a.apply_playlist_action(key, request)));
-                    let refresh_after = refresh && result.is_ok();
-                    let _ = tx.send(Event::Mutation(v, key, refresh, result));
-                    if refresh_after {
+                    let applied = match runtime() {
+                        Ok(rt) => rt.block_on(run_job(&a, key, job)),
+                        Err(error) => Applied {
+                            outcomes: Vec::new(),
+                            error: Some(error),
+                        },
+                    };
+                    let resync = applied.error.is_none() && needs_resync(&applied.outcomes);
+                    let _ = tx.send(Event::Mutation(v, key, purpose, applied));
+                    // Replayed or dropped commands have unknown effects; reread the server.
+                    if resync {
                         open_source(&catalog, v, key);
                     }
                 });
+            })
+        };
+        {
+            let view = view.clone();
+            let weak = ui.as_weak();
+            let start = start.clone();
+            ui.on_list_command(move |action, entry, name| {
+                let Some(ui) = weak.upgrade() else { return };
+                if ui.get_collector_busy() {
+                    return;
+                }
+                let request = playlist_request(&view.borrow(), action, entry, &name);
+                let (key, request) = match request {
+                    Ok(request) => request,
+                    Err(error) => {
+                        ui.set_status(error.to_string().into());
+                        return;
+                    }
+                };
+                // Show removals and moves at once; the server's answer settles the revision.
+                if let PlaylistAction::Update {
+                    list,
+                    change:
+                        PlaylistChange::Edit(
+                            change @ (api::CollectionListChange::Remove { .. }
+                            | api::CollectionListChange::Move { .. }),
+                        ),
+                } = &request
+                    && let Ok(i) = usize::try_from(entry)
+                {
+                    let mut current = view.borrow_mut();
+                    if let Some(row) = current.list_mut(list.id) {
+                        let before = row.clone();
+                        apply_list_change(row, change);
+                        row.list.entry_count = row.entries.items.len() as u32;
+                        current.optimistic = Some(before);
+                    }
+                    if let Some(rows) = current.list_rows.borrow().as_ref() {
+                        match action {
+                            ListAction::RemoveEntry => rows.remove(i),
+                            ListAction::MoveUp => rows.move_row(i, i - 1),
+                            _ => rows.move_row(i, i + 1),
+                        }
+                    }
+                    let last = ui.get_list_rows().row_count() as i32 - 1;
+                    let i = i as i32;
+                    ui.set_list_entry(match action {
+                        ListAction::RemoveEntry => i.min(last),
+                        ListAction::MoveUp => i - 1,
+                        _ => i + 1,
+                    });
+                    render_lists(&ui, &current);
+                }
+                start(&ui, key, Job::Single(request), Purpose::Edit);
+            });
+        }
+        let picker = Rc::new(RefCell::new(AddPicker::default()));
+        {
+            let view = view.clone();
+            let state = state.clone();
+            let weak = ui.as_weak();
+            let picker = picker.clone();
+            ui.on_add_to_list(move |source, row| {
+                let Some(ui) = weak.upgrade() else { return };
+                let view = view.borrow();
+                let Some(snapshot) = view.snapshot.as_ref() else {
+                    return;
+                };
+                let Some((target, title, collection)) =
+                    add_target(&ui, &state.borrow(), &view, source, row).and_then(
+                        |(target, title)| {
+                            let collection = target.collection()?;
+                            Some((target, title, collection))
+                        },
+                    )
+                else {
+                    ui.set_status("This can't be added to a list".into());
+                    return;
+                };
+                let lists = by_recent_use(
+                    snapshot
+                        .lists
+                        .iter()
+                        .filter(|l| l.list.can_edit && l.list.collection_id == collection),
+                    &view.recent,
+                );
+                ui.set_add_to_list_rows(list_cards(snapshot, lists.iter().copied()));
+                ui.set_add_to_list_can_create(
+                    snapshot
+                        .collections
+                        .iter()
+                        .any(|c| c.id == collection && c.can_edit_playlists),
+                );
+                ui.set_add_to_list_disc(matches!(&target, AddTarget::Album { disc: Some(_), .. }));
+                ui.set_add_to_list_title(title.clone().into());
+                *picker.borrow_mut() = AddPicker {
+                    lists: lists.iter().map(|l| l.list.id).collect(),
+                    target: Some((target, title)),
+                };
+                ui.set_add_to_list_open(true);
+            });
+        }
+        // Start adding music once its list is known, or say why it can't be.
+        let add: Rc<StartAdd> = {
+            let view = view.clone();
+            let start = start.clone();
+            Rc::new(move |ui, target, title, list, disc_only| {
+                if ui.get_collector_busy() {
+                    return;
+                }
+                let (key, online) = {
+                    let view = view.borrow();
+                    (view.selected, view.online)
+                };
+                let Some(key) = key else { return };
+                if !online {
+                    ui.set_status("Adding to a list needs a connection to the server".into());
+                    return;
+                }
+                if let AddTo::Existing(list) = &list
+                    && target.collection() != Some(list.collection_id)
+                {
+                    ui.set_status(
+                        format!("{title} is in a different collection from “{}”", list.name).into(),
+                    );
+                    return;
+                }
+                let changes = target.changes(disc_only);
+                start(ui, key, Job::Add { list, changes }, Purpose::Add(title));
+            })
+        };
+        {
+            let view = view.clone();
+            let weak = ui.as_weak();
+            let picker = picker.clone();
+            let add = add.clone();
+            ui.on_add_to_list_choose(move |index| {
+                let Some(ui) = weak.upgrade() else { return };
+                let chosen = {
+                    let picker = picker.borrow();
+                    let view = view.borrow();
+                    (|| {
+                        let (target, title) = picker.target.clone()?;
+                        let id = picker.lists.get(usize::try_from(index).ok()?)?;
+                        let list = view
+                            .snapshot
+                            .as_ref()?
+                            .lists
+                            .iter()
+                            .find(|l| l.list.id == *id)?;
+                        Some((target, title, list.list.clone()))
+                    })()
+                };
+                let Some((target, title, list)) = chosen else {
+                    return;
+                };
+                let disc_only = ui.get_add_to_list_disc_only();
+                add(&ui, target, title, AddTo::Existing(list), disc_only);
+            });
+        }
+        {
+            let weak = ui.as_weak();
+            let picker = picker.clone();
+            let add = add.clone();
+            ui.on_add_to_list_create(move |name| {
+                let Some(ui) = weak.upgrade() else { return };
+                let Some((target, title)) = picker.borrow().target.clone() else {
+                    return;
+                };
+                let Some(collection) = target.collection() else {
+                    return;
+                };
+                let list = AddTo::New {
+                    collection,
+                    name: name.to_string(),
+                };
+                let disc_only = ui.get_add_to_list_disc_only();
+                add(&ui, target, title, list, disc_only);
+            });
+        }
+        {
+            let view = view.clone();
+            let state = state.clone();
+            let weak = ui.as_weak();
+            let add = add.clone();
+            ui.on_add_to_recent_list(move |source, row, index| {
+                let Some(ui) = weak.upgrade() else { return };
+                let chosen = {
+                    let view = view.borrow();
+                    let list = usize::try_from(index)
+                        .ok()
+                        .and_then(|i| menu_lists(&view).get(i).map(|l| l.list.clone()));
+                    list.zip(add_target(&ui, &state.borrow(), &view, source, row))
+                };
+                let Some((list, (target, title))) = chosen else {
+                    ui.set_status("This can't be added to a list".into());
+                    return;
+                };
+                add(&ui, target, title, AddTo::Existing(list), false);
             });
         }
         {
@@ -970,8 +1524,6 @@ impl Controller {
                 ui.set_collector_active(collector);
                 ui.set_collector_online(false);
                 ui.set_connection_kind(ConnectionKind::Disconnected);
-                ui.set_list_index(0);
-                ui.set_saved_lists(ModelRc::default());
                 render_list(ui, &view, &self.download_records.borrow());
             }
         }
@@ -1012,19 +1564,31 @@ impl Controller {
             .and_then(|list| list.entries.items.get(ui.get_list_entry() as usize))
             .map(|entry| entry.id);
         let mut next = source.catalog;
+        // A projection can be older than edits already applied here: keep
+        // newer revisions, loaded entries, and an edit still awaiting the server.
         if let Some(snapshot) = &mut next
-            && let Some(current) = view.selected_list()
-            && let Some(incoming) = snapshot
-                .lists
-                .iter_mut()
-                .find(|row| row.list.id == current.list.id)
-            && (incoming.list.revision.0 < current.list.revision.0
-                || (incoming.list.revision == current.list.revision
-                    && incoming.entries.items.len() < current.entries.items.len()))
+            && let Some(current) = view.snapshot.as_ref()
         {
-            *incoming = current.clone();
+            let pending = view.optimistic.as_ref().map(|list| list.list.id);
+            for incoming in &mut snapshot.lists {
+                if let Some(kept) = current.lists.iter().find(|row| {
+                    row.list.id == incoming.list.id
+                        && (pending == Some(row.list.id)
+                            || incoming.list.revision.0 < row.list.revision.0
+                            || (incoming.list.revision == row.list.revision
+                                && incoming.entries.items.len() < row.entries.items.len()))
+                }) {
+                    *incoming = kept.clone();
+                }
+            }
         }
         view.connections = source.connections;
+        if view.selected != source.selected {
+            view.recent = source
+                .selected
+                .map(|key| self.adapter.recent_lists(key))
+                .unwrap_or_default();
+        }
         view.selected = source.selected;
         view.snapshot = next;
         if view.selected_list().is_none() {
@@ -1043,6 +1607,127 @@ impl Controller {
                         .map_or(-1, |i| i as i32),
                 );
             }
+        }
+    }
+
+    /// Settle a list change: keep what the server accepted and roll back the rest.
+    fn finish_mutation(
+        &self,
+        ui: &PlayerWindow,
+        key: ConnectionKey,
+        purpose: Purpose,
+        applied: Applied,
+    ) {
+        let mut view = self.view.borrow_mut();
+        if applied.error.is_some() || !needs_resync(&applied.outcomes) {
+            view.operation = None;
+        }
+        let optimistic = view.optimistic.take();
+        view.recent = self.adapter.recent_lists(key);
+        // Rows already show an optimistic edit; anything else needs the rows rebuilt.
+        let mut rebuild = false;
+        let mut message = None;
+        for outcome in &applied.outcomes {
+            match outcome {
+                PlaylistOutcome::Updated {
+                    list,
+                    change:
+                        api::CollectionListChange::Remove { .. }
+                        | api::CollectionListChange::Move { .. },
+                } if optimistic.as_ref().is_some_and(|o| o.list.id == list.id) => {
+                    if let Some(row) = view.list_mut(list.id)
+                        && row.list.revision.0 < list.revision.0
+                    {
+                        row.list = list.clone();
+                    }
+                }
+                outcome => {
+                    if let Some(snapshot) = view.snapshot.as_mut() {
+                        patch_lists(&mut snapshot.lists, outcome);
+                    }
+                    rebuild = true;
+                }
+            }
+            message = match outcome {
+                PlaylistOutcome::Created(list) => {
+                    if matches!(purpose, Purpose::Edit) {
+                        view.list = Some(list.id);
+                        ui.set_collector_list_loading(false);
+                    }
+                    Some(format!("Created “{}”", list.name))
+                }
+                PlaylistOutcome::Updated { list, change } => match change {
+                    api::CollectionListChange::Delete => {
+                        if view.list == Some(list.id) {
+                            view.list = None;
+                        }
+                        Some(format!("Deleted “{}”", list.name))
+                    }
+                    api::CollectionListChange::Rename { .. } => {
+                        Some(format!("Renamed to “{}”", list.name))
+                    }
+                    api::CollectionListChange::Append { .. } => Some(match &purpose {
+                        Purpose::Add(what) => format!("Added {what} to “{}”", list.name),
+                        Purpose::Edit => format!("Added to “{}”", list.name),
+                    }),
+                    api::CollectionListChange::Remove { .. } => {
+                        Some(format!("Removed from “{}”", list.name))
+                    }
+                    api::CollectionListChange::Move { .. } => message,
+                },
+                PlaylistOutcome::Retried => Some("Saved the list change".into()),
+                PlaylistOutcome::Discarded => Some("Discarded the list change".into()),
+            };
+        }
+        if let Some(error) = &applied.error {
+            if let Some(before) = optimistic
+                && let Some(row) = view.list_mut(before.list.id)
+                && row.list.revision == before.list.revision
+            {
+                *row = before;
+                rebuild = true;
+            }
+            let pending = self
+                .adapter
+                .pending_commands(key)
+                .is_ok_and(|pending| !pending.is_empty());
+            ui.set_list_sync_pending(pending);
+            ui.set_list_sync_error(
+                if pending {
+                    format!(
+                        "The last list change wasn't saved: {error:#}. Try it again, or discard it to keep the list as it is on the server."
+                    )
+                } else {
+                    format!("Couldn't change the list: {error:#}")
+                }
+                .into(),
+            );
+            message = Some(format!("Couldn't change the list: {error:#}"));
+        } else {
+            ui.set_list_sync_error("".into());
+            ui.set_list_sync_pending(false);
+            if matches!(purpose, Purpose::Add(_)) {
+                ui.set_add_to_list_open(false);
+            }
+        }
+        if rebuild {
+            let selected = view
+                .selected_list()
+                .and_then(|list| list.entries.items.get(ui.get_list_entry() as usize))
+                .map(|entry| entry.id);
+            render_list(ui, &view, &self.download_records.borrow());
+            if let Some(entry) = selected {
+                ui.set_list_entry(
+                    view.selected_list()
+                        .and_then(|list| list.entries.items.iter().position(|e| e.id == entry))
+                        .map_or(-1, |i| i as i32),
+                );
+            }
+        } else {
+            render_lists(ui, &view);
+        }
+        if let Some(message) = message {
+            ui.set_status(message.into());
         }
     }
 
@@ -1105,7 +1790,7 @@ impl Controller {
             .view
             .borrow()
             .selected_list()
-            .filter(|_| ui.get_lists_open())
+            .filter(|_| ui.get_lists_open() && self.view.borrow().optimistic.is_none())
             .map(|l| {
                 (
                     l.list.id,
@@ -1177,22 +1862,10 @@ impl Controller {
                         connection_error(&ui, format!("Could not connect to Collector: {e:#}"))
                     }
                 },
-                Event::Mutation(v, key, refresh, result)
+                Event::Mutation(v, key, purpose, applied)
                     if v == current && self.view.borrow().selected == Some(key) =>
                 {
-                    match result {
-                        Err(error) => {
-                            self.view.borrow_mut().operation = None;
-                            ui.set_connection_status(
-                                format!("Could not update playlist. {error}").into(),
-                            );
-                        }
-                        Ok(()) if !refresh => {
-                            self.view.borrow_mut().operation = None;
-                            ui.set_connection_status("Unresolved list changes cleared".into());
-                        }
-                        Ok(()) => {}
-                    }
+                    self.finish_mutation(&ui, key, purpose, applied);
                 }
                 Event::Removed(key, result) => {
                     ui.set_removing_connection(false);
@@ -1323,6 +1996,9 @@ impl Controller {
                         ui.set_list_entry(entry);
                     }
                 }
+                // A change for a source no longer shown: drop its pending edit
+                // so list loading resumes.
+                Event::Mutation(..) => self.view.borrow_mut().optimistic = None,
                 _ => {}
             }
         }
@@ -1456,6 +2132,9 @@ mod tests {
             online: true,
             connection: ConnectionState::Connected,
             operation: None,
+            list_rows: RefCell::default(),
+            optimistic: None,
+            recent: Vec::new(),
         };
         install(&ui, &state, &view, &[]);
         ui.set_home(false);
@@ -1646,6 +2325,9 @@ mod tests {
             online: false,
             connection: ConnectionState::Disconnected,
             operation: None,
+            list_rows: RefCell::default(),
+            optimistic: None,
+            recent: Vec::new(),
         };
         install(&ui, &state, &view, &[]);
         assert_eq!(ui.get_list_rows().row_count(), 1);
@@ -1654,8 +2336,9 @@ mod tests {
         list.list.can_edit = true;
         list.entries.items[0].title = "Updated song".into();
         install(&ui, &state, &view, &[]);
-        assert_eq!(ui.get_list_index(), 1);
-        assert_eq!(ui.get_list_name(), "After");
+        assert_eq!(ui.get_open_list(), 0);
+        assert_eq!(ui.get_open_list_title(), "After");
+        assert_eq!(ui.get_list_cards().row_data(0).unwrap().title, "After");
         assert!(ui.get_list_editable());
         assert_eq!(
             ui.get_list_rows().row_data(0).unwrap().title,
@@ -2037,8 +2720,7 @@ mod tests {
         controller.list_request.cancel();
         let pending = controller.list_request.begin((v, key, list_id)).unwrap();
         ui.set_collector_list_loading(true);
-        ui.set_list_index(2);
-        ui.invoke_list_selected(2);
+        ui.invoke_open_list_at(1);
         ui.set_status("Cached list ready".into());
         controller
             .tx
@@ -2051,8 +2733,8 @@ mod tests {
             ))
             .unwrap();
         controller.poll();
-        assert_eq!(ui.get_list_index(), 2);
-        assert_eq!(ui.get_list_name(), "Cached list");
+        assert_eq!(ui.get_open_list(), 1);
+        assert_eq!(ui.get_open_list_title(), "Cached list");
         assert!(!ui.get_collector_list_loading());
         assert_eq!(ui.get_status(), "Cached list ready");
         assert!(
@@ -2060,13 +2742,8 @@ mod tests {
             "A cached selection must cancel the previous in-flight load"
         );
         controller.view.borrow_mut().online = true;
-        let (target, edit) = playlist_request(
-            &ui,
-            &state.borrow(),
-            &controller.view.borrow(),
-            ListAction::Delete,
-        )
-        .unwrap();
+        let (target, edit) =
+            playlist_request(&controller.view.borrow(), ListAction::Delete, -1, "").unwrap();
         assert_eq!(target, key);
         let PlaylistAction::Update {
             list,

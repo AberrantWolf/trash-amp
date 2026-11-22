@@ -14,7 +14,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub type MainTask = Box<dyn FnOnce() + Send>;
@@ -28,6 +28,7 @@ pub type NativeUpdate = Box<dyn Fn(&NowPlaying)>;
 struct SessionControls {
     controls: MediaControls,
     publisher: MetadataPublisher,
+    sent: Sent,
 }
 
 enum MetadataPublisher {
@@ -114,6 +115,7 @@ impl MediaSession {
                 SessionControls {
                     controls,
                     publisher,
+                    sent: Sent::default(),
                 },
             )
         });
@@ -122,9 +124,12 @@ impl MediaSession {
             Arc::new(move |state| {
                 SESSIONS.with(|sessions| {
                     if let Some(controls) = sessions.borrow_mut().get_mut(&id) {
-                        controls.publisher.publish(&state, || {
-                            update(&mut controls.controls, state.clone());
-                        });
+                        let SessionControls {
+                            controls,
+                            publisher,
+                            sent,
+                        } = controls;
+                        publisher.publish(&state, || update(controls, sent, &state));
                     }
                 });
             }),
@@ -141,16 +146,23 @@ impl Drop for MediaSession {
     fn drop(&mut self) {
         self.playback.observe_now_playing(None);
         SESSIONS.with(|sessions| {
-            if let Some(mut controls) = sessions.borrow_mut().remove(&self.id) {
+            if let Some(SessionControls {
+                mut controls,
+                publisher,
+                mut sent,
+            }) = sessions.borrow_mut().remove(&self.id)
+            {
                 let state = NowPlaying {
                     album: None,
                     track: None,
                     playing: false,
                     seconds: 0.0,
                 };
-                controls.publisher.publish(&state, || {
-                    update(&mut controls.controls, state.clone());
-                });
+                publisher.publish(&state, || update(&mut controls, &mut sent, &state));
+                // Souvlaki's MPRIS backend joins its D-Bus thread, which first
+                // works through every queued update; don't hold up quitting.
+                #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
+                std::thread::spawn(move || drop(controls));
             }
         });
     }
@@ -172,25 +184,66 @@ fn transport(event: MediaControlEvent) -> Option<Transport> {
 fn duration(seconds: f64) -> Duration {
     Duration::try_from_secs_f64(seconds.max(0.0)).unwrap_or_default()
 }
-fn update(controls: &mut MediaControls, state: NowPlaying) {
-    let Some(track) = state.track else {
-        let _ = controls.set_metadata(MediaMetadata::default());
-        let _ = controls.set_playback(MediaPlayback::Stopped);
-        return;
-    };
-    let _ = controls.set_metadata(MediaMetadata {
-        album: state.album.as_ref().map(|album| album.title.as_str()),
-        title: Some(&track.title),
-        artist: Some(&track.artist),
-        duration: Some(duration(track.duration_seconds)),
-        ..Default::default()
+/// What was last sent to the platform media controls.
+#[derive(Default)]
+struct Sent {
+    metadata: Option<Option<MetadataKey>>,
+    playback: Option<(bool, f64, Instant)>,
+}
+type MetadataKey = (Option<String>, String, String, u64);
+
+impl Sent {
+    /// Whether to send new metadata, then whether to send the playback state.
+    /// Clients advance the position themselves while playing, so the playing
+    /// position is only resent after a seek or a pause/resume. Resending it
+    /// every second backs up souvlaki's MPRIS thread (issue #12).
+    fn changes(&self, metadata: &Option<MetadataKey>, playing: bool, seconds: f64) -> (bool, bool) {
+        let new_metadata = self.metadata.as_ref() != Some(metadata);
+        let new_playback = new_metadata
+            || self.playback.is_none_or(|(was_playing, at, when)| {
+                let expected = if was_playing {
+                    at + when.elapsed().as_secs_f64()
+                } else {
+                    at
+                };
+                was_playing != playing || (seconds - expected).abs() > 1.5
+            });
+        (new_metadata, new_playback)
+    }
+}
+
+fn update(controls: &mut MediaControls, sent: &mut Sent, state: &NowPlaying) {
+    let metadata = state.track.as_ref().map(|track| {
+        (
+            state.album.as_ref().map(|album| album.title.clone()),
+            track.title.clone(),
+            track.artist.clone(),
+            track.duration_seconds.to_bits(),
+        )
     });
-    let progress = Some(MediaPosition(duration(state.seconds)));
-    let _ = controls.set_playback(if state.playing {
-        MediaPlayback::Playing { progress }
-    } else {
-        MediaPlayback::Paused { progress }
-    });
+    let (new_metadata, new_playback) = sent.changes(&metadata, state.playing, state.seconds);
+    if new_metadata {
+        let _ = controls.set_metadata(match &state.track {
+            Some(track) => MediaMetadata {
+                album: state.album.as_ref().map(|album| album.title.as_str()),
+                title: Some(&track.title),
+                artist: Some(&track.artist),
+                duration: Some(duration(track.duration_seconds)),
+                ..Default::default()
+            },
+            None => MediaMetadata::default(),
+        });
+        sent.metadata = Some(metadata.clone());
+    }
+    if new_playback {
+        let progress = Some(MediaPosition(duration(state.seconds)));
+        let _ = controls.set_playback(match (&state.track, state.playing) {
+            (None, _) => MediaPlayback::Stopped,
+            (Some(_), true) => MediaPlayback::Playing { progress },
+            (Some(_), false) => MediaPlayback::Paused { progress },
+        });
+        sent.playback = Some((state.playing, state.seconds, Instant::now()));
+    }
 }
 
 #[derive(Default)]
@@ -238,6 +291,37 @@ impl Publisher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn playing_position_is_only_resent_after_a_change_or_seek() {
+        let track = Some((
+            None,
+            "Song".to_owned(),
+            "Artist".to_owned(),
+            200f64.to_bits(),
+        ));
+        let mut sent = Sent::default();
+        assert_eq!(sent.changes(&track, true, 10.0), (true, true));
+        sent.metadata = Some(track.clone());
+        let started = Instant::now() - Duration::from_secs(3);
+        sent.playback = Some((true, 10.0, started));
+        // Normal playback three seconds later: nothing to send.
+        assert_eq!(sent.changes(&track, true, 13.0), (false, false));
+        // A seek, a pause, or a new track is sent.
+        assert_eq!(sent.changes(&track, true, 60.0), (false, true));
+        assert_eq!(sent.changes(&track, false, 13.0), (false, true));
+        let next = Some((
+            None,
+            "Next".to_owned(),
+            "Artist".to_owned(),
+            180f64.to_bits(),
+        ));
+        assert_eq!(sent.changes(&next, true, 0.0), (true, true));
+        // While paused the position should stay put.
+        sent.playback = Some((false, 13.0, started));
+        assert_eq!(sent.changes(&track, false, 13.0), (false, false));
+        assert_eq!(sent.changes(&None, false, 0.0), (true, true));
+    }
+
     #[test]
     fn native_publisher_bypasses_intermediate_backend_writes() {
         let received = Rc::new(RefCell::new(Vec::new()));

@@ -1,0 +1,122 @@
+import { Theme } from "theme.slint";
+import { IconButton } from "icon-button.slint";
+import { BrowserRow } from "browser-item.slint";
+
+// Artwork, or the list icon when no entry has artwork yet.
+export component ListArt inherits Rectangle {
+    in property <image> source;
+    background: self.source.width > 0 ? transparent : Theme.surface;
+    border-radius: 4px;
+    if root.source.width > 0: Image { width: 100%; height: 100%; source: root.source; image-fit: contain; }
+    if root.source.width == 0: Image {
+        width: parent.width * 0.5; height: self.width;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        source: @image-url("icons/lists.svg"); colorize: Theme.muted;
+    }
+}
+
+// One saved list on the Lists page. Opening it shows its entries like an album.
+export component ListCardItem inherits Rectangle {
+    in property <BrowserRow> item;
+    in property <float> text-scale: 1;
+    callback open();
+    height: 68px * root.text-scale;
+    border-radius: 6px;
+    background: touch.has-hover ? Theme.hover : transparent;
+    forward-focus: focus;
+    focus := FocusScope {
+        width: 100%; height: 100%;
+        accessible-role: list-item;
+        accessible-label: root.item.title + ", " + root.item.subtitle + (root.item.status != "" ? ", " + root.item.status : "");
+        accessible-action-default => { root.open(); }
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " { root.open(); return accept; }
+            return reject;
+        }
+        Rectangle { width: 2px; height: 100%; visible: focus.has-focus; background: Theme.accent; }
+        touch := TouchArea { clicked => { focus.focus(); root.open(); } }
+        HorizontalLayout {
+            padding: 6px; padding-left: 8px; spacing: 12px;
+            ListArt { source: root.item.artwork; width: parent.height - 12px; height: self.width; }
+            VerticalLayout {
+                alignment: center; spacing: 2px; horizontal-stretch: 1;
+                Text { text: root.item.title; color: Theme.text; font-weight: 600; font-size: 15px * root.text-scale; overflow: elide; }
+                Text { text: root.item.subtitle; color: Theme.muted; font-size: 12px * root.text-scale; overflow: elide; }
+                if root.item.status != "": Text { text: root.item.status; color: Theme.muted; font-size: 11px * root.text-scale; overflow: elide; }
+            }
+            Text { text: "›"; color: Theme.muted; font-size: 22px * root.text-scale; vertical-alignment: center; }
+        }
+    }
+}
+
+// One entry of an open list: plays like an album track, with in-place editing.
+export component ListEntryItem inherits Rectangle {
+    in property <BrowserRow> item;
+    in property <int> index;
+    in property <float> text-scale: 1;
+    in property <bool> selected;
+    in property <bool> tap-to-play;
+    in property <bool> editable;
+    // In-flight edits disable the actions without hiding them, so rows don't jump.
+    in property <bool> busy;
+    in property <bool> first;
+    in property <bool> last;
+    callback select(); callback play(); callback remove(); callback move-up(); callback move-down();
+    height: (root.item.status != "" ? 62px : 50px) * root.text-scale;
+    background: root.selected ? Theme.selection : (touch.has-hover || number-touch.has-hover ? Theme.hover : transparent);
+    border-radius: 4px;
+    forward-focus: focus;
+    focus := FocusScope {
+        width: 100%; height: 100%;
+        accessible-role: list-item;
+        accessible-label: root.item.title + (root.item.subtitle != "" ? ", " + root.item.subtitle : "") + (root.item.status != "" ? ", " + root.item.status : "");
+        accessible-action-default => { root.play(); }
+        focus-gained(_) => { root.select(); }
+        key-pressed(event) => {
+            if event.text == Key.Return { root.play(); return accept; }
+            if root.editable && !root.busy && (event.text == Key.Delete || event.text == Key.Backspace) { root.remove(); return accept; }
+            if root.editable && !root.busy && event.modifiers.alt && event.text == Key.UpArrow && !root.first { root.move-up(); return accept; }
+            if root.editable && !root.busy && event.modifiers.alt && event.text == Key.DownArrow && !root.last { root.move-down(); return accept; }
+            return reject;
+        }
+        Rectangle { width: 2px; height: 100%; visible: focus.has-focus; background: Theme.accent; }
+        touch := TouchArea {
+            clicked => { focus.focus(); root.select(); if root.tap-to-play { root.play(); } }
+            double-clicked => { if !root.tap-to-play { root.play(); } }
+        }
+        HorizontalLayout {
+            padding-left: 4px; padding-right: 4px; spacing: 10px;
+            Rectangle {
+                width: 30px * root.text-scale;
+                Text { visible: !touch.has-hover && !number-touch.has-hover; text: root.index + 1; color: Theme.muted;
+                    width: 100%; height: 100%; horizontal-alignment: center; vertical-alignment: center; font-size: 12px * root.text-scale; }
+                Image { visible: touch.has-hover || number-touch.has-hover; source: @image-url("icons/play.svg"); colorize: Theme.text;
+                    width: 16px; height: 16px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+                number-touch := TouchArea {
+                    accessible-role: button; accessible-label: "Play " + root.item.title;
+                    accessible-action-default => { root.play(); }
+                    clicked => { root.play(); }
+                }
+            }
+            Rectangle {
+                width: 38px * root.text-scale;
+                ListArt { source: root.item.artwork; width: parent.width; height: self.width; y: (parent.height - self.height) / 2; }
+            }
+            VerticalLayout {
+                alignment: center; spacing: 1px; horizontal-stretch: 1;
+                Text { text: root.item.title; color: Theme.text; font-size: 14px * root.text-scale; overflow: elide; }
+                if root.item.subtitle != "": Text { text: root.item.subtitle; color: Theme.muted; font-size: 12px * root.text-scale; overflow: elide; }
+                if root.item.status != "": Text { text: root.item.status; color: Theme.muted; font-size: 11px * root.text-scale; overflow: elide; }
+            }
+            if root.editable: HorizontalLayout {
+                alignment: center; spacing: 2px;
+                IconButton { quiet: true; button-size: 32px * root.text-scale; label: "Move " + root.item.title + " up";
+                    icon: @image-url("icons/up.svg"); enabled: !root.first && !root.busy; clicked => { root.move-up(); } }
+                IconButton { quiet: true; button-size: 32px * root.text-scale; label: "Move " + root.item.title + " down";
+                    icon: @image-url("icons/down.svg"); enabled: !root.last && !root.busy; clicked => { root.move-down(); } }
+                IconButton { quiet: true; button-size: 32px * root.text-scale; label: "Remove " + root.item.title + " from list";
+                    icon: @image-url("icons/close.svg"); enabled: !root.busy; clicked => { root.remove(); } }
+            }
+        }
+    }
+}
