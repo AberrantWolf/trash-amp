@@ -20,7 +20,7 @@ bs2b = "0.2"
 amp-app = { path = "crates/amp-app" }
 amp-media = { path = "crates/amp-media" }
 amp-ui = { path = "crates/amp-ui" }
-slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-skia", "accessibility", "compat-1-2", "raw-window-handle-06"] }
+slint = { version = "=1.19.0", default-features = false, features = ["std", "backend-winit", "renderer-skia", "accessibility", "compat-1-2", "raw-window-handle-06"] }
 souvlaki = "0.8"
 amp-collector = { path = "crates/amp-collector" }
 amp-core = { path = "crates/amp-core" }

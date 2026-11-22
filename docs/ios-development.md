@@ -165,7 +165,7 @@ build, and Xcode must re-sign the bundle afterward. Without the output dependenc
 an incremental build can reuse the previous signing step and leave an unsigned
 executable inside the app.
 
-Slint 1.18.1 provides `SlintWindowSceneDelegate`. The bundle manifest opts into
+Slint 1.19.0 provides `SlintWindowSceneDelegate`. The bundle manifest opts into
 its UIKit scene lifecycle, as required for SDK 27 builds on iOS 27. Keep the
 manifest and backend version aligned. Simulator and signed device launch are
 verified below.

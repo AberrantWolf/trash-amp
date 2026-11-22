@@ -1,0 +1,17 @@
+Native license texts for skia-bindings 0.157.0, Skia m157.2.
+Dependencies are pinned by that Skia revision's DEPS file.
+
+brotli/LICENSE: https://skia.googlesource.com/external/github.com/google/brotli.git/+/cfa184a997ac19454d5a3ae97f6d600aac2445a6/LICENSE?format=TEXT
+expat/COPYING: https://chromium.googlesource.com/external/github.com/libexpat/libexpat.git/+/a70841d9ffa64ddde29ab824ed6305035ebe4c47/COPYING?format=TEXT
+freetype/LICENSE.TXT: https://chromium.googlesource.com/chromium/src/third_party/freetype2.git/+/37515cf56ba3349656049edbed89ffc6f6466f2d/LICENSE.TXT?format=TEXT
+freetype/docs/FTL.TXT: https://chromium.googlesource.com/chromium/src/third_party/freetype2.git/+/37515cf56ba3349656049edbed89ffc6f6466f2d/docs/FTL.TXT?format=TEXT
+harfbuzz/COPYING: https://chromium.googlesource.com/external/github.com/harfbuzz/harfbuzz.git/+/12ee77ee00514c442bcd28f9aa9d56b708c37382/COPYING?format=TEXT
+icu/LICENSE: https://chromium.googlesource.com/chromium/deps/icu.git/+/2a51536dfb3b448bdf3dae70c782ea2879c90904/LICENSE?format=TEXT
+icu/license.html: https://chromium.googlesource.com/chromium/deps/icu.git/+/2a51536dfb3b448bdf3dae70c782ea2879c90904/license.html?format=TEXT
+libjpeg-turbo/LICENSE.md: https://chromium.googlesource.com/chromium/deps/libjpeg_turbo.git/+/640f254ad0fa03f6b1f29f89b7dd9366f2f6e533/LICENSE.md?format=TEXT
+libjpeg-turbo/README.ijg: https://chromium.googlesource.com/chromium/deps/libjpeg_turbo.git/+/640f254ad0fa03f6b1f29f89b7dd9366f2f6e533/README.ijg?format=TEXT
+libpng/LICENSE: https://skia.googlesource.com/third_party/libpng.git/+/3061454d980de7d53608f594194cfac722721d2a/LICENSE?format=TEXT
+libwebp/COPYING: https://chromium.googlesource.com/webm/libwebp.git/+/68dd1c3040d500f56fe7ffb754b1813fb64b5887/COPYING?format=TEXT
+wuffs/LICENSE: https://skia.googlesource.com/external/github.com/google/wuffs-mirror-release-c.git/+/7411f488fe2e2c205c3d3b3d28638b7356522930/LICENSE?format=TEXT
+zlib/LICENSE: https://chromium.googlesource.com/chromium/src/third_party/zlib/+/456ae730017b9b4bd3371927abc82627fd51feef/LICENSE?format=TEXT
+skia/LICENSE: https://raw.githubusercontent.com/rust-skia/skia/m157.2/LICENSE

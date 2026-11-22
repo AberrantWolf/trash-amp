@@ -23,7 +23,7 @@ export component TrackItem inherits Rectangle {
     accessible-action-default => { root.play(); }
     background: root.selected ? Theme.selection : (row.has-hover || play-touch.has-hover ? Theme.hover : transparent);
     // Desktop right-click menu around the row.
-    menu := ContextMenuArea {
+    ContextMenuArea {
         enabled: root.context-menu;
             Menu {
                 MenuItem { title: "Play"; activated => { root.play(); } }
@@ -40,12 +40,6 @@ export component TrackItem inherits Rectangle {
         row := TouchArea {
             x: 42px; width: parent.width - (root.can-add-to-list ? 134px : 90px);
             clicked => { root.select(); if root.tap-to-play { root.play(); } }
-            // The row takes every button, so it opens the menu on a right press.
-            pointer-event(event) => {
-                if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && root.context-menu {
-                    menu.show({ x: self.x + self.mouse-x, y: self.y + self.mouse-y });
-                }
-            }
             double-clicked => { if !root.tap-to-play { root.play(); } }
         }
         HorizontalLayout {
