@@ -167,8 +167,10 @@ fn activate_music_source(
     ui.set_collector_online(false);
     ui.set_connection_kind(ConnectionKind::Disconnected);
     ui.set_device_library_active(source.provider == "apple-library");
-    ui.set_saved_lists(ModelRc::default());
+    ui.set_list_cards(ModelRc::default());
     ui.set_list_rows(ModelRc::default());
+    ui.set_add_to_list_open(false);
+    ui.set_can_add_to_list(false);
     ui.set_collection_index(0);
     catalog.select_source(source.id.clone());
 }
@@ -2682,6 +2684,7 @@ mod tests {
         ui.set_wide(false);
         ui.set_touch_input(true);
         ui.set_lists_open(true);
+        ui.set_open_list(0);
         ui.set_list_rows(ModelRc::new(VecModel::from(vec![
             BrowserRow {
                 kind: 1,
@@ -2699,7 +2702,7 @@ mod tests {
         let selected = start.clone();
         ui.on_play_list_from(move |index| selected.set(index));
         ui.show().unwrap();
-        let row = ElementHandle::find_by_accessible_label(&ui, "Play from here ")
+        let row = ElementHandle::find_by_accessible_label(&ui, "Play from here")
             .next()
             .unwrap();
         let position = slint::LogicalPosition::new(

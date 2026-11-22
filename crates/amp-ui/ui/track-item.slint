@@ -13,7 +13,8 @@ export component TrackItem inherits Rectangle {
     in property <bool> current;
     in property <bool> tap-to-play;
     in property <bool> keyboard-selected;
-    callback select(); callback play(); callback enqueue();
+    in property <bool> can-add-to-list;
+    callback select(); callback play(); callback enqueue(); callback add-to-list();
     height: TrackMetrics.height(root.track, root.text-scale);
     accessible-role: list-item;
     accessible-label: root.track.title + (root.track.status != "" ? ", " + root.track.status : "") + (root.track.scan-status != "" ? ", " + root.track.scan-status : "") + (root.current ? ", current track" : "");
@@ -21,7 +22,7 @@ export component TrackItem inherits Rectangle {
     background: root.selected ? Theme.selection : (row.has-hover || play-touch.has-hover ? Theme.hover : transparent);
     if root.keyboard-selected: Rectangle { width: 2px; height: 100%; background: Theme.accent; }
     row := TouchArea {
-        x: 42px; width: parent.width - 90px;
+        x: 42px; width: parent.width - (root.can-add-to-list ? 134px : 90px);
         clicked => { root.select(); if root.tap-to-play { root.play(); } }
         double-clicked => { if !root.tap-to-play { root.play(); } }
     }
@@ -44,6 +45,7 @@ export component TrackItem inherits Rectangle {
             if root.track.scan-status != "": Text { text: root.track.scan-status; color: Theme.muted; font-size: 11px * root.text-scale; overflow: elide; }
         }
         Text { text: root.track.duration; color: Theme.muted; width: 44px; vertical-alignment: center; }
+        if root.can-add-to-list: IconButton { label: "Add " + root.track.title + " to a list"; icon: @image-url("icons/list-add.svg"); quiet: true; clicked => { root.add-to-list(); } }
         IconButton { label: "Add " + root.track.title + " to up next"; icon: @image-url("icons/queue.svg"); quiet: true; clicked => { root.enqueue(); } }
     }
 }

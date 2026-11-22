@@ -7,7 +7,9 @@ export component BrowserItem inherits Rectangle {
     in property <bool> selected;
     in property <bool> tap-to-play;
     in property <bool> show-album: true;
-    callback activate(); callback pointer-activate(); callback play(); callback enqueue(); callback artist(string);
+    in property <bool> can-add-to-list;
+    private property <bool> album-add: root.can-add-to-list && root.item.kind == 1;
+    callback activate(); callback pointer-activate(); callback play(); callback enqueue(); callback artist(string); callback add-to-list();
     height: ((root.item.scan-status != "" ? 15px : 0px) + (item.kind == 0 || item.kind == 5 || item.kind == 4 || item.kind == 6 ? 32px : item.kind == 3 ? (root.show-album ? 106px : 86px) : 66px)) * text-scale;
     background: root.selected ? Theme.selection : (touch.has-hover ? Theme.hover : transparent);
     border-radius: 4px;
@@ -34,7 +36,7 @@ export component BrowserItem inherits Rectangle {
             image-fit: contain;
         }
         VerticalLayout {
-            padding-left: root.item.kind == 5 ? 32px : root.item.kind == 1 || root.item.kind == 3 ? 52px : 8px; padding-right: 8px; padding-top: 5px; padding-bottom: 5px; spacing: 2px;
+            padding-left: root.item.kind == 5 ? 32px : root.item.kind == 1 || root.item.kind == 3 ? 52px : 8px; padding-right: root.album-add ? 44px * root.text-scale : 8px; padding-top: 5px; padding-bottom: 5px; spacing: 2px;
             Text { text: root.item.title; color: root.item.kind == 0 || root.item.kind == 6 ? Theme.muted : Theme.text;
                 font-size: (root.item.kind == 5 ? 12px : 14px) * root.text-scale;
                 font-weight: root.item.kind == 5 || root.item.kind == 6 ? 400 : 600;
@@ -61,9 +63,16 @@ export component BrowserItem inherits Rectangle {
                 height: 28px * root.text-scale; spacing: 6px;
                 IconButton { icon: @image-url("icons/play.svg"); button-size: 28px * root.text-scale; label: "Play " + root.item.title; clicked => { root.play(); } }
                 IconButton { icon: @image-url("icons/queue.svg"); button-size: 28px * root.text-scale; label: "Add " + root.item.title + " to up next"; clicked => { root.enqueue(); } }
+                if root.can-add-to-list: IconButton { icon: @image-url("icons/list-add.svg"); button-size: 28px * root.text-scale; label: "Add " + root.item.title + " to a list"; clicked => { root.add-to-list(); } }
                 Rectangle { horizontal-stretch: 1; }
                 Text { text: root.item.duration; width: 34px * root.text-scale; color: Theme.muted; font-size: 11px * root.text-scale; vertical-alignment: center; }
             }
+        }
+        if root.album-add: IconButton {
+            x: parent.width - self.width - 6px; y: (parent.height - self.height) / 2;
+            quiet: true; button-size: 32px * root.text-scale;
+            icon: @image-url("icons/list-add.svg"); label: "Add " + root.item.title + " to a list";
+            clicked => { root.add-to-list(); }
         }
     }
 }
