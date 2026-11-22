@@ -2722,6 +2722,92 @@ mod tests {
         assert_eq!(ui.get_list_entry(), 1);
     }
     #[test]
+    fn desktop_track_rows_take_left_clicks_under_their_context_menu() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::platform::{PointerEventButton, WindowEvent};
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(980., 680.));
+        ui.set_show_library(false);
+        ui.set_can_add_to_list(true);
+        ui.set_recent_lists(ModelRc::new(VecModel::from(vec![SharedString::from(
+            "Road music",
+        )])));
+        ui.set_tracks(ModelRc::new(VecModel::from(
+            ["First", "Second"]
+                .map(|title| super::TrackRow {
+                    title: title.into(),
+                    ..Default::default()
+                })
+                .to_vec(),
+        )));
+        ui.show().unwrap();
+        let row = ElementHandle::find_by_accessible_label(&ui, "Second")
+            .next()
+            .unwrap();
+        let position = slint::LogicalPosition::new(
+            row.absolute_position().x + 120.,
+            row.absolute_position().y + 20.,
+        );
+        let click = |button| {
+            ui.window()
+                .dispatch_event(WindowEvent::PointerPressed { position, button });
+            ui.window()
+                .dispatch_event(WindowEvent::PointerReleased { position, button });
+        };
+        click(PointerEventButton::Left);
+        assert_eq!(ui.get_selected_track(), 1);
+        let menu_item = |label: &str| ElementHandle::find_by_accessible_label(&ui, label).count();
+        assert_eq!(menu_item("Add to up next"), 0);
+        click(PointerEventButton::Right);
+        assert_eq!(
+            menu_item("Add to up next"),
+            1,
+            "right-click opens the row's menu"
+        );
+    }
+    #[test]
+    fn right_clicking_a_library_album_opens_its_menu() {
+        use i_slint_backend_testing::ElementHandle;
+        use slint::platform::{PointerEventButton, WindowEvent};
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = PlayerWindow::new().unwrap();
+        ui.window().set_size(slint::LogicalSize::new(980., 680.));
+        ui.set_can_add_to_list(true);
+        ui.set_browser_rows(ModelRc::new(VecModel::from(vec![BrowserRow {
+            kind: 1,
+            title: "First Album".into(),
+            subtitle: "The Example Band".into(),
+            ..Default::default()
+        }])));
+        ui.show().unwrap();
+        let menu_item = |label: &str| ElementHandle::find_by_accessible_label(&ui, label).count();
+        let album = ElementHandle::find_by_accessible_label(&ui, "First Album The Example Band")
+            .next()
+            .unwrap();
+        let position = slint::LogicalPosition::new(
+            album.absolute_position().x + 80.,
+            album.absolute_position().y + 20.,
+        );
+        let button = PointerEventButton::Left;
+        ui.window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        ui.window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+        assert_eq!(menu_item("Open"), 0);
+        let button = PointerEventButton::Right;
+        ui.window()
+            .dispatch_event(WindowEvent::PointerPressed { position, button });
+        ui.window()
+            .dispatch_event(WindowEvent::PointerReleased { position, button });
+        assert_eq!(menu_item("Open"), 1);
+        assert_eq!(
+            menu_item("Choose a list…"),
+            0,
+            "the list choices stay in a submenu"
+        );
+    }
+    #[test]
     fn keyboard_can_select_reveal_and_play_an_album_track() {
         use i_slint_backend_testing::ElementHandle;
         use slint::platform::{Key, WindowEvent};

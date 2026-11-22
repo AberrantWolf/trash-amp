@@ -21,17 +21,6 @@ pub enum PlaylistChange {
     },
 }
 
-impl PlaylistChange {
-    /// The collection whose lists can accept this change, when it adds music.
-    pub fn target_collection(&self) -> Option<ids::CollectionId> {
-        match self {
-            Self::Edit(_) => None,
-            Self::Append { track, .. } => parse_remote(track).ok().map(|r| r.collection),
-            Self::AppendItem { collection, .. } => Some(*collection),
-        }
-    }
-}
-
 pub enum PlaylistAction {
     Create {
         collection: ids::CollectionId,
@@ -118,7 +107,45 @@ pub fn patch_lists(lists: &mut Vec<api::CollectionListView>, outcome: &PlaylistO
     }
 }
 
+/// The connection and collection a Collector track belongs to.
+pub fn track_collection(track: &Track) -> Option<(ConnectionKey, ids::CollectionId)> {
+    parse_remote(track).ok().map(|r| (r.key, r.collection))
+}
+
+/// Lists most recently created or added to on this device first, then the rest
+/// newest first. List IDs are UUIDv7, so their order is their creation order.
+pub fn by_recent_use<'a>(
+    lists: impl IntoIterator<Item = &'a api::CollectionListView>,
+    recent: &[ids::CollectionListId],
+) -> Vec<&'a api::CollectionListView> {
+    let mut lists = lists.into_iter().collect::<Vec<_>>();
+    lists.sort_by_key(|list| {
+        let used = recent.iter().position(|id| *id == list.list.id);
+        (used.is_none(), used, std::cmp::Reverse(list.list.id))
+    });
+    lists
+}
+
+/// Remembered per connection on this device only; never sent to the server.
+const RECENT_LISTS: usize = 20;
+
 impl Adapter {
+    pub fn recent_lists(&self, key: ConnectionKey) -> Vec<ids::CollectionListId> {
+        self.get("recent_lists", &connection_id(key))
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    fn note_recent_list(&self, key: ConnectionKey, list: ids::CollectionListId) {
+        let mut recent = self.recent_lists(key);
+        recent.retain(|id| *id != list);
+        recent.insert(0, list);
+        recent.truncate(RECENT_LISTS);
+        // Ordering is a convenience; failing to save it must not fail the edit.
+        let _ = self.put("recent_lists", &connection_id(key), &recent);
+    }
+
     pub async fn apply_playlist_action(
         &self,
         key: ConnectionKey,
@@ -218,6 +245,14 @@ impl Adapter {
             patch_lists(&mut snapshot.lists, &outcome);
             Ok(())
         });
+        match &outcome {
+            PlaylistOutcome::Created(list)
+            | PlaylistOutcome::Updated {
+                list,
+                change: api::CollectionListChange::Append { .. },
+            } => self.note_recent_list(key, list.id),
+            _ => {}
+        }
         Ok(outcome)
     }
 }
@@ -331,6 +366,25 @@ mod tests {
         ));
         assert!(!patch_lists(&mut lists, &PlaylistOutcome::Created(summary)));
         assert_eq!(lists.len(), 1);
+    }
+
+    #[test]
+    fn recently_used_lists_come_first_then_newest_created() {
+        let older = list(1, &[]);
+        let newer = list(1, &[]);
+        let used = list(1, &[]);
+        let names = |lists: Vec<&api::CollectionListView>| {
+            lists.iter().map(|l| l.list.id).collect::<Vec<_>>()
+        };
+        let all = [&older, &newer, &used];
+        assert_eq!(
+            names(by_recent_use(all, &[])),
+            [used.list.id, newer.list.id, older.list.id]
+        );
+        assert_eq!(
+            names(by_recent_use(all, &[older.list.id])),
+            [older.list.id, used.list.id, newer.list.id]
+        );
     }
 
     #[test]

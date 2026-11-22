@@ -18,7 +18,7 @@ export struct AlbumMatchRow { artwork: image, title:string, artist:string, detai
 export struct DownloadRow { id: string, title: string, detail: string, pending: bool, complete: bool }
 export enum ListAction { create, rename, delete, remove-entry, move-up, move-down, retry, discard }
 // Where an "Add to list" request came from.
-export enum AddSource { album, track, browser, detail }
+export enum AddSource { album, track, browser, detail, queue }
 enum HomeAction { browse, open-folder, refresh-folder, refresh-device, refresh-server, add-server }
 export component PlayerWindow inherits Window {
     in-out property <string> error-title: "Connection failed";
@@ -100,6 +100,11 @@ export component PlayerWindow inherits Window {
     private property <string> add-to-list-name;
     changed add-to-list-open => { root.add-to-list-name = ""; root.add-to-list-disc-only = false; }
     callback add-to-list(AddSource, int);
+    // Lists most recently created or added to on this device, for right-click menus.
+    in property <[string]> recent-lists;
+    // Add a row's music straight to recent-lists[list].
+    callback add-to-recent-list(AddSource, int, int);
+    private property <bool> context-menus: !root.touch-input;
     callback add-to-list-choose(int);
     callback add-to-list-create(string);
     in-out property <string> download-budget: "10";
@@ -762,7 +767,9 @@ export component PlayerWindow inherits Window {
                             for item[i] in root.browser-rows: BrowserItem {
                                 item: item; text-scale: root.text-scale; selected: root.browser-selected == i; tap-to-play: root.tap-to-play;
                                 can-add-to-list: root.can-add-to-list;
+                                context-menu: root.context-menus; recent-lists: root.recent-lists;
                                 add-to-list => { root.add-to-list(AddSource.browser, i); }
+                                add-to-recent(list) => { root.add-to-recent-list(AddSource.browser, i, list); }
                                 activate => { root.browse-action(false, i, 0); keyboard.focus(); }
                                 pointer-activate => { root.browse-action(false, i, 3); keyboard.focus(); }
                                 play => { root.browse-action(false, i, 1); }
@@ -837,7 +844,9 @@ export component PlayerWindow inherits Window {
                         for item[i] in root.artist-rows: BrowserItem {
                             item: item; text-scale: root.text-scale; show-album: false; tap-to-play: root.tap-to-play;
                             can-add-to-list: root.can-add-to-list;
+                            context-menu: root.context-menus; recent-lists: root.recent-lists;
                             add-to-list => { root.add-to-list(AddSource.detail, i); }
+                            add-to-recent(list) => { root.add-to-recent-list(AddSource.detail, i, list); }
                             activate => { root.browse-action(true, i, 0); keyboard.focus(); }
                             pointer-activate => { root.browse-action(true, i, 3); keyboard.focus(); }
                             play => { root.browse-action(true, i, 1); }
@@ -911,7 +920,9 @@ export component PlayerWindow inherits Window {
                                 selected: i == root.selected-track; current: i == root.active-track;
                                 keyboard-selected: track-focus.has-focus && self.selected;
                                 can-add-to-list: root.can-add-to-list;
+                                context-menu: root.context-menus; recent-lists: root.recent-lists;
                                 add-to-list => { root.add-to-list(AddSource.track, i); }
+                                add-to-recent(list) => { root.add-to-recent-list(AddSource.track, i, list); }
                                 select => { root.selected-track = i; root.album-track-selected(); track-focus.focus(); }
                                 play => { root.selected-track = i; root.play-track(i); track-focus.focus(); }
                                 enqueue => { root.enqueue(i); }
@@ -919,7 +930,12 @@ export component PlayerWindow inherits Window {
                         }
                     }
                     if root.show-queue && !root.artist-view: VerticalLayout {
-                        IconButton { label: "Clear up next"; icon: @image-url("icons/trash.svg"); clicked => { root.clear-queue(); } }
+                        HorizontalLayout {
+                            spacing: 6px; alignment: start;
+                            IconButton { label: "Clear up next"; icon: @image-url("icons/trash.svg"); clicked => { root.clear-queue(); } }
+                            if root.can-add-to-list: Button { text: "Save as list"; accessible-label: "Save up next as a list";
+                                enabled: root.has-current-track || root.queued.length > 0; clicked => { root.add-to-list(AddSource.queue, -1); } }
+                        }
                         ListView {
                             min-height: root.short ? 48px * root.text-scale : 0px; preferred-height: 0px; vertical-stretch: 1;
                             for title in root.queued: Text { text: title; color: Theme.text; height: 34px; overflow: elide; }

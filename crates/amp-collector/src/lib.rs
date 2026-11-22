@@ -5,7 +5,8 @@ mod presentation;
 mod source;
 pub use playback::PlaybackFormat;
 pub use playlists::{
-    AppendScope, PlaylistAction, PlaylistChange, PlaylistOutcome, apply_list_change, patch_lists,
+    AppendScope, PlaylistAction, PlaylistChange, PlaylistOutcome, apply_list_change, by_recent_use,
+    patch_lists, track_collection,
 };
 pub use presentation::{CatalogView, PlaylistTracks, SourceView};
 pub use source::source_id;
