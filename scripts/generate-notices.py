@@ -57,7 +57,7 @@ def main():
     if upstream_slint.read_bytes() != slint_text:
         raise SystemExit("Slint license changed; update the bundled license before packaging.")
     skia = next(p for p in metadata["packages"] if p["name"] == "skia-bindings")
-    if skia["version"] != "0.153.3" or (skia["metadata"] or {}).get("skia") != "m153-0.101.2":
+    if skia["version"] != "0.157.0" or (skia["metadata"] or {}).get("skia") != "m157.2":
         raise SystemExit("Skia version changed; update assets/native-licenses before packaging.")
 
     with tempfile.TemporaryDirectory(prefix="trash-amp-notices-") as work:

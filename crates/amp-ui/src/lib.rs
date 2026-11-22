@@ -1468,6 +1468,7 @@ mod tests {
         assert!(!ui.get_scan_details_open());
     }
     slint::slint! {
+        #[edition = "1.19"]
         import { TransportSeek } from "ui/transport-seek.slint";
         export component SeekHarness inherits Window {
             in-out property <float> position <=> seek.position;
@@ -1477,6 +1478,7 @@ mod tests {
         }
     }
     slint::slint! {
+        #[edition = "1.19"]
         import { TrackItem } from "ui/track-item.slint";
         export component TrackHarness inherits Window {
             in property <bool> tap-to-play;
@@ -1487,6 +1489,7 @@ mod tests {
         }
     }
     slint::slint! {
+        #[edition = "1.19"]
         import { ConnectionIndicator, ConnectionKind } from "ui/connection-indicator.slint";
         export component ConnectionHarness inherits Window {
             in property <ConnectionKind> kind;
@@ -1496,6 +1499,7 @@ mod tests {
         }
     }
     slint::slint! {
+        #[edition = "1.19"]
         import { Theme } from "ui/theme.slint";
         import { Palette } from "std-widgets.slint";
         export component AppearanceHarness inherits Window {

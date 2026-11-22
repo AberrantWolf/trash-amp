@@ -18,7 +18,7 @@ export component BrowserItem inherits Rectangle {
     forward-focus: focus;
     // Desktop right-click menu for albums and tracks, around the row so the
     // Menu key opens it too while the row has focus.
-    menu := ContextMenuArea {
+    ContextMenuArea {
         enabled: root.context-menu && (root.item.kind == 1 || root.item.kind == 3);
             Menu {
                 if root.item.kind == 1: MenuItem { title: "Open"; activated => { root.activate(); } }
@@ -46,13 +46,6 @@ export component BrowserItem inherits Rectangle {
             touch := TouchArea {
                 enabled: root.item.kind != 0 && root.item.kind != 6;
                 clicked => { focus.focus(); if root.item.kind == 3 { root.pointer-activate(); } else { root.activate(); } }
-                // The row takes every button, so it opens the menu on a right press.
-                pointer-event(event) => {
-                    if event.button == PointerEventButton.right && event.kind == PointerEventKind.down && menu.enabled {
-                        focus.focus();
-                        menu.show({ x: self.mouse-x, y: self.mouse-y });
-                    }
-                }
                 double-clicked => { if root.item.kind == 3 && !root.tap-to-play { root.play(); } }
             }
             if root.item.kind == 1 || root.item.kind == 3 || root.item.kind == 5: Image {

@@ -11,6 +11,7 @@ mod probe {
     use winit::event_loop::{ActiveEventLoop, ControlFlow};
 
     slint::slint! {
+        #[edition = "1.19"]
         export component ProbeWindow inherits Window {
             callback external-wake();
             title: "iOS timer regression probe";
